@@ -102,7 +102,7 @@
           activeTimerId = window.setTimeout(showModal, parseDelay(form));
         }
 
-        function cleanup() {
+        function restoreState() {
           resetTimer();
           if (pendingSubmitter instanceof HTMLButtonElement || pendingSubmitter instanceof HTMLInputElement) {
             pendingSubmitter.disabled = false;
@@ -118,8 +118,8 @@
           form.addEventListener("submit", handleSubmit);
         }
 
-        window.addEventListener("pagehide", cleanup);
-        window.addEventListener("beforeunload", resetTimer);
+        // Reset UI state when this page is shown again (initial load or bfcache restore).
+        window.addEventListener("pageshow", restoreState);
       })();
     </script>
   </body>
