@@ -502,14 +502,14 @@ def build_config_candidates(
     registry_metadata: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     states_by_entity_id: dict[str, dict[str, Any]] = {}
-    for state in states:
-        entity_id = as_clean_string(state.get("entity_id"))
+    for state_item in states:
+        entity_id = as_clean_string(state_item.get("entity_id"))
         if not entity_id:
             continue
         kind = config_kind_from_entity_id(entity_id)
         if kind is None:
             continue
-        states_by_entity_id[entity_id] = state
+        states_by_entity_id[entity_id] = state_item
 
     registry_entities_by_id: dict[str, dict[str, Any]] = {}
     for entry in registry_metadata.get("entities", []):
@@ -527,11 +527,11 @@ def build_config_candidates(
         if kind is None:
             continue
 
-        state = states_by_entity_id.get(entity_id)
+        state_entry = states_by_entity_id.get(entity_id)
         registry_entry = registry_entities_by_id.get(entity_id)
         state_name: str | None = None
-        if isinstance(state, dict):
-            raw_attributes = state.get("attributes")
+        if isinstance(state_entry, dict):
+            raw_attributes = state_entry.get("attributes")
             if isinstance(raw_attributes, dict):
                 state_name = as_clean_string(raw_attributes.get("friendly_name"))
 
@@ -545,10 +545,10 @@ def build_config_candidates(
             {
                 "kind": kind,
                 "entity_id": entity_id,
-                "state": state,
+                "state": state_entry,
                 "registry_entry": registry_entry,
                 "name": state_name or registry_name,
-                "config_key": derive_config_key(kind, entity_id, state, registry_entry),
+                "config_key": derive_config_key(kind, entity_id, state_entry, registry_entry),
             }
         )
 
@@ -1613,11 +1613,13 @@ def create_app() -> FastAPI:
         config_runs: list[ConfigSyncRun] = []
         active_config_sync_run: ConfigSyncRun | None = None
         if active_profile is not None:
-            config_runs = session.exec(
-                select(ConfigSyncRun)
-                .where(ConfigSyncRun.profile_id == active_profile.id)
-                .order_by(ConfigSyncRun.pulled_at.desc(), ConfigSyncRun.id.desc())
-            ).all()
+            config_runs = list(
+                session.exec(
+                    select(ConfigSyncRun)
+                    .where(ConfigSyncRun.profile_id == active_profile.id)
+                    .order_by(ConfigSyncRun.pulled_at.desc(), ConfigSyncRun.id.desc())
+                ).all()
+            )
             if config_sync_run_id is not None:
                 candidate = session.get(ConfigSyncRun, config_sync_run_id)
                 if candidate is not None and candidate.profile_id == active_profile.id:
