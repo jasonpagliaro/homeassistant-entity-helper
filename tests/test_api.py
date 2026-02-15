@@ -57,6 +57,72 @@ def update_profile(client: TestClient, profile_id: int, csrf_token: str) -> None
     assert update_response.status_code == 303
 
 
+def assert_sync_modal_markup(html: str) -> None:
+    assert 'id="sync-modal"' in html
+    assert 'id="sync-modal-label"' in html
+    assert "const DEFAULT_DELAY_MS = 300;" in html
+
+
+def assert_form_has_sync_modal_attrs(html: str, action_pattern: str, label: str) -> None:
+    match = re.search(rf'<form[^>]*action="{action_pattern}"[^>]*>', html)
+    assert match is not None
+    form_tag = match.group(0)
+    assert 'data-sync-modal="true"' in form_tag
+    assert f'data-sync-modal-label="{label}"' in form_tag
+
+
+def assert_form_lacks_sync_modal_attrs(html: str, action_pattern: str) -> None:
+    match = re.search(rf'<form[^>]*action="{action_pattern}"[^>]*>', html)
+    assert match is not None
+    form_tag = match.group(0)
+    assert 'data-sync-modal="' not in form_tag
+    assert 'data-sync-modal-label="' not in form_tag
+
+
+def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    settings_html = settings_response.text
+    assert_sync_modal_markup(settings_html)
+    assert_form_has_sync_modal_attrs(
+        settings_html,
+        r"/profiles/\d+/sync",
+        "Syncing entities...",
+    )
+    assert_form_has_sync_modal_attrs(
+        settings_html,
+        r"/profiles/\d+/sync-config",
+        "Syncing config items...",
+    )
+    assert_form_lacks_sync_modal_attrs(settings_html, r"/profiles/\d+/test")
+    assert_form_lacks_sync_modal_attrs(settings_html, r"/profiles/\d+/delete")
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    entities_html = entities_response.text
+    assert_sync_modal_markup(entities_html)
+    assert_form_has_sync_modal_attrs(
+        entities_html,
+        r"/profiles/\d+/sync",
+        "Syncing entities...",
+    )
+    assert_form_has_sync_modal_attrs(
+        entities_html,
+        r"/profiles/\d+/sync-config",
+        "Syncing config items...",
+    )
+
+    config_items_response = client.get("/config-items")
+    assert config_items_response.status_code == 200
+    config_items_html = config_items_response.text
+    assert_sync_modal_markup(config_items_html)
+    assert_form_has_sync_modal_attrs(
+        config_items_html,
+        r"/profiles/\d+/sync-config",
+        "Syncing config items...",
+    )
+
+
 def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     response = client.get("/settings")
     assert response.status_code == 200

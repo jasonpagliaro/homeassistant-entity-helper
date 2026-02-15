@@ -25,5 +25,102 @@
       {% endif %}
       {% block content %}{% endblock %}
     </main>
+
+    <div id="sync-modal" class="sync-modal" aria-hidden="true" hidden>
+      <div class="sync-modal__panel" role="status" aria-live="polite" aria-atomic="true">
+        <div class="sync-modal__spinner" aria-hidden="true"></div>
+        <p id="sync-modal-label" class="sync-modal__label">Syncing...</p>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        const DEFAULT_DELAY_MS = 300;
+        const modal = document.getElementById("sync-modal");
+        const labelEl = document.getElementById("sync-modal-label");
+        if (!modal || !labelEl) {
+          return;
+        }
+
+        let activeTimerId = null;
+        let isSubmitting = false;
+        let pendingSubmitter = null;
+        let pendingLabel = "Syncing...";
+
+        function parseDelay(form) {
+          const raw = form.dataset.syncModalDelayMs;
+          if (!raw) {
+            return DEFAULT_DELAY_MS;
+          }
+          const parsed = Number(raw);
+          return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_DELAY_MS;
+        }
+
+        function resetTimer() {
+          if (activeTimerId !== null) {
+            window.clearTimeout(activeTimerId);
+            activeTimerId = null;
+          }
+        }
+
+        function showModal() {
+          labelEl.textContent = pendingLabel;
+          modal.hidden = false;
+          modal.setAttribute("aria-hidden", "false");
+        }
+
+        function getSubmitter(event, form) {
+          if (event.submitter) {
+            return event.submitter;
+          }
+          const active = document.activeElement;
+          if (active instanceof HTMLElement && form.contains(active)) {
+            return active;
+          }
+          return null;
+        }
+
+        function handleSubmit(event) {
+          if (isSubmitting) {
+            return;
+          }
+
+          const form = event.currentTarget;
+          if (!(form instanceof HTMLFormElement)) {
+            return;
+          }
+
+          isSubmitting = true;
+          pendingSubmitter = getSubmitter(event, form);
+          pendingLabel = form.dataset.syncModalLabel || "Syncing...";
+
+          if (pendingSubmitter instanceof HTMLButtonElement || pendingSubmitter instanceof HTMLInputElement) {
+            pendingSubmitter.disabled = true;
+          }
+
+          resetTimer();
+          activeTimerId = window.setTimeout(showModal, parseDelay(form));
+        }
+
+        function cleanup() {
+          resetTimer();
+          if (pendingSubmitter instanceof HTMLButtonElement || pendingSubmitter instanceof HTMLInputElement) {
+            pendingSubmitter.disabled = false;
+          }
+          pendingSubmitter = null;
+          isSubmitting = false;
+          modal.hidden = true;
+          modal.setAttribute("aria-hidden", "true");
+        }
+
+        const syncForms = document.querySelectorAll('form[data-sync-modal="true"]');
+        for (const form of syncForms) {
+          form.addEventListener("submit", handleSubmit);
+        }
+
+        window.addEventListener("pagehide", cleanup);
+        window.addEventListener("beforeunload", resetTimer);
+      })();
+    </script>
   </body>
 </html>

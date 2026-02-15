@@ -70,12 +70,22 @@
 
     {% if active_profile %}
     <div class="row gap-sm wrap">
-      <form method="post" action="/profiles/{{ active_profile.id }}/sync">
+      <form
+        method="post"
+        action="/profiles/{{ active_profile.id }}/sync"
+        data-sync-modal="true"
+        data-sync-modal-label="Syncing entities..."
+      >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="{{ next_url }}" />
         <button type="submit">Sync Now</button>
       </form>
-      <form method="post" action="/profiles/{{ active_profile.id }}/sync-config">
+      <form
+        method="post"
+        action="/profiles/{{ active_profile.id }}/sync-config"
+        data-sync-modal="true"
+        data-sync-modal-label="Syncing config items..."
+      >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="/config-items?{{ build_query(profile_id=active_profile.id) }}" />
         <button type="submit">Sync Config Items</button>

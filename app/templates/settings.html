@@ -77,12 +77,22 @@
             <input type="hidden" name="next_url" value="/settings" />
             <button type="submit">Test Connection</button>
           </form>
-          <form method="post" action="/profiles/{{ profile.id }}/sync">
+          <form
+            method="post"
+            action="/profiles/{{ profile.id }}/sync"
+            data-sync-modal="true"
+            data-sync-modal-label="Syncing entities..."
+          >
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <input type="hidden" name="next_url" value="/entities?{{ build_query(profile_id=profile.id) }}" />
             <button type="submit">Sync Now</button>
           </form>
-          <form method="post" action="/profiles/{{ profile.id }}/sync-config">
+          <form
+            method="post"
+            action="/profiles/{{ profile.id }}/sync-config"
+            data-sync-modal="true"
+            data-sync-modal-label="Syncing config items..."
+          >
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <input type="hidden" name="next_url" value="/config-items?{{ build_query(profile_id=profile.id) }}" />
             <button type="submit">Sync Config Items</button>
