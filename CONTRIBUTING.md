@@ -9,11 +9,21 @@
 - Host helper: `lxc/create-lxc-container.sh`
 - In-container bootstrap: `lxc/setup-in-container.sh`
 - Service unit: `lxc/ha-entity-vault.service`
+- Host updater: `lxc/update-host.sh`
+- In-container updater helper: `lxc/update-in-container.sh`
+- Update timer/service templates:
+  - `lxc/ha-entity-vault-update-check.service`
+  - `lxc/ha-entity-vault-update-check.timer`
 
 ## Quality checks
 - Lint: `make lint`
 - Typecheck: `make typecheck`
 - Tests: `make test`
+- Shell syntax:
+  - `bash -n lxc/create-lxc-container.sh`
+  - `bash -n lxc/setup-in-container.sh`
+  - `bash -n lxc/update-host.sh`
+  - `bash -n lxc/update-in-container.sh`
 
 ## Pull requests
 1. Keep PRs focused and include tests for behavior changes.

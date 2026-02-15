@@ -72,6 +72,80 @@ LXC containers require a Linux kernel. On macOS, use a Linux host/VM and run the
 - Service unit: `/etc/systemd/system/ha-entity-vault.service`
 - Service env file: `/etc/default/ha-entity-vault`
 
+## LXC Update Workflow
+The project includes a host-orchestrated app updater with three automation levels:
+
+- `check_only`: only check for updates and log findings.
+- `detect_approve` (default): detect updates, write pending metadata, wait for explicit manual apply.
+- `auto_apply`: apply updates automatically unless blocked by safety gates.
+
+Update scripts:
+- Host orchestrator: `lxc/update-host.sh`
+- In-container helper: `lxc/update-in-container.sh`
+- Update config example: `lxc/ha-entity-vault-update.env.example`
+- Timer/service templates:
+  - `lxc/ha-entity-vault-update-check.service`
+  - `lxc/ha-entity-vault-update-check.timer`
+
+### Command interface
+From repo root on the host:
+
+```bash
+./lxc/update-host.sh check   # exit 10 when updates are available
+./lxc/update-host.sh status  # show mode + local/remote SHA + pending state
+./lxc/update-host.sh apply   # apply update with smoke checks + rollback
+./lxc/update-host.sh run     # execute configured mode (for timers)
+```
+
+### Safety behavior
+- `apply` requires a clean git worktree. If dirty, update is skipped.
+- High-risk diffs are flagged when changes include:
+  - `requirements.txt`
+  - `migrations/`
+  - `lxc/ha-entity-vault.service`
+- In `detect_approve`, updates are written to `${HEV_UPDATE_STATE_DIR}/pending-update.json`.
+- In `auto_apply`, high-risk updates are blocked unless `HEV_UPDATE_ALLOW_HIGH_RISK_AUTO=true`.
+- Before applying, the updater creates a SQLite backup and prunes older backups by retention count.
+- After apply, the updater runs smoke checks:
+  - `systemctl is-active ha-entity-vault.service`
+  - `GET /healthz` payload includes `"status":"ok"`
+  - `/entities` returns `200`
+  - `/` returns `303`
+  - service remains active after 10s stabilization
+- If smoke checks fail after apply, updater auto-rolls back code/dependencies + DB backup and re-checks health.
+
+### Install timer automation (host systemd)
+1. Copy/update configuration:
+```bash
+sudo cp lxc/ha-entity-vault-update.env.example /etc/default/ha-entity-vault-updater
+sudo chmod 600 /etc/default/ha-entity-vault-updater
+```
+2. Edit `/etc/default/ha-entity-vault-updater` and set at least:
+   - `HEV_UPDATE_REPO_PATH`
+   - `HEV_UPDATE_MODE`
+3. Install unit files:
+```bash
+sudo cp lxc/ha-entity-vault-update-check.service /etc/systemd/system/
+sudo cp lxc/ha-entity-vault-update-check.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ha-entity-vault-update-check.timer
+```
+4. Run once immediately (optional):
+```bash
+sudo systemctl start ha-entity-vault-update-check.service
+```
+
+Default schedule in timer template: `Sun 03:00` (local host timezone), with `Persistent=true`.
+
+### Manual approval/apply path
+For `detect_approve`, approve by running:
+
+```bash
+sudo /Users/jason/Projects/homeassistant-entity-helper/lxc/update-host.sh apply
+```
+
+All updater output is written to stdout/stderr for journald capture.
+
 ## Manual LXC Setup (if not using helper script)
 1. Initialize LXD and launch container:
 ```bash
@@ -169,7 +243,7 @@ Includes:
 - `app/static/` - CSS.
 - `migrations/` - Alembic env + versions.
 - `tests/` - unit and API tests.
-- `lxc/` - LXC deployment scripts and systemd service.
+- `lxc/` - LXC deployment/update scripts and systemd units.
 
 ## Roadmap / TODO
 

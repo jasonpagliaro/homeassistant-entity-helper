@@ -57,5 +57,12 @@ jobs:
         run: |
           bash -n lxc/create-lxc-container.sh
           bash -n lxc/setup-in-container.sh
+          bash -n lxc/update-host.sh
+          bash -n lxc/update-in-container.sh
       - name: Verify systemd unit exists
         run: test -f lxc/ha-entity-vault.service
+      - name: Verify update assets exist
+        run: |
+          test -f lxc/ha-entity-vault-update.env.example
+          test -f lxc/ha-entity-vault-update-check.service
+          test -f lxc/ha-entity-vault-update-check.timer
