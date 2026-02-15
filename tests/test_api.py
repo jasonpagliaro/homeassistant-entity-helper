@@ -84,8 +84,46 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
             },
         ]
 
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [
+                {
+                    "area_id": "kitchen_area",
+                    "name": "Kitchen",
+                    "floor_id": "first_floor",
+                }
+            ],
+            "devices": [
+                {
+                    "id": "device_kitchen_light",
+                    "name_by_user": "Kitchen Ceiling",
+                    "manufacturer": "Acme",
+                    "model": "L-100",
+                    "area_id": "kitchen_area",
+                    "labels": ["label_room_kitchen"],
+                }
+            ],
+            "entities": [
+                {
+                    "entity_id": "light.kitchen",
+                    "device_id": "device_kitchen_light",
+                    "labels": ["label_lighting"],
+                    "platform": "hue",
+                }
+            ],
+            "labels": [
+                {"label_id": "label_lighting", "name": "Lighting"},
+                {"label_id": "label_room_kitchen", "name": "Room - Kitchen"},
+            ],
+            "floors": [{"floor_id": "first_floor", "name": "First Floor"}],
+        }
+
     monkeypatch.setattr("app.main.HAClient.test_connection", fake_test_connection)
     monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_registry_metadata",
+        fake_fetch_registry_metadata,
+    )
 
     test_connection_response = client.post(
         f"/profiles/{profile_id}/test",
@@ -111,10 +149,14 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert entities_response.status_code == 200
     assert "light.kitchen" in entities_response.text
     assert "sensor.outdoor_temp" in entities_response.text
+    assert "Kitchen" in entities_response.text
+    assert "Kitchen (First Floor)" in entities_response.text
 
     detail_response = client.get(f"/entities/light.kitchen?profile_id={profile_id}")
     assert detail_response.status_code == 200
     assert "Kitchen Light" in detail_response.text
+    assert "Kitchen Ceiling" in detail_response.text
+    assert "Lighting" in detail_response.text
 
     export_json_response = client.get(f"/export/json?profile_id={profile_id}&q=light")
     assert export_json_response.status_code == 200
@@ -122,8 +164,15 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert len(exported) == 1
     assert exported[0]["entity_id"] == "light.kitchen"
     assert "pulled_at" in exported[0]
+    assert exported[0]["area_name"] == "Kitchen"
+    assert exported[0]["location_name"] == "Kitchen (First Floor)"
+    assert exported[0]["device_name"] == "Kitchen Ceiling"
+    assert exported[0]["labels"]["names"] == ["Lighting", "Room - Kitchen"]
+    assert exported[0]["metadata"]["entity_platform"] == "hue"
 
     export_csv_response = client.get(f"/export/csv?profile_id={profile_id}&domain=light")
     assert export_csv_response.status_code == 200
     assert "text/csv" in export_csv_response.headers["content-type"]
     assert "light.kitchen" in export_csv_response.text
+    assert "area_name" in export_csv_response.text
+    assert "labels_json" in export_csv_response.text

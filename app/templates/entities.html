@@ -19,7 +19,7 @@
 
     <label>
       Search
-      <input type="text" name="q" value="{{ q }}" placeholder="entity_id contains..." />
+      <input type="text" name="q" value="{{ q }}" placeholder="entity/name/area/location..." />
     </label>
 
     <label>
@@ -91,8 +91,11 @@
         <thead>
           <tr>
             <th>Entity ID</th>
+            <th>Name</th>
             <th>Domain</th>
             <th>State</th>
+            <th>Area</th>
+            <th>Location</th>
             <th>Last Updated</th>
             <th>Pulled At</th>
             <th>Actions</th>
@@ -102,8 +105,11 @@
           {% for entity in entities %}
           <tr>
             <td><code>{{ entity.entity_id }}</code></td>
+            <td>{{ entity.friendly_name or '' }}</td>
             <td>{{ entity.domain }}</td>
             <td>{{ entity.state }}</td>
+            <td>{{ entity.area_name or '' }}</td>
+            <td>{{ entity.location_name or '' }}</td>
             <td>{{ entity.last_updated or '' }}</td>
             <td>{{ entity.pulled_at }}</td>
             <td>

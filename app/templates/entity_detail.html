@@ -7,12 +7,26 @@
   <div class="detail-grid">
     <div><strong>Profile</strong></div><div>{{ profile.name }}</div>
     <div><strong>Entity ID</strong></div><div><code>{{ snapshot.entity_id }}</code></div>
+    <div><strong>Friendly Name</strong></div><div>{{ snapshot.friendly_name or '' }}</div>
     <div><strong>Domain</strong></div><div>{{ snapshot.domain }}</div>
     <div><strong>State</strong></div><div>{{ snapshot.state }}</div>
+    <div><strong>Device ID</strong></div><div>{{ snapshot.device_id or '' }}</div>
+    <div><strong>Device Name</strong></div><div>{{ snapshot.device_name or '' }}</div>
+    <div><strong>Area ID</strong></div><div>{{ snapshot.area_id or '' }}</div>
+    <div><strong>Area Name</strong></div><div>{{ snapshot.area_name or '' }}</div>
+    <div><strong>Floor ID</strong></div><div>{{ snapshot.floor_id or '' }}</div>
+    <div><strong>Floor Name</strong></div><div>{{ snapshot.floor_name or '' }}</div>
+    <div><strong>Location</strong></div><div>{{ snapshot.location_name or '' }}</div>
     <div><strong>Last Changed</strong></div><div>{{ snapshot.last_changed or '' }}</div>
     <div><strong>Last Updated</strong></div><div>{{ snapshot.last_updated or '' }}</div>
     <div><strong>Pulled At</strong></div><div>{{ snapshot.pulled_at }}</div>
   </div>
+
+  <h3>Labels</h3>
+  <pre>{{ labels_pretty }}</pre>
+
+  <h3>Metadata</h3>
+  <pre>{{ metadata_pretty }}</pre>
 
   <h3>Attributes</h3>
   <pre>{{ attributes_pretty }}</pre>

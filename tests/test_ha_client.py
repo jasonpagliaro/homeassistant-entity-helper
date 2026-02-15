@@ -66,3 +66,8 @@ async def test_auth_error_is_actionable() -> None:
 
     assert exc_info.value.status_code == 401
     assert "Authentication failed" in str(exc_info.value)
+
+
+def test_websocket_url_normalization() -> None:
+    client = HAClient(base_url="https://ha.local:8123/root/", token="abc123")
+    assert client._websocket_url() == "wss://ha.local:8123/root/api/websocket"

@@ -17,11 +17,17 @@ HA Entity Vault is a self-hosted single-container app for pulling Home Assistant
   - Request timeout seconds
 - Test connection (`GET /api/config`) with actionable status.
 - Sync now (`GET /api/states`) and store entity snapshots.
+- Registry enrichment during sync (best effort):
+  - entity registry
+  - device registry
+  - area registry
+  - label registry
+  - floor registry
 - Entity table with:
-  - Search (`entity_id` contains)
+  - Search (`entity_id`, friendly name, area/location, labels)
   - Filters (domain/state/changed recently)
   - Server-side pagination
-- Entity detail page with prettified attributes/context JSON.
+- Entity detail page with enriched metadata plus prettified attributes/context JSON.
 - Export filtered results as JSON or CSV (includes `pulled_at` and profile context).
 - Health endpoint: `GET /healthz`.
 - Structured JSON logs with request IDs and sync timing/count fields.
@@ -120,6 +126,7 @@ Profile token resolution order:
 ## HA API Integration (MVP)
 - `GET /api/config` for connection test/version discovery.
 - `GET /api/states` for on-demand full entity pull.
+- `WS /api/websocket` for registry enrichment (`entity/device/area/label/floor` lists).
 - Auth: `Authorization: Bearer <token>`.
 - Base URLs are normalized to avoid trailing slash issues.
 - TLS verify can be disabled for self-signed LAN deployments (`verify_tls=false`).
@@ -222,7 +229,7 @@ Includes:
 - No background queue; sync is user-triggered request path.
 - No built-in secret encryption at rest.
 - No built-in rate limiting.
-- No HA registry/device/area APIs yet.
+- Registry enrichment is best effort and depends on the connected HA version.
 
 ## License
 MIT. See `LICENSE`.
