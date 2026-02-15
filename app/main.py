@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -23,7 +23,7 @@ from sqlalchemy import delete, func, or_
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.db import ensure_default_profile, get_session, run_migrations
+from app.db import get_session, run_migrations
 from app.ha_client import HAClient, HAClientError
 from app.models import (
     ConfigSnapshot,
@@ -37,6 +37,7 @@ from app.models import (
 logger = logging.getLogger("ha_entity_vault")
 CSRF_SESSION_KEY = "csrf_token"
 FLASH_SESSION_KEY = "flash"
+ACTIVE_PROFILE_SESSION_KEY = "active_profile_id"
 DEFAULT_PAGE_SIZE = 50
 CONFIG_SYNC_CONCURRENCY = 8
 CONFIG_KINDS = {"automation", "script", "scene"}
@@ -68,6 +69,42 @@ def normalize_next_url(next_url: str) -> str:
     if next_url.startswith("/"):
         return next_url
     return "/settings"
+
+
+def get_current_url(request: Request) -> str:
+    query = request.url.query
+    if query:
+        return f"{request.url.path}?{query}"
+    return request.url.path
+
+
+def set_active_profile_id(request: Request, profile_id: int | None) -> None:
+    if profile_id is None:
+        request.session.pop(ACTIVE_PROFILE_SESSION_KEY, None)
+        return
+    request.session[ACTIVE_PROFILE_SESSION_KEY] = profile_id
+
+
+def get_active_profile_id(request: Request) -> int | None:
+    raw = request.session.get(ACTIVE_PROFILE_SESSION_KEY)
+    if isinstance(raw, int):
+        return raw
+    return None
+
+
+def with_profile_id(next_url: str, profile_id: int | None) -> str:
+    normalized = normalize_next_url(next_url)
+    split_result = urlsplit(normalized)
+    query_items = [
+        (k, v)
+        for k, v in parse_qsl(split_result.query, keep_blank_values=True)
+        if k != "profile_id"
+    ]
+    if profile_id is not None:
+        query_items.append(("profile_id", str(profile_id)))
+    rebuilt_query = urlencode(query_items)
+    rebuilt_path = split_result.path or "/"
+    return urlunsplit(("", "", rebuilt_path, rebuilt_query, ""))
 
 
 def set_flash(request: Request, level: str, message: str) -> None:
@@ -367,15 +404,53 @@ def resolve_profile_token(profile: Profile) -> str:
     return fallback
 
 
-def choose_active_profile(session: Session, profile_id: int | None) -> Profile | None:
+def get_enabled_profiles(session: Session) -> list[Profile]:
+    return list(
+        session.exec(
+            select(Profile)
+            .where(Profile.is_enabled.is_(True))
+            .order_by(Profile.name, Profile.id)
+        ).all()
+    )
+
+
+def get_first_enabled_profile(session: Session) -> Profile | None:
+    return session.exec(
+        select(Profile)
+        .where(Profile.is_enabled.is_(True))
+        .order_by(Profile.name, Profile.id)
+    ).first()
+
+
+def choose_active_profile(
+    session: Session,
+    request: Request,
+    profile_id: int | None,
+) -> Profile | None:
     if profile_id is not None:
-        return session.get(Profile, profile_id)
+        requested_profile = session.get(Profile, profile_id)
+        if requested_profile is not None and requested_profile.is_enabled:
+            set_active_profile_id(request, requested_profile.id)
+            return requested_profile
 
-    default_profile = session.exec(select(Profile).where(Profile.name == "default")).first()
-    if default_profile is not None:
-        return default_profile
+    session_profile_id = get_active_profile_id(request)
+    if session_profile_id is not None:
+        session_profile = session.get(Profile, session_profile_id)
+        if session_profile is not None and session_profile.is_enabled:
+            return session_profile
+        set_active_profile_id(request, None)
 
-    return session.exec(select(Profile).order_by(Profile.id)).first()
+    first_enabled = get_first_enabled_profile(session)
+    if first_enabled is not None:
+        set_active_profile_id(request, first_enabled.id)
+    return first_enabled
+
+
+def require_enabled_profile(profile: Profile, request: Request) -> bool:
+    if profile.is_enabled:
+        return True
+    set_flash(request, "error", f"Profile '{profile.name}' is disabled. Re-enable it from settings.")
+    return False
 
 
 def get_latest_sync_run(session: Session, profile_id: int) -> SyncRun | None:
@@ -822,7 +897,6 @@ async def build_config_snapshot_from_candidate(
 async def lifespan(_: FastAPI):
     configure_logging()
     run_migrations()
-    ensure_default_profile()
     yield
 
 
@@ -856,6 +930,17 @@ def create_app() -> FastAPI:
         context["flash"] = pop_flash(request)
         context["now"] = utcnow()
         return templates.TemplateResponse(request, template_name, context)
+
+    def with_navigation(
+        request: Request,
+        session: Session,
+        context: dict[str, Any],
+        active_profile: Profile | None,
+    ) -> dict[str, Any]:
+        context["nav_profiles"] = get_enabled_profiles(session)
+        context["nav_active_profile"] = active_profile
+        context["current_url"] = get_current_url(request)
+        return context
 
     @app.middleware("http")
     async def request_logging_middleware(request: Request, call_next):
@@ -900,16 +985,64 @@ def create_app() -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse)
     async def settings(
         request: Request,
+        profile_id: int | None = Query(default=None),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
-        profiles = session.exec(select(Profile).order_by(Profile.name)).all()
+        active_profile = choose_active_profile(session, request, profile_id)
+        profiles = list(
+            session.exec(select(Profile).order_by(Profile.is_enabled.desc(), Profile.name, Profile.id)).all()
+        )
+        enabled_profiles = [profile for profile in profiles if profile.is_enabled]
+        disabled_profiles = [profile for profile in profiles if not profile.is_enabled]
+
         return render_template(
             request,
             "settings.html",
-            {
-                "profiles": profiles,
-            },
+            with_navigation(
+                request,
+                session,
+                {
+                    "profiles": profiles,
+                    "enabled_profiles": enabled_profiles,
+                    "disabled_profiles": disabled_profiles,
+                    "active_profile": active_profile,
+                },
+                active_profile,
+            ),
         )
+
+    @app.post("/profiles/select")
+    async def select_profile(
+        request: Request,
+        profile_id: str = Form(default=""),
+        next_url: str = Form(default="/entities"),
+        csrf_token: str = Form(...),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        selected_profile: Profile | None = None
+        normalized_profile_id = profile_id.strip()
+        if normalized_profile_id:
+            try:
+                parsed_profile_id = int(normalized_profile_id)
+            except ValueError:
+                set_flash(request, "error", "Invalid profile selection.")
+            else:
+                candidate = session.get(Profile, parsed_profile_id)
+                if candidate is not None and candidate.is_enabled:
+                    selected_profile = candidate
+                else:
+                    set_flash(request, "error", "Selected profile is unavailable or disabled.")
+
+        if selected_profile is not None:
+            set_active_profile_id(request, selected_profile.id)
+            active_profile = selected_profile
+        else:
+            active_profile = choose_active_profile(session, request, None)
+
+        target_url = with_profile_id(next_url, active_profile.id if active_profile else None)
+        return RedirectResponse(url=target_url, status_code=303)
 
     @app.post("/profiles")
     async def create_profile(
@@ -953,6 +1086,8 @@ def create_app() -> FastAPI:
         )
         session.add(profile)
         session.commit()
+        if get_active_profile_id(request) is None and profile.id is not None:
+            set_active_profile_id(request, profile.id)
 
         set_flash(request, "success", f"Profile '{cleaned_name}' created.")
         return RedirectResponse(url="/settings", status_code=303)

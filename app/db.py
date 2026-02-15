@@ -7,9 +7,7 @@ from typing import Generator
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.engine import Engine
-from sqlmodel import Session, create_engine, select
-
-from app.models import Profile, utcnow
+from sqlmodel import Session, create_engine
 
 _engine: Engine | None = None
 
@@ -62,22 +60,3 @@ def run_migrations() -> None:
     alembic_config = Config(str(config_path))
     alembic_config.set_main_option("sqlalchemy.url", get_database_url())
     command.upgrade(alembic_config, "head")
-
-
-def ensure_default_profile() -> None:
-    with Session(get_engine()) as session:
-        existing = session.exec(select(Profile).where(Profile.name == "default")).first()
-        if existing is None:
-            session.add(
-                Profile(
-                    name="default",
-                    base_url="http://homeassistant.local:8123",
-                    token="",
-                    token_env_var="HA_TOKEN",
-                    verify_tls=True,
-                    timeout_seconds=10,
-                    created_at=utcnow(),
-                    updated_at=utcnow(),
-                )
-            )
-            session.commit()

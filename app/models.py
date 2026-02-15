@@ -20,6 +20,7 @@ class Profile(SQLModel, table=True):
     base_url: str = Field(max_length=512)
     token: str = Field(default="", sa_column=Column(Text, nullable=False))
     token_env_var: Optional[str] = Field(default="HA_TOKEN", max_length=128)
+    is_enabled: bool = Field(default=True, index=True)
     verify_tls: bool = Field(default=True)
     timeout_seconds: int = Field(default=10, ge=1, le=120)
     created_at: datetime = Field(
