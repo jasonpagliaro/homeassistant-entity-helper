@@ -8,12 +8,35 @@
   </head>
   <body>
     <header class="site-header">
-      <div class="container row between">
-        <h1>{{ app_name }}</h1>
-        <nav class="row gap-sm">
+      <div class="container site-header__inner">
+        <div class="row between wrap gap-sm">
+          <h1>{{ app_name }}</h1>
+          <form method="post" action="/profiles/select" class="profile-switcher">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="next_url" value="{{ current_url }}" />
+            <label for="profile-switcher-select">Active Profile</label>
+            <select
+              id="profile-switcher-select"
+              name="profile_id"
+              onchange="this.form.submit()"
+              {% if not nav_profiles %}disabled{% endif %}
+            >
+              {% if nav_profiles %}
+                {% for profile in nav_profiles %}
+                  <option value="{{ profile.id }}" {% if nav_active_profile and profile.id == nav_active_profile.id %}selected{% endif %}>
+                    {{ profile.name }}
+                  </option>
+                {% endfor %}
+              {% else %}
+                <option value="">No enabled profiles</option>
+              {% endif %}
+            </select>
+          </form>
+        </div>
+        <nav class="row gap-sm wrap">
           <a href="/entities">Entities</a>
           <a href="/config-items">Config Items</a>
-          <a href="/settings">Settings</a>
+          <a href="/settings">Profiles</a>
           <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
         </nav>
       </div>

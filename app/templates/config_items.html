@@ -4,14 +4,9 @@
   <h2>Config Items</h2>
 
   <form method="get" action="/config-items" class="grid-form compact">
-    <label>
-      Profile
-      <select name="profile_id" onchange="this.form.submit()">
-        {% for profile in profiles %}
-          <option value="{{ profile.id }}" {% if active_profile and profile.id == active_profile.id %}selected{% endif %}>{{ profile.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
+    {% if active_profile %}
+      <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    {% endif %}
 
     <label>
       Sync Run
@@ -134,8 +129,16 @@
     </div>
   {% elif active_profile %}
     <p>No synced config items for this profile yet. Use <strong>Sync Config Items</strong>.</p>
+  {% elif profile_count > 0 %}
+    <p>No enabled profiles are available. Enable a profile on the <a href="/settings">Profiles page</a>.</p>
   {% else %}
-    <p>No profiles found. Create one on the settings page.</p>
+    <p>No profiles are configured yet. Add one on the <a href="/settings">Profiles page</a>.</p>
+    <p>
+      Need help? See
+      <a href="https://www.home-assistant.io/docs/configuration/" target="_blank" rel="noreferrer">Home Assistant configuration</a>
+      and
+      <a href="https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token" target="_blank" rel="noreferrer">token setup</a>.
+    </p>
   {% endif %}
 </section>
 {% endblock %}

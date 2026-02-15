@@ -7,10 +7,12 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session, select
 
 from app import db
 from app.ha_client import HAClientError
 from app.main import create_app
+from app.models import Profile
 
 
 @pytest.fixture
@@ -34,27 +36,37 @@ def extract_csrf(html: str) -> str:
     return match.group(1)
 
 
-def extract_profile_id(html: str) -> int:
-    match = re.search(r"/profiles/(\d+)/update", html)
-    assert match is not None
-    return int(match.group(1))
+def get_profile_id_by_name(name: str) -> int:
+    with Session(db.get_engine()) as session:
+        profile = session.exec(select(Profile).where(Profile.name == name)).first()
+        assert profile is not None
+        assert profile.id is not None
+        return profile.id
 
 
-def update_profile(client: TestClient, profile_id: int, csrf_token: str) -> None:
-    update_response = client.post(
-        f"/profiles/{profile_id}/update",
+def create_profile(
+    client: TestClient,
+    csrf_token: str,
+    *,
+    name: str,
+    base_url: str = "http://ha.local:8123",
+    token: str = "test-token",
+) -> int:
+    create_response = client.post(
+        "/profiles",
         data={
             "csrf_token": csrf_token,
-            "name": "default",
-            "base_url": "http://ha.local:8123",
-            "token": "test-token",
+            "name": name,
+            "base_url": base_url,
+            "token": token,
             "token_env_var": "HA_TOKEN",
             "verify_tls": "on",
             "timeout_seconds": "10",
         },
         follow_redirects=False,
     )
-    assert update_response.status_code == 303
+    assert create_response.status_code == 303
+    return get_profile_id_by_name(name)
 
 
 def assert_sync_modal_markup(html: str) -> None:
@@ -79,28 +91,28 @@ def assert_form_lacks_sync_modal_attrs(html: str, action_pattern: str) -> None:
     assert 'data-sync-modal-label="' not in form_tag
 
 
+def assert_form_absent(html: str, action_pattern: str) -> None:
+    match = re.search(rf'<form[^>]*action="{action_pattern}"[^>]*>', html)
+    assert match is None
+
+
 def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     settings_response = client.get("/settings")
     assert settings_response.status_code == 200
     settings_html = settings_response.text
     assert_sync_modal_markup(settings_html)
-    assert_form_has_sync_modal_attrs(
-        settings_html,
-        r"/profiles/\d+/sync",
-        "Syncing entities...",
-    )
-    assert_form_has_sync_modal_attrs(
-        settings_html,
-        r"/profiles/\d+/sync-config",
-        "Syncing config items...",
-    )
-    assert_form_lacks_sync_modal_attrs(settings_html, r"/profiles/\d+/test")
-    assert_form_lacks_sync_modal_attrs(settings_html, r"/profiles/\d+/delete")
+    assert 'action="/profiles/select"' in settings_html
+    assert_form_absent(settings_html, r"/profiles/\d+/sync")
+    assert_form_absent(settings_html, r"/profiles/\d+/sync-config")
+
+    csrf_token = extract_csrf(settings_html)
+    profile_id = create_profile(client, csrf_token, name="home")
 
     entities_response = client.get("/entities")
     assert entities_response.status_code == 200
     entities_html = entities_response.text
     assert_sync_modal_markup(entities_html)
+    assert 'action="/profiles/select"' in entities_html
     assert_form_has_sync_modal_attrs(
         entities_html,
         r"/profiles/\d+/sync",
@@ -116,11 +128,13 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     assert config_items_response.status_code == 200
     config_items_html = config_items_response.text
     assert_sync_modal_markup(config_items_html)
+    assert 'action="/profiles/select"' in config_items_html
     assert_form_has_sync_modal_attrs(
         config_items_html,
         r"/profiles/\d+/sync-config",
         "Syncing config items...",
     )
+    assert f"/profiles/{profile_id}/sync-config" in config_items_html
 
 
 def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,8 +142,7 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert response.status_code == 200
 
     csrf_token = extract_csrf(response.text)
-    profile_id = extract_profile_id(response.text)
-    update_profile(client, profile_id, csrf_token)
+    profile_id = create_profile(client, csrf_token, name="default")
 
     async def fake_test_connection(_: Any) -> dict[str, Any]:
         return {"version": "2026.2.0"}
@@ -255,8 +268,7 @@ def test_sync_config_items_list_and_detail_flow(
     assert response.status_code == 200
 
     csrf_token = extract_csrf(response.text)
-    profile_id = extract_profile_id(response.text)
-    update_profile(client, profile_id, csrf_token)
+    profile_id = create_profile(client, csrf_token, name="default")
 
     async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
         return [
@@ -378,8 +390,7 @@ def test_sync_config_items_partial_failure(client: TestClient, monkeypatch: pyte
     assert response.status_code == 200
 
     csrf_token = extract_csrf(response.text)
-    profile_id = extract_profile_id(response.text)
-    update_profile(client, profile_id, csrf_token)
+    profile_id = create_profile(client, csrf_token, name="default")
 
     async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
         return [
@@ -454,8 +465,7 @@ def test_sync_config_items_missing_locator(client: TestClient, monkeypatch: pyte
     assert response.status_code == 200
 
     csrf_token = extract_csrf(response.text)
-    profile_id = extract_profile_id(response.text)
-    update_profile(client, profile_id, csrf_token)
+    profile_id = create_profile(client, csrf_token, name="default")
 
     async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
         return [
@@ -517,3 +527,131 @@ def test_sync_config_items_missing_locator(client: TestClient, monkeypatch: pyte
     )
     assert detail_response.status_code == 200
     assert "missing_config_locator" in detail_response.text
+
+
+def test_empty_state_without_profiles(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    assert "No profiles configured yet." in settings_response.text
+    assert "No enabled profiles" in settings_response.text
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    assert "No profiles are configured yet." in entities_response.text
+    assert "token setup" in entities_response.text
+
+    config_items_response = client.get("/config-items")
+    assert config_items_response.status_code == 200
+    assert "No profiles are configured yet." in config_items_response.text
+    assert "token setup" in config_items_response.text
+
+
+def test_profile_switcher_session_and_query_precedence(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+
+    alpha_id = create_profile(client, csrf_token, name="alpha")
+    beta_id = create_profile(client, csrf_token, name="beta")
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    assert "Active Profile:</strong> alpha" in entities_response.text
+
+    switch_response = client.post(
+        "/profiles/select",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(beta_id),
+            "next_url": "/entities?q=light",
+        },
+        follow_redirects=False,
+    )
+    assert switch_response.status_code == 303
+    location = switch_response.headers.get("location", "")
+    assert "/entities" in location
+    assert "q=light" in location
+    assert f"profile_id={beta_id}" in location
+
+    entities_after_switch = client.get("/entities")
+    assert entities_after_switch.status_code == 200
+    assert "Active Profile:</strong> beta" in entities_after_switch.text
+
+    query_override = client.get(f"/entities?profile_id={alpha_id}")
+    assert query_override.status_code == 200
+    assert "Active Profile:</strong> alpha" in query_override.text
+
+    entities_after_override = client.get("/entities")
+    assert entities_after_override.status_code == 200
+    assert "Active Profile:</strong> alpha" in entities_after_override.text
+
+
+def test_disabled_profile_hidden_and_sync_blocked(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="home")
+
+    disable_response = client.post(
+        f"/profiles/{profile_id}/disable",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert disable_response.status_code == 303
+
+    settings_after_disable = client.get("/settings")
+    assert settings_after_disable.status_code == 200
+    assert "Disabled" in settings_after_disable.text
+    assert f"/profiles/{profile_id}/enable" in settings_after_disable.text
+    assert f'<option value="{profile_id}"' not in settings_after_disable.text
+
+    entities_after_disable = client.get("/entities")
+    assert entities_after_disable.status_code == 200
+    assert "No enabled profiles are available." in entities_after_disable.text
+
+    async def fail_if_sync_called(_: Any) -> list[dict[str, Any]]:
+        raise AssertionError("sync should not be called for disabled profile")
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fail_if_sync_called)
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=True,
+    )
+    assert sync_response.status_code == 200
+    assert "is disabled. Re-enable it from settings." in sync_response.text
+
+
+def test_disabling_active_profile_reassigns_active_profile(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    alpha_id = create_profile(client, csrf_token, name="alpha")
+    beta_id = create_profile(client, csrf_token, name="beta")
+
+    select_beta = client.post(
+        "/profiles/select",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(beta_id),
+            "next_url": "/entities",
+        },
+        follow_redirects=False,
+    )
+    assert select_beta.status_code == 303
+
+    disable_beta = client.post(
+        f"/profiles/{beta_id}/disable",
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert disable_beta.status_code == 303
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    assert "Active Profile:</strong> alpha" in entities_response.text
+    assert f'<option value="{beta_id}"' not in entities_response.text
+    assert f'<option value="{alpha_id}"' in entities_response.text

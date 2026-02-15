@@ -1035,6 +1035,7 @@ def create_app() -> FastAPI:
                 else:
                     set_flash(request, "error", "Selected profile is unavailable or disabled.")
 
+        active_profile: Profile | None
         if selected_profile is not None:
             set_active_profile_id(request, selected_profile.id)
             active_profile = selected_profile
@@ -1160,6 +1161,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Profile not found")
 
         deleted_name = profile.name
+        was_active_profile = get_active_profile_id(request) == profile_id
         session.exec(delete(ConfigSnapshot).where(ConfigSnapshot.profile_id == profile_id))
         session.exec(delete(ConfigSyncRun).where(ConfigSyncRun.profile_id == profile_id))
         session.exec(delete(EntitySnapshot).where(EntitySnapshot.profile_id == profile_id))
@@ -1167,22 +1169,66 @@ def create_app() -> FastAPI:
         session.delete(profile)
         session.commit()
 
-        remaining_profiles = session.exec(select(func.count()).select_from(Profile)).one()
-        if int(remaining_profiles) == 0:
-            default_profile = Profile(
-                name="default",
-                base_url="http://homeassistant.local:8123",
-                token="",
-                token_env_var="HA_TOKEN",
-                verify_tls=True,
-                timeout_seconds=10,
-                created_at=utcnow(),
-                updated_at=utcnow(),
-            )
-            session.add(default_profile)
-            session.commit()
+        if was_active_profile:
+            choose_active_profile(session, request, None)
 
         set_flash(request, "success", f"Profile '{deleted_name}' deleted.")
+        return RedirectResponse(url="/settings", status_code=303)
+
+    @app.post("/profiles/{profile_id}/enable")
+    async def enable_profile(
+        profile_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        profile = session.get(Profile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        if profile.is_enabled:
+            set_flash(request, "success", f"Profile '{profile.name}' is already enabled.")
+            return RedirectResponse(url="/settings", status_code=303)
+
+        profile.is_enabled = True
+        profile.updated_at = utcnow()
+        session.add(profile)
+        session.commit()
+
+        if get_active_profile_id(request) is None:
+            set_active_profile_id(request, profile.id)
+
+        set_flash(request, "success", f"Profile '{profile.name}' enabled.")
+        return RedirectResponse(url="/settings", status_code=303)
+
+    @app.post("/profiles/{profile_id}/disable")
+    async def disable_profile(
+        profile_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        profile = session.get(Profile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        if not profile.is_enabled:
+            set_flash(request, "success", f"Profile '{profile.name}' is already disabled.")
+            return RedirectResponse(url="/settings", status_code=303)
+
+        profile.is_enabled = False
+        profile.updated_at = utcnow()
+        session.add(profile)
+        session.commit()
+
+        if get_active_profile_id(request) == profile_id:
+            choose_active_profile(session, request, None)
+
+        set_flash(request, "success", f"Profile '{profile.name}' disabled.")
         return RedirectResponse(url="/settings", status_code=303)
 
     @app.post("/profiles/{profile_id}/test")
@@ -1198,11 +1244,20 @@ def create_app() -> FastAPI:
         profile = session.get(Profile, profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="Profile not found")
+        if not require_enabled_profile(profile, request):
+            active_profile = choose_active_profile(session, request, None)
+            return RedirectResponse(
+                url=with_profile_id(next_url, active_profile.id if active_profile else None),
+                status_code=303,
+            )
 
         token = resolve_profile_token(profile)
         if not token:
             set_flash(request, "error", "No token configured in profile or environment.")
-            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+            return RedirectResponse(
+                url=with_profile_id(next_url, profile.id),
+                status_code=303,
+            )
 
         client = HAClient(
             base_url=profile.base_url,
@@ -1218,7 +1273,7 @@ def create_app() -> FastAPI:
         except HAClientError as exc:
             set_flash(request, "error", f"Connection failed: {exc}")
 
-        return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+        return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
 
     @app.post("/profiles/{profile_id}/sync")
     async def sync_profile(
@@ -1233,11 +1288,17 @@ def create_app() -> FastAPI:
         profile = session.get(Profile, profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="Profile not found")
+        if not require_enabled_profile(profile, request):
+            active_profile = choose_active_profile(session, request, None)
+            return RedirectResponse(
+                url=with_profile_id(next_url, active_profile.id if active_profile else None),
+                status_code=303,
+            )
 
         token = resolve_profile_token(profile)
         if not token:
             set_flash(request, "error", "No token configured in profile or environment.")
-            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+            return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
 
         client = HAClient(
             base_url=profile.base_url,
@@ -1271,7 +1332,7 @@ def create_app() -> FastAPI:
                 profile_name=profile.name,
                 error=str(exc),
             )
-            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+            return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
 
         registry_metadata: dict[str, list[dict[str, Any]]] = {}
         try:
@@ -1350,13 +1411,7 @@ def create_app() -> FastAPI:
             pulled_at=pulled_at.isoformat(),
         )
         set_flash(request, "success", f"Sync complete. Stored {len(snapshots)} entities.")
-
-        next_target = normalize_next_url(next_url)
-        if next_target.startswith("/entities") and "profile_id=" not in next_target:
-            query = build_query(profile_id=profile.id)
-            next_target = f"/entities?{query}" if query else "/entities"
-
-        return RedirectResponse(url=next_target, status_code=303)
+        return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
 
     @app.post("/profiles/{profile_id}/sync-config")
     async def sync_profile_config(
@@ -1371,11 +1426,17 @@ def create_app() -> FastAPI:
         profile = session.get(Profile, profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="Profile not found")
+        if not require_enabled_profile(profile, request):
+            active_profile = choose_active_profile(session, request, None)
+            return RedirectResponse(
+                url=with_profile_id(next_url, active_profile.id if active_profile else None),
+                status_code=303,
+            )
 
         token = resolve_profile_token(profile)
         if not token:
             set_flash(request, "error", "No token configured in profile or environment.")
-            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+            return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
 
         client = HAClient(
             base_url=profile.base_url,
@@ -1422,7 +1483,10 @@ def create_app() -> FastAPI:
                 profile_name=profile.name,
                 error=str(exc),
             )
-            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+            return RedirectResponse(
+                url=with_profile_id(next_url, profile_id_value),
+                status_code=303,
+            )
 
         registry_metadata: dict[str, list[dict[str, Any]]] = {}
         try:
@@ -1552,12 +1616,7 @@ def create_app() -> FastAPI:
                 pulled_at=pulled_at.isoformat(),
             )
 
-        next_target = normalize_next_url(next_url)
-        if next_target.startswith("/config-items") and "profile_id=" not in next_target:
-            query = build_query(profile_id=profile_id_value)
-            next_target = f"/config-items?{query}" if query else "/config-items"
-
-        return RedirectResponse(url=next_target, status_code=303)
+        return RedirectResponse(url=with_profile_id(next_url, profile_id_value), status_code=303)
 
     @app.get("/entities", response_class=HTMLResponse)
     async def list_entities(
@@ -1572,8 +1631,8 @@ def create_app() -> FastAPI:
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
-        profiles = session.exec(select(Profile).order_by(Profile.name)).all()
-        active_profile = choose_active_profile(session, profile_id)
+        active_profile = choose_active_profile(session, request, profile_id)
+        profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
 
         active_sync_run: SyncRun | None = None
         if active_profile is not None:
@@ -1649,23 +1708,28 @@ def create_app() -> FastAPI:
         return render_template(
             request,
             "entities.html",
-            {
-                "profiles": profiles,
-                "active_profile": active_profile,
-                "active_sync_run": active_sync_run,
-                "entities": entities,
-                "domains": domains,
-                "states": states,
-                "q": q,
-                "domain": domain,
-                "state_value": state_value,
-                "changed_within": changed_within,
-                "page": page,
-                "page_size": page_size,
-                "total": total,
-                "total_pages": total_pages,
-                "next_url": next_url,
-            },
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "active_sync_run": active_sync_run,
+                    "entities": entities,
+                    "domains": domains,
+                    "states": states,
+                    "q": q,
+                    "domain": domain,
+                    "state_value": state_value,
+                    "changed_within": changed_within,
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": total_pages,
+                    "next_url": next_url,
+                    "profile_count": profile_count,
+                },
+                active_profile,
+            ),
         )
 
     @app.get("/entities/{entity_id}", response_class=HTMLResponse)
@@ -1676,7 +1740,7 @@ def create_app() -> FastAPI:
         sync_run_id: int | None = Query(default=None),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
-        active_profile = choose_active_profile(session, profile_id)
+        active_profile = choose_active_profile(session, request, profile_id)
         if active_profile is None:
             raise HTTPException(status_code=404, detail="No profiles configured")
 
@@ -1710,16 +1774,21 @@ def create_app() -> FastAPI:
         return render_template(
             request,
             "entity_detail.html",
-            {
-                "profile": active_profile,
-                "sync_run": active_sync_run,
-                "snapshot": snapshot,
-                "attributes_pretty": safe_pretty_json(snapshot.attributes_json),
-                "context_pretty": safe_pretty_json(snapshot.context_json),
-                "labels_pretty": safe_pretty_json(snapshot.labels_json),
-                "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
-                "back_url": f"/entities?{back_query}",
-            },
+            with_navigation(
+                request,
+                session,
+                {
+                    "profile": active_profile,
+                    "sync_run": active_sync_run,
+                    "snapshot": snapshot,
+                    "attributes_pretty": safe_pretty_json(snapshot.attributes_json),
+                    "context_pretty": safe_pretty_json(snapshot.context_json),
+                    "labels_pretty": safe_pretty_json(snapshot.labels_json),
+                    "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
+                    "back_url": f"/entities?{back_query}",
+                },
+                active_profile,
+            ),
         )
 
     @app.get("/config-items", response_class=HTMLResponse)
@@ -1742,8 +1811,8 @@ def create_app() -> FastAPI:
         if normalized_status and normalized_status not in {"success", "error"}:
             normalized_status = ""
 
-        profiles = session.exec(select(Profile).order_by(Profile.name)).all()
-        active_profile = choose_active_profile(session, profile_id)
+        active_profile = choose_active_profile(session, request, profile_id)
+        profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
 
         config_runs: list[ConfigSyncRun] = []
         active_config_sync_run: ConfigSyncRun | None = None
@@ -1826,23 +1895,28 @@ def create_app() -> FastAPI:
         return render_template(
             request,
             "config_items.html",
-            {
-                "profiles": profiles,
-                "active_profile": active_profile,
-                "config_runs": config_runs,
-                "active_config_sync_run": active_config_sync_run,
-                "config_items": config_items,
-                "kinds": kinds,
-                "statuses": statuses,
-                "q": q,
-                "kind": normalized_kind,
-                "status": normalized_status,
-                "page": page,
-                "page_size": page_size,
-                "total": total,
-                "total_pages": total_pages,
-                "next_url": next_url,
-            },
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "config_runs": config_runs,
+                    "active_config_sync_run": active_config_sync_run,
+                    "config_items": config_items,
+                    "kinds": kinds,
+                    "statuses": statuses,
+                    "q": q,
+                    "kind": normalized_kind,
+                    "status": normalized_status,
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": total_pages,
+                    "next_url": next_url,
+                    "profile_count": profile_count,
+                },
+                active_profile,
+            ),
         )
 
     @app.get("/config-items/{snapshot_id}", response_class=HTMLResponse)
@@ -1853,11 +1927,14 @@ def create_app() -> FastAPI:
         config_sync_run_id: int | None = Query(default=None),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profiles found")
+
         snapshot = session.get(ConfigSnapshot, snapshot_id)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="Config item not found")
-
-        if profile_id is not None and snapshot.profile_id != profile_id:
+        if snapshot.profile_id != active_profile.id:
             raise HTTPException(status_code=404, detail="Config item not found in requested profile")
 
         if config_sync_run_id is not None and snapshot.config_sync_run_id != config_sync_run_id:
@@ -1865,7 +1942,7 @@ def create_app() -> FastAPI:
 
         profile = session.get(Profile, snapshot.profile_id)
         sync_run = session.get(ConfigSyncRun, snapshot.config_sync_run_id)
-        if profile is None or sync_run is None:
+        if profile is None or sync_run is None or not profile.is_enabled:
             raise HTTPException(status_code=404, detail="Related profile or sync run not found")
 
         back_query = build_query(
@@ -1876,17 +1953,22 @@ def create_app() -> FastAPI:
         return render_template(
             request,
             "config_item_detail.html",
-            {
-                "profile": profile,
-                "sync_run": sync_run,
-                "snapshot": snapshot,
-                "summary_pretty": safe_pretty_json(snapshot.summary_json),
-                "references_pretty": safe_pretty_json(snapshot.references_json),
-                "config_pretty": safe_pretty_json(snapshot.config_json),
-                "attributes_pretty": safe_pretty_json(snapshot.attributes_json),
-                "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
-                "back_url": f"/config-items?{back_query}",
-            },
+            with_navigation(
+                request,
+                session,
+                {
+                    "profile": profile,
+                    "sync_run": sync_run,
+                    "snapshot": snapshot,
+                    "summary_pretty": safe_pretty_json(snapshot.summary_json),
+                    "references_pretty": safe_pretty_json(snapshot.references_json),
+                    "config_pretty": safe_pretty_json(snapshot.config_json),
+                    "attributes_pretty": safe_pretty_json(snapshot.attributes_json),
+                    "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
+                    "back_url": f"/config-items?{back_query}",
+                },
+                active_profile,
+            ),
         )
 
     def get_export_rows(
@@ -1910,6 +1992,7 @@ def create_app() -> FastAPI:
 
     @app.get("/export/json")
     async def export_json(
+        request: Request,
         profile_id: int | None = Query(default=None),
         sync_run_id: int | None = Query(default=None),
         q: str = Query(default=""),
@@ -1918,7 +2001,7 @@ def create_app() -> FastAPI:
         changed_within: int | None = Query(default=None, ge=1, le=10080),
         session: Session = Depends(get_session),
     ) -> Response:
-        active_profile = choose_active_profile(session, profile_id)
+        active_profile = choose_active_profile(session, request, profile_id)
         if active_profile is None:
             raise HTTPException(status_code=404, detail="No profile found")
 
@@ -1981,6 +2064,7 @@ def create_app() -> FastAPI:
 
     @app.get("/export/csv")
     async def export_csv(
+        request: Request,
         profile_id: int | None = Query(default=None),
         sync_run_id: int | None = Query(default=None),
         q: str = Query(default=""),
@@ -1989,7 +2073,7 @@ def create_app() -> FastAPI:
         changed_within: int | None = Query(default=None, ge=1, le=10080),
         session: Session = Depends(get_session),
     ) -> Response:
-        active_profile = choose_active_profile(session, profile_id)
+        active_profile = choose_active_profile(session, request, profile_id)
         if active_profile is None:
             raise HTTPException(status_code=404, detail="No profile found")
 

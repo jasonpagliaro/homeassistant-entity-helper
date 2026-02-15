@@ -8,7 +8,7 @@ HA Entity Vault is a self-hosted single-container app for pulling Home Assistant
 - UI name is configurable via `APP_NAME`, so repo/product naming is easy to change later.
 
 ## MVP Features
-- Multiple Home Assistant profiles (default profile included).
+- Multiple Home Assistant profiles.
 - Settings per profile:
   - Base URL
   - Long-lived access token
@@ -258,8 +258,11 @@ Profile token resolution order:
 ## App Endpoint Reference (Manual)
 - `GET /healthz` - health check.
 - `GET /settings` - profile settings page.
+- `POST /profiles/select` - set active profile for current session and redirect.
 - `POST /profiles` - create profile.
 - `POST /profiles/{profile_id}/update` - update profile.
+- `POST /profiles/{profile_id}/enable` - enable profile for active use.
+- `POST /profiles/{profile_id}/disable` - disable profile (hidden from switcher/actions).
 - `POST /profiles/{profile_id}/delete` - delete profile + associated sync data.
 - `POST /profiles/{profile_id}/test` - test Home Assistant connection.
 - `POST /profiles/{profile_id}/sync` - sync entities on demand.

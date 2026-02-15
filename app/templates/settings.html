@@ -1,117 +1,248 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="panel">
-  <h2>Add Profile</h2>
-  <form method="post" action="/profiles" class="grid-form">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <label>
-      Profile Name
-      <input type="text" name="name" placeholder="default" required />
-    </label>
-    <label>
-      Base URL
-      <input type="url" name="base_url" placeholder="http://homeassistant.local:8123" required />
-    </label>
-    <label>
-      Token (Long-Lived Access Token)
-      <input type="password" name="token" placeholder="Paste token" autocomplete="off" />
-    </label>
-    <label>
-      Token Env Var Name
-      <input type="text" name="token_env_var" value="HA_TOKEN" />
-    </label>
-    <label>
-      Timeout Seconds
-      <input type="number" min="1" max="120" name="timeout_seconds" value="10" />
-    </label>
-    <label class="checkbox-row">
-      <input type="checkbox" name="verify_tls" checked />
-      Verify TLS Certificate
-    </label>
-    <button type="submit">Create Profile</button>
-  </form>
-</section>
+  <div class="row between wrap gap-sm">
+    <div>
+      <h2>Profiles</h2>
+      <p>Manage Home Assistant connections for this account. Enabled profiles are available in the active profile switcher.</p>
+    </div>
+    <button type="button" data-modal-open="add-profile-modal">Add Profile</button>
+  </div>
 
-<section class="panel">
-  <h2>Profiles</h2>
   {% if profiles %}
-    {% for profile in profiles %}
-      <article class="profile-card">
-        <h3>{{ profile.name }}</h3>
-        <form method="post" action="/profiles/{{ profile.id }}/update" class="grid-form">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          <label>
-            Profile Name
-            <input type="text" name="name" value="{{ profile.name }}" required />
-          </label>
-          <label>
-            Base URL
-            <input type="url" name="base_url" value="{{ profile.base_url }}" required />
-          </label>
-          <label>
-            New Token (leave blank to keep)
-            <input type="password" name="token" autocomplete="off" />
-          </label>
-          <label>
-            Token Env Var Name
-            <input type="text" name="token_env_var" value="{{ profile.token_env_var or 'HA_TOKEN' }}" />
-          </label>
-          <label>
-            Timeout Seconds
-            <input type="number" min="1" max="120" name="timeout_seconds" value="{{ profile.timeout_seconds }}" />
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="verify_tls" {% if profile.verify_tls %}checked{% endif %} />
-            Verify TLS Certificate
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" name="clear_token" />
-            Clear stored token
-          </label>
-          <button type="submit">Save Profile</button>
-        </form>
+    {% if enabled_profiles %}
+      <h3>Enabled</h3>
+      {% for profile in enabled_profiles %}
+        <article class="profile-card">
+          <div class="row between wrap gap-sm">
+            <h4>{{ profile.name }}</h4>
+            <div class="row gap-sm wrap">
+              <span class="status-chip status-success">Enabled</span>
+              {% if active_profile and active_profile.id == profile.id %}
+                <span class="status-chip">Active</span>
+              {% endif %}
+            </div>
+          </div>
 
-        <div class="row gap-sm wrap">
-          <form method="post" action="/profiles/{{ profile.id }}/test">
+          <form method="post" action="/profiles/{{ profile.id }}/update" class="grid-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <input type="hidden" name="next_url" value="/settings" />
-            <button type="submit">Test Connection</button>
+            <label>
+              Profile Name
+              <input type="text" name="name" value="{{ profile.name }}" required />
+            </label>
+            <label>
+              Base URL
+              <input type="url" name="base_url" value="{{ profile.base_url }}" required />
+            </label>
+            <label>
+              New Token (leave blank to keep)
+              <input type="password" name="token" autocomplete="off" />
+            </label>
+            <label>
+              Token Env Var Name
+              <input type="text" name="token_env_var" value="{{ profile.token_env_var or 'HA_TOKEN' }}" />
+            </label>
+            <label>
+              Timeout Seconds
+              <input type="number" min="1" max="120" name="timeout_seconds" value="{{ profile.timeout_seconds }}" />
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" name="verify_tls" {% if profile.verify_tls %}checked{% endif %} />
+              Verify TLS Certificate
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" name="clear_token" />
+              Clear stored token
+            </label>
+            <button type="submit">Save Profile</button>
           </form>
-          <form
-            method="post"
-            action="/profiles/{{ profile.id }}/sync"
-            data-sync-modal="true"
-            data-sync-modal-label="Syncing entities..."
-          >
+
+          <div class="row gap-sm wrap">
+            <form method="post" action="/profiles/{{ profile.id }}/test">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+              <button type="submit">Test Connection</button>
+            </form>
+            <form method="post" action="/profiles/{{ profile.id }}/disable">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <button type="submit">Disable Profile</button>
+            </form>
+            <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <button type="submit" class="danger">Delete Profile</button>
+            </form>
+          </div>
+        </article>
+      {% endfor %}
+    {% endif %}
+
+    {% if disabled_profiles %}
+      <h3>Disabled</h3>
+      {% for profile in disabled_profiles %}
+        <article class="profile-card profile-card-disabled">
+          <div class="row between wrap gap-sm">
+            <h4>{{ profile.name }}</h4>
+            <span class="status-chip">Disabled</span>
+          </div>
+
+          <form method="post" action="/profiles/{{ profile.id }}/update" class="grid-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <input type="hidden" name="next_url" value="/entities?{{ build_query(profile_id=profile.id) }}" />
-            <button type="submit">Sync Now</button>
+            <label>
+              Profile Name
+              <input type="text" name="name" value="{{ profile.name }}" required />
+            </label>
+            <label>
+              Base URL
+              <input type="url" name="base_url" value="{{ profile.base_url }}" required />
+            </label>
+            <label>
+              New Token (leave blank to keep)
+              <input type="password" name="token" autocomplete="off" />
+            </label>
+            <label>
+              Token Env Var Name
+              <input type="text" name="token_env_var" value="{{ profile.token_env_var or 'HA_TOKEN' }}" />
+            </label>
+            <label>
+              Timeout Seconds
+              <input type="number" min="1" max="120" name="timeout_seconds" value="{{ profile.timeout_seconds }}" />
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" name="verify_tls" {% if profile.verify_tls %}checked{% endif %} />
+              Verify TLS Certificate
+            </label>
+            <label class="checkbox-row">
+              <input type="checkbox" name="clear_token" />
+              Clear stored token
+            </label>
+            <button type="submit">Save Profile</button>
           </form>
-          <form
-            method="post"
-            action="/profiles/{{ profile.id }}/sync-config"
-            data-sync-modal="true"
-            data-sync-modal-label="Syncing config items..."
-          >
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <input type="hidden" name="next_url" value="/config-items?{{ build_query(profile_id=profile.id) }}" />
-            <button type="submit">Sync Config Items</button>
-          </form>
-          <a class="button" href="/config-items?{{ build_query(profile_id=profile.id) }}">View Config Items</a>
-          <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <button type="submit" class="danger">Delete Profile</button>
-          </form>
-        </div>
-      </article>
-    {% endfor %}
+
+          <div class="row gap-sm wrap">
+            <form method="post" action="/profiles/{{ profile.id }}/enable">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <button type="submit">Enable Profile</button>
+            </form>
+            <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <button type="submit" class="danger">Delete Profile</button>
+            </form>
+          </div>
+        </article>
+      {% endfor %}
+    {% endif %}
   {% else %}
-    <p>No profiles configured.</p>
+    <p>No profiles configured yet. Use <strong>Add Profile</strong> to create your first connection.</p>
   {% endif %}
 </section>
 
 <section class="panel muted">
-  <h2>Security Note</h2>
+  <h2>Setup Guide</h2>
+  <ol>
+    <li>Find your Home Assistant URL (for example, <code>http://homeassistant.local:8123</code>).</li>
+    <li>Create a long-lived access token from your Home Assistant user profile.</li>
+    <li>Add the profile here, then run <strong>Test Connection</strong>.</li>
+  </ol>
+  <p>
+    Reference docs:
+    <a href="https://www.home-assistant.io/docs/configuration/" target="_blank" rel="noreferrer">Home Assistant Configuration</a>
+    and
+    <a href="https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token" target="_blank" rel="noreferrer">Long-Lived Access Tokens</a>.
+  </p>
+  <p>Local network discovery/scanning is not included yet. Add profile URLs manually in this release.</p>
   <p>Tokens can be stored in SQLite for convenience. Prefer environment variable overrides for stronger secret hygiene.</p>
 </section>
+
+<div id="add-profile-modal" class="modal" hidden>
+  <div class="modal__backdrop" data-modal-close="add-profile-modal"></div>
+  <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="add-profile-modal-title">
+    <div class="row between wrap gap-sm">
+      <h3 id="add-profile-modal-title">Add Profile</h3>
+      <button type="button" class="button-secondary" data-modal-close="add-profile-modal">Close</button>
+    </div>
+    <form method="post" action="/profiles" class="grid-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <label>
+        Profile Name
+        <input type="text" name="name" placeholder="home" required />
+      </label>
+      <label>
+        Base URL
+        <input type="url" name="base_url" placeholder="http://homeassistant.local:8123" required />
+      </label>
+      <label>
+        Token (Long-Lived Access Token)
+        <input type="password" name="token" placeholder="Paste token" autocomplete="off" />
+      </label>
+      <label>
+        Token Env Var Name
+        <input type="text" name="token_env_var" value="HA_TOKEN" />
+      </label>
+      <label>
+        Timeout Seconds
+        <input type="number" min="1" max="120" name="timeout_seconds" value="10" />
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" name="verify_tls" checked />
+        Verify TLS Certificate
+      </label>
+      <button type="submit">Create Profile</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  (function () {
+    function openModal(id) {
+      const modal = document.getElementById(id);
+      if (!modal) {
+        return;
+      }
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+    }
+
+    function closeModal(id) {
+      const modal = document.getElementById(id);
+      if (!modal) {
+        return;
+      }
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    const openButtons = document.querySelectorAll("[data-modal-open]");
+    for (const button of openButtons) {
+      button.addEventListener("click", function () {
+        const modalId = button.getAttribute("data-modal-open");
+        if (!modalId) {
+          return;
+        }
+        openModal(modalId);
+      });
+    }
+
+    const closeButtons = document.querySelectorAll("[data-modal-close]");
+    for (const button of closeButtons) {
+      button.addEventListener("click", function () {
+        const modalId = button.getAttribute("data-modal-close");
+        if (!modalId) {
+          return;
+        }
+        closeModal(modalId);
+      });
+    }
+
+    window.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape") {
+        return;
+      }
+      const openModalEl = document.querySelector(".modal:not([hidden])");
+      if (!(openModalEl instanceof HTMLElement)) {
+        return;
+      }
+      closeModal(openModalEl.id);
+    });
+  })();
+</script>
 {% endblock %}
