@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -51,6 +53,62 @@ async def test_fetch_states_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_config_rest_endpoints_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/config/automation/config/evening_mode":
+            return httpx.Response(200, json={"alias": "Evening Mode"})
+        if request.url.path == "/api/config/script/config/goodnight":
+            return httpx.Response(200, json={"alias": "Goodnight"})
+        if request.url.path == "/api/config/scene/config/movie_time":
+            return httpx.Response(200, json={"name": "Movie Time", "entities": {}})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    client = HAClient(
+        base_url="http://example.local",
+        token="abc123",
+        transport=httpx.MockTransport(handler),
+    )
+
+    automation = await client.fetch_automation_config("evening_mode")
+    script = await client.fetch_script_config("goodnight")
+    scene = await client.fetch_scene_config("movie_time")
+
+    assert automation["alias"] == "Evening Mode"
+    assert script["alias"] == "Goodnight"
+    assert scene["name"] == "Movie Time"
+
+
+@pytest.mark.asyncio
+async def test_fetch_automation_config_ws_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ws_request(self: HAClient, command_type: str, **payload: Any) -> Any:
+        assert command_type == "automation/config"
+        assert payload["entity_id"] == "automation.evening_mode"
+        return {"config": {"alias": "Evening Mode"}}
+
+    monkeypatch.setattr(HAClient, "_ws_request", fake_ws_request)
+
+    client = HAClient(base_url="http://example.local", token="abc123")
+    automation = await client.fetch_automation_config_ws("automation.evening_mode")
+
+    assert automation["alias"] == "Evening Mode"
+
+
+@pytest.mark.asyncio
+async def test_fetch_script_config_ws_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ws_request(self: HAClient, command_type: str, **payload: Any) -> Any:
+        assert command_type == "script/config"
+        assert payload["entity_id"] == "script.goodnight"
+        return {"config": {"alias": "Goodnight"}}
+
+    monkeypatch.setattr(HAClient, "_ws_request", fake_ws_request)
+
+    client = HAClient(base_url="http://example.local", token="abc123")
+    script = await client.fetch_script_config_ws("script.goodnight")
+
+    assert script["alias"] == "Goodnight"
+
+
+@pytest.mark.asyncio
 async def test_auth_error_is_actionable() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"message": "Unauthorized"})
@@ -66,6 +124,24 @@ async def test_auth_error_is_actionable() -> None:
 
     assert exc_info.value.status_code == 401
     assert "Authentication failed" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_not_found_error_includes_status() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not found"})
+
+    client = HAClient(
+        base_url="http://example.local",
+        token="abc123",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(HAClientError) as exc_info:
+        await client.fetch_scene_config("missing_scene")
+
+    assert exc_info.value.status_code == 404
+    assert "HTTP 404" in str(exc_info.value)
 
 
 def test_websocket_url_normalization() -> None:

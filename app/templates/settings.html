@@ -82,6 +82,12 @@
             <input type="hidden" name="next_url" value="/entities?{{ build_query(profile_id=profile.id) }}" />
             <button type="submit">Sync Now</button>
           </form>
+          <form method="post" action="/profiles/{{ profile.id }}/sync-config">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="next_url" value="/config-items?{{ build_query(profile_id=profile.id) }}" />
+            <button type="submit">Sync Config Items</button>
+          </form>
+          <a class="button" href="/config-items?{{ build_query(profile_id=profile.id) }}">View Config Items</a>
           <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button type="submit" class="danger">Delete Profile</button>

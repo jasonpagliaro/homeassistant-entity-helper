@@ -80,3 +80,52 @@ class EntitySnapshot(SQLModel, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+
+
+class ConfigSyncRun(SQLModel, table=True):
+    __tablename__ = "config_sync_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    pulled_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    item_count: int = Field(default=0, ge=0)
+    success_count: int = Field(default=0, ge=0)
+    error_count: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    status: str = Field(default="success", max_length=32)
+    error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+
+
+class ConfigSnapshot(SQLModel, table=True):
+    __tablename__ = "config_snapshots"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    config_sync_run_id: int = Field(foreign_key="config_sync_runs.id", index=True)
+    kind: str = Field(index=True, max_length=32)
+    entity_id: str = Field(index=True, max_length=255)
+    config_key: Optional[str] = Field(default=None, max_length=255)
+    name: Optional[str] = Field(default=None, max_length=255)
+    state: Optional[str] = Field(default=None, max_length=255)
+    fetch_status: str = Field(index=True, max_length=32, default="success")
+    fetch_error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    summary_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    references_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    config_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    attributes_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    metadata_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    last_changed: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_updated: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    pulled_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )

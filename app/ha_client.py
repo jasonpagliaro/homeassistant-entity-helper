@@ -4,7 +4,7 @@ import asyncio
 import json
 import ssl
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -113,13 +113,13 @@ class HAClient:
                 normalized.append(item)
         return normalized
 
-    async def fetch_registry_metadata(self) -> dict[str, list[dict[str, Any]]]:
+    async def _run_ws_commands(self, commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             import websockets
             from websockets.exceptions import WebSocketException
         except ImportError as exc:
             raise HAClientError(
-                "Missing dependency 'websockets'; unable to pull registry metadata."
+                "Missing dependency 'websockets'; unable to call Home Assistant WebSocket API."
             ) from exc
 
         ws_url = self._websocket_url()
@@ -129,10 +129,7 @@ class HAClient:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
-        metadata: dict[str, list[dict[str, Any]]] = {
-            key: [] for key in self._REGISTRY_COMMANDS.keys()
-        }
-
+        results: list[dict[str, Any]] = []
         try:
             async with websockets.connect(
                 ws_url,
@@ -169,53 +166,111 @@ class HAClient:
                     )
 
                 message_id = 1
-                for bucket, command_type in self._REGISTRY_COMMANDS.items():
+                for command in commands:
+                    payload = {"id": message_id, **command}
                     await asyncio.wait_for(
-                        websocket.send(
-                            json.dumps({"id": message_id, "type": command_type})
-                        ),
+                        websocket.send(json.dumps(payload)),
                         timeout=self.timeout_seconds,
                     )
                     result = await asyncio.wait_for(
                         self._wait_for_ws_result(websocket, message_id),
                         timeout=self.timeout_seconds,
                     )
-                    message_id += 1
-
                     if result.get("type") != "result":
                         raise HAClientError(
-                            f"Unexpected response format for WebSocket command '{command_type}'."
+                            "Unexpected response format from Home Assistant WebSocket API."
                         )
-
-                    if not result.get("success"):
-                        error = result.get("error")
-                        if isinstance(error, dict):
-                            code = str(error.get("code", ""))
-                            message = str(error.get("message", "unknown error"))
-                        else:
-                            code = ""
-                            message = "unknown error"
-
-                        # Keep sync resilient across HA versions where some registries are unavailable.
-                        if code in {"unknown_command", "not_found"}:
-                            metadata[bucket] = []
-                            continue
-
-                        raise HAClientError(
-                            f"Registry command '{command_type}' failed: {message}"
-                        )
-
-                    payload = result.get("result")
-                    if not isinstance(payload, list):
-                        metadata[bucket] = []
-                        continue
-                    metadata[bucket] = [item for item in payload if isinstance(item, dict)]
-
+                    results.append(result)
+                    message_id += 1
         except HAClientError:
             raise
         except (WebSocketException, OSError, TimeoutError) as exc:
             raise HAClientError(
                 f"Unable to reach Home Assistant WebSocket API: {exc}"
             ) from exc
+
+        return results
+
+    @staticmethod
+    def _ws_error_details(result: dict[str, Any]) -> tuple[str, str]:
+        error = result.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code", ""))
+            message = str(error.get("message", "unknown error"))
+            return code, message
+        return "", "unknown error"
+
+    async def _ws_request(self, command_type: str, **payload: Any) -> Any:
+        result = (await self._run_ws_commands([{"type": command_type, **payload}]))[0]
+        if result.get("success"):
+            return result.get("result")
+
+        _, message = self._ws_error_details(result)
+        raise HAClientError(f"WebSocket command '{command_type}' failed: {message}")
+
+    async def _fetch_config(self, kind: str, config_key: str) -> dict[str, Any]:
+        cleaned_key = config_key.strip()
+        if not cleaned_key:
+            raise HAClientError("Config key is required.")
+
+        encoded_key = quote(cleaned_key, safe="")
+        response = await self._get_json(f"/api/config/{kind}/config/{encoded_key}")
+        if not isinstance(response, dict):
+            raise HAClientError(
+                f"Unexpected response format from /api/config/{kind}/config/{{id}}."
+            )
+        return response
+
+    async def fetch_automation_config(self, config_key: str) -> dict[str, Any]:
+        return await self._fetch_config("automation", config_key)
+
+    async def fetch_script_config(self, config_key: str) -> dict[str, Any]:
+        return await self._fetch_config("script", config_key)
+
+    async def fetch_scene_config(self, config_key: str) -> dict[str, Any]:
+        return await self._fetch_config("scene", config_key)
+
+    async def fetch_automation_config_ws(self, entity_id: str) -> dict[str, Any]:
+        result = await self._ws_request("automation/config", entity_id=entity_id)
+        if not isinstance(result, dict):
+            raise HAClientError("Unexpected response format from automation/config.")
+        config = result.get("config")
+        if not isinstance(config, dict):
+            raise HAClientError("Unexpected automation config payload format.")
+        return config
+
+    async def fetch_script_config_ws(self, entity_id: str) -> dict[str, Any]:
+        result = await self._ws_request("script/config", entity_id=entity_id)
+        if not isinstance(result, dict):
+            raise HAClientError("Unexpected response format from script/config.")
+        config = result.get("config")
+        if not isinstance(config, dict):
+            raise HAClientError("Unexpected script config payload format.")
+        return config
+
+    async def fetch_registry_metadata(self) -> dict[str, list[dict[str, Any]]]:
+        metadata: dict[str, list[dict[str, Any]]] = {
+            key: [] for key in self._REGISTRY_COMMANDS.keys()
+        }
+
+        commands = [{"type": command_type} for command_type in self._REGISTRY_COMMANDS.values()]
+        results = await self._run_ws_commands(commands)
+
+        for (bucket, command_type), result in zip(
+            self._REGISTRY_COMMANDS.items(), results, strict=False
+        ):
+            if not result.get("success"):
+                code, message = self._ws_error_details(result)
+                # Keep sync resilient across HA versions where some registries are unavailable.
+                if code in {"unknown_command", "not_found"}:
+                    metadata[bucket] = []
+                    continue
+                raise HAClientError(f"Registry command '{command_type}' failed: {message}")
+
+            payload = result.get("result")
+            if not isinstance(payload, list):
+                metadata[bucket] = []
+                continue
+            metadata[bucket] = [item for item in payload if isinstance(item, dict)]
 
         return metadata
