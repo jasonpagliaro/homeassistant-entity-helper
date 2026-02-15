@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import db
+from app.ha_client import HAClientError
 from app.main import create_app
 
 
@@ -39,13 +40,7 @@ def extract_profile_id(html: str) -> int:
     return int(match.group(1))
 
 
-def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    response = client.get("/settings")
-    assert response.status_code == 200
-
-    csrf_token = extract_csrf(response.text)
-    profile_id = extract_profile_id(response.text)
-
+def update_profile(client: TestClient, profile_id: int, csrf_token: str) -> None:
     update_response = client.post(
         f"/profiles/{profile_id}/update",
         data={
@@ -60,6 +55,15 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
         follow_redirects=False,
     )
     assert update_response.status_code == 303
+
+
+def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = extract_profile_id(response.text)
+    update_profile(client, profile_id, csrf_token)
 
     async def fake_test_connection(_: Any) -> dict[str, Any]:
         return {"version": "2026.2.0"}
@@ -176,3 +180,274 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert "light.kitchen" in export_csv_response.text
     assert "area_name" in export_csv_response.text
     assert "labels_json" in export_csv_response.text
+
+
+def test_sync_config_items_list_and_detail_flow(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = extract_profile_id(response.text)
+    update_profile(client, profile_id, csrf_token)
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "automation.evening_mode",
+                "state": "on",
+                "attributes": {"friendly_name": "Evening Mode", "id": "auto_evening_mode"},
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:01:00+00:00",
+            },
+            {
+                "entity_id": "script.goodnight",
+                "state": "off",
+                "attributes": {"friendly_name": "Goodnight"},
+                "last_changed": "2026-02-15T01:02:00+00:00",
+                "last_updated": "2026-02-15T01:03:00+00:00",
+            },
+            {
+                "entity_id": "scene.movie_time",
+                "state": "2026-02-15T01:04:00+00:00",
+                "attributes": {"friendly_name": "Movie Time", "id": "scene_movie_time"},
+                "last_changed": "2026-02-15T01:04:00+00:00",
+                "last_updated": "2026-02-15T01:04:00+00:00",
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [],
+            "devices": [],
+            "entities": [
+                {"entity_id": "automation.evening_mode", "unique_id": "auto_evening_mode"},
+                {"entity_id": "script.goodnight", "unique_id": "goodnight"},
+                {"entity_id": "scene.movie_time", "unique_id": "scene_movie_time"},
+            ],
+            "labels": [],
+            "floors": [],
+        }
+
+    async def fake_fetch_automation_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "automation.evening_mode"
+        return {
+            "alias": "Evening Mode",
+            "description": "Turn lights on at sunset",
+            "triggers": [{"trigger": "sun", "event": "sunset"}],
+            "conditions": [{"condition": "state", "entity_id": "person.jason", "state": "home"}],
+            "actions": [{"action": "light.turn_on", "target": {"entity_id": "light.living_room"}}],
+        }
+
+    async def fake_fetch_script_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "script.goodnight"
+        return {
+            "alias": "Goodnight",
+            "description": "Night routine",
+            "sequence": [
+                {"action": "scene.turn_on", "target": {"entity_id": "scene.movie_time"}},
+                {"action": "light.turn_off", "target": {"entity_id": ["light.kitchen"]}},
+            ],
+            "mode": "single",
+        }
+
+    async def fake_fetch_scene_config(_: Any, config_key: str) -> dict[str, Any]:
+        assert config_key == "scene_movie_time"
+        return {
+            "name": "Movie Time",
+            "entities": {
+                "light.living_room": {"state": "off"},
+                "media_player.tv": {"state": "on"},
+            },
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_automation_config_ws",
+        fake_fetch_automation_config_ws,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_script_config_ws",
+        fake_fetch_script_config_ws,
+    )
+    monkeypatch.setattr("app.main.HAClient.fetch_scene_config", fake_fetch_scene_config)
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync-config",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/config-items?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    items_response = client.get(f"/config-items?profile_id={profile_id}")
+    assert items_response.status_code == 200
+    assert "automation.evening_mode" in items_response.text
+    assert "script.goodnight" in items_response.text
+    assert "scene.movie_time" in items_response.text
+
+    scripts_only_response = client.get(f"/config-items?profile_id={profile_id}&kind=script")
+    assert scripts_only_response.status_code == 200
+    assert "script.goodnight" in scripts_only_response.text
+
+    detail_match = re.search(r"/config-items/(\d+)\?[^\"']*config_sync_run_id=", scripts_only_response.text)
+    assert detail_match is not None
+    snapshot_id = int(detail_match.group(1))
+
+    detail_response = client.get(
+        f"/config-items/{snapshot_id}?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert "Goodnight" in detail_response.text
+    assert "sequence_count" in detail_response.text
+    assert "scene.movie_time" in detail_response.text
+
+
+def test_sync_config_items_partial_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = extract_profile_id(response.text)
+    update_profile(client, profile_id, csrf_token)
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "automation.ok_rule",
+                "state": "on",
+                "attributes": {"friendly_name": "OK Rule", "id": "ok_rule"},
+            },
+            {
+                "entity_id": "script.bad_rule",
+                "state": "off",
+                "attributes": {"friendly_name": "Bad Rule"},
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [],
+            "devices": [],
+            "entities": [
+                {"entity_id": "automation.ok_rule", "unique_id": "ok_rule"},
+                {"entity_id": "script.bad_rule", "unique_id": "bad_rule"},
+            ],
+            "labels": [],
+            "floors": [],
+        }
+
+    async def fake_fetch_automation_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "automation.ok_rule"
+        return {"alias": "OK Rule", "triggers": [], "actions": []}
+
+    async def fake_fetch_script_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "script.bad_rule"
+        raise HAClientError("ws failure")
+
+    async def fake_fetch_script_config(_: Any, config_key: str) -> dict[str, Any]:
+        assert config_key == "bad_rule"
+        raise HAClientError("rest failure")
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_automation_config_ws",
+        fake_fetch_automation_config_ws,
+    )
+    monkeypatch.setattr("app.main.HAClient.fetch_script_config_ws", fake_fetch_script_config_ws)
+    monkeypatch.setattr("app.main.HAClient.fetch_script_config", fake_fetch_script_config)
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync-config",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/config-items?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    items_response = client.get(f"/config-items?profile_id={profile_id}")
+    assert items_response.status_code == 200
+    assert "partial" in items_response.text
+
+    error_filter_response = client.get(
+        f"/config-items?profile_id={profile_id}&status=error"
+    )
+    assert error_filter_response.status_code == 200
+    assert "script.bad_rule" in error_filter_response.text
+
+
+def test_sync_config_items_missing_locator(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = extract_profile_id(response.text)
+    update_profile(client, profile_id, csrf_token)
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "automation.ok_rule",
+                "state": "on",
+                "attributes": {"friendly_name": "OK Rule", "id": "ok_rule"},
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [],
+            "devices": [],
+            "entities": [
+                {"entity_id": "automation.ok_rule", "unique_id": "ok_rule"},
+                {"entity_id": "scene.no_locator"},
+            ],
+            "labels": [],
+            "floors": [],
+        }
+
+    async def fake_fetch_automation_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "automation.ok_rule"
+        return {"alias": "OK Rule", "triggers": [], "actions": []}
+
+    async def fake_fetch_scene_config(_: Any, config_key: str) -> dict[str, Any]:
+        raise AssertionError(f"scene config fetch should not be called without locator: {config_key}")
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_automation_config_ws",
+        fake_fetch_automation_config_ws,
+    )
+    monkeypatch.setattr("app.main.HAClient.fetch_scene_config", fake_fetch_scene_config)
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync-config",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/config-items?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    error_filter_response = client.get(
+        f"/config-items?profile_id={profile_id}&status=error"
+    )
+    assert error_filter_response.status_code == 200
+    assert "scene.no_locator" in error_filter_response.text
+    assert "error" in error_filter_response.text
+
+    detail_match = re.search(r"/config-items/(\d+)\?[^\"']*config_sync_run_id=", error_filter_response.text)
+    assert detail_match is not None
+    detail_response = client.get(
+        f"/config-items/{detail_match.group(1)}?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert "missing_config_locator" in detail_response.text

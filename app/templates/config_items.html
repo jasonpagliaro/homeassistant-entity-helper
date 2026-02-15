@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Config Items</h2>
+
+  <form method="get" action="/config-items" class="grid-form compact">
+    <label>
+      Profile
+      <select name="profile_id" onchange="this.form.submit()">
+        {% for profile in profiles %}
+          <option value="{{ profile.id }}" {% if active_profile and profile.id == active_profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Sync Run
+      <select name="config_sync_run_id">
+        <option value="">Latest</option>
+        {% for run in config_runs %}
+          <option value="{{ run.id }}" {% if active_config_sync_run and run.id == active_config_sync_run.id %}selected{% endif %}>#{{ run.id }} ({{ run.pulled_at }}, {{ run.status }})</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Search
+      <input type="text" name="q" value="{{ q }}" placeholder="entity/name/key/error..." />
+    </label>
+
+    <label>
+      Kind
+      <select name="kind">
+        <option value="">All</option>
+        {% for item in kinds %}
+          <option value="{{ item }}" {% if item == kind %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Fetch Status
+      <select name="status">
+        <option value="">All</option>
+        {% for item in statuses %}
+          <option value="{{ item }}" {% if item == status %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Page Size
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </label>
+
+    <div class="row gap-sm align-end">
+      <button type="submit">Apply Filters</button>
+      <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
+  </form>
+
+  <div class="row between wrap gap-sm">
+    <div>
+      {% if active_profile %}
+        <strong>Active Profile:</strong> {{ active_profile.name }}
+      {% endif %}
+      {% if active_config_sync_run %}
+        <div><strong>Last Config Sync:</strong> {{ active_config_sync_run.pulled_at }}</div>
+        <div><strong>Status:</strong> {{ active_config_sync_run.status }} ({{ active_config_sync_run.success_count }} success / {{ active_config_sync_run.error_count }} errors)</div>
+      {% endif %}
+    </div>
+
+    {% if active_profile %}
+      <div class="row gap-sm wrap">
+        <form method="post" action="/profiles/{{ active_profile.id }}/sync-config">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <input type="hidden" name="next_url" value="{{ next_url }}" />
+          <button type="submit">Sync Config Items</button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if active_profile and active_config_sync_run %}
+    <p>{{ total }} config items match filters.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Kind</th>
+            <th>Entity ID</th>
+            <th>Name</th>
+            <th>Config Key</th>
+            <th>Status</th>
+            <th>Pulled At</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in config_items %}
+          <tr>
+            <td>{{ item.id }}</td>
+            <td>{{ item.kind }}</td>
+            <td><code>{{ item.entity_id }}</code></td>
+            <td>{{ item.name or '' }}</td>
+            <td><code>{{ item.config_key or '' }}</code></td>
+            <td><span class="status-chip status-{{ item.fetch_status }}">{{ item.fetch_status }}</span></td>
+            <td>{{ item.pulled_at }}</td>
+            <td>
+              <a href="/config-items/{{ item.id }}?{{ build_query(profile_id=active_profile.id, config_sync_run_id=active_config_sync_run.id) }}">Details</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }}</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id, config_sync_run_id=active_config_sync_run.id, q=q, kind=kind, status=status, page=page-1, page_size=page_size) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id, config_sync_run_id=active_config_sync_run.id, q=q, kind=kind, status=status, page=page+1, page_size=page_size) }}">Next</a>
+        {% endif %}
+      </div>
+    </div>
+  {% elif active_profile %}
+    <p>No synced config items for this profile yet. Use <strong>Sync Config Items</strong>.</p>
+  {% else %}
+    <p>No profiles found. Create one on the settings page.</p>
+  {% endif %}
+</section>
+{% endblock %}

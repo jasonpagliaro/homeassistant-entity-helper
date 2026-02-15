@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Config Item Detail</h2>
+  <p><a href="{{ back_url }}">Back to config items</a></p>
+
+  <div class="detail-grid">
+    <div><strong>Profile</strong></div><div>{{ profile.name }}</div>
+    <div><strong>Sync Run</strong></div><div>#{{ sync_run.id }} ({{ sync_run.status }})</div>
+    <div><strong>Kind</strong></div><div>{{ snapshot.kind }}</div>
+    <div><strong>Entity ID</strong></div><div><code>{{ snapshot.entity_id }}</code></div>
+    <div><strong>Name</strong></div><div>{{ snapshot.name or '' }}</div>
+    <div><strong>Config Key</strong></div><div><code>{{ snapshot.config_key or '' }}</code></div>
+    <div><strong>Entity State</strong></div><div>{{ snapshot.state or '' }}</div>
+    <div><strong>Fetch Status</strong></div><div><span class="status-chip status-{{ snapshot.fetch_status }}">{{ snapshot.fetch_status }}</span></div>
+    <div><strong>Fetch Error</strong></div><div>{{ snapshot.fetch_error or '' }}</div>
+    <div><strong>Last Changed</strong></div><div>{{ snapshot.last_changed or '' }}</div>
+    <div><strong>Last Updated</strong></div><div>{{ snapshot.last_updated or '' }}</div>
+    <div><strong>Pulled At</strong></div><div>{{ snapshot.pulled_at }}</div>
+  </div>
+
+  <h3>Summary</h3>
+  <pre>{{ summary_pretty }}</pre>
+
+  <h3>References</h3>
+  <pre>{{ references_pretty }}</pre>
+
+  <h3>Config</h3>
+  <pre>{{ config_pretty }}</pre>
+
+  <h3>State Attributes</h3>
+  <pre>{{ attributes_pretty }}</pre>
+
+  <h3>Metadata</h3>
+  <pre>{{ metadata_pretty }}</pre>
+</section>
+{% endblock %}

@@ -139,6 +139,37 @@ button.danger {
   border: 1px solid #f6b5b5;
 }
 
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.82rem;
+  border: 1px solid var(--border);
+  background: #eef2f6;
+  color: var(--ink);
+}
+
+.status-success {
+  background: #ddf7e9;
+  border-color: #8ad0ac;
+}
+
+.status-error {
+  background: #fde5e5;
+  border-color: #f6b5b5;
+}
+
+.status-partial {
+  background: #fff4d6;
+  border-color: #f0cc7a;
+}
+
+.status-failed {
+  background: #fde5e5;
+  border-color: #f6b5b5;
+}
+
 .row {
   display: flex;
   align-items: center;

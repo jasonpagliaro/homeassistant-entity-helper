@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -24,12 +25,22 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app.db import ensure_default_profile, get_session, run_migrations
 from app.ha_client import HAClient, HAClientError
-from app.models import EntitySnapshot, Profile, SyncRun, utcnow
+from app.models import (
+    ConfigSnapshot,
+    ConfigSyncRun,
+    EntitySnapshot,
+    Profile,
+    SyncRun,
+    utcnow,
+)
 
 logger = logging.getLogger("ha_entity_vault")
 CSRF_SESSION_KEY = "csrf_token"
 FLASH_SESSION_KEY = "flash"
 DEFAULT_PAGE_SIZE = 50
+CONFIG_SYNC_CONCURRENCY = 8
+CONFIG_KINDS = {"automation", "script", "scene"}
+REFERENCE_KEYS = {"entity_id", "device_id", "area_id", "floor_id", "label_id", "scene", "script"}
 
 
 def app_name() -> str:
@@ -428,6 +439,385 @@ def build_entity_stmt(
     return stmt
 
 
+def config_kind_from_entity_id(entity_id: str) -> str | None:
+    if "." not in entity_id:
+        return None
+    kind = entity_id.split(".", 1)[0]
+    if kind not in CONFIG_KINDS:
+        return None
+    return kind
+
+
+def as_list(raw_value: Any) -> list[Any]:
+    if isinstance(raw_value, list):
+        return raw_value
+    if raw_value is None:
+        return []
+    return [raw_value]
+
+
+def config_value_count(
+    config: dict[str, Any],
+    primary_key: str,
+    legacy_key: str | None = None,
+) -> int:
+    for key in [primary_key, legacy_key]:
+        if key is None:
+            continue
+        if key not in config:
+            continue
+        return len(as_list(config.get(key)))
+    return 0
+
+
+def derive_config_key(
+    kind: str,
+    entity_id: str,
+    state: dict[str, Any] | None,
+    registry_entry: dict[str, Any] | None,
+) -> str | None:
+    attributes: dict[str, Any] = {}
+    if isinstance(state, dict):
+        raw_attributes = state.get("attributes")
+        if isinstance(raw_attributes, dict):
+            attributes = raw_attributes
+
+    if kind in {"automation", "scene"}:
+        key = as_clean_string(attributes.get("id"))
+        if key:
+            return key
+
+    if kind == "script" and "." in entity_id:
+        object_id = as_clean_string(entity_id.split(".", 1)[1])
+        if object_id:
+            return object_id
+
+    if isinstance(registry_entry, dict):
+        return as_clean_string(registry_entry.get("unique_id"))
+    return None
+
+
+def build_config_candidates(
+    states: list[dict[str, Any]],
+    registry_metadata: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    states_by_entity_id: dict[str, dict[str, Any]] = {}
+    for state in states:
+        entity_id = as_clean_string(state.get("entity_id"))
+        if not entity_id:
+            continue
+        kind = config_kind_from_entity_id(entity_id)
+        if kind is None:
+            continue
+        states_by_entity_id[entity_id] = state
+
+    registry_entities_by_id: dict[str, dict[str, Any]] = {}
+    for entry in registry_metadata.get("entities", []):
+        entity_id = as_clean_string(entry.get("entity_id"))
+        if not entity_id:
+            continue
+        kind = config_kind_from_entity_id(entity_id)
+        if kind is None:
+            continue
+        registry_entities_by_id[entity_id] = entry
+
+    candidates: list[dict[str, Any]] = []
+    for entity_id in sorted(set(states_by_entity_id) | set(registry_entities_by_id)):
+        kind = config_kind_from_entity_id(entity_id)
+        if kind is None:
+            continue
+
+        state = states_by_entity_id.get(entity_id)
+        registry_entry = registry_entities_by_id.get(entity_id)
+        state_name: str | None = None
+        if isinstance(state, dict):
+            raw_attributes = state.get("attributes")
+            if isinstance(raw_attributes, dict):
+                state_name = as_clean_string(raw_attributes.get("friendly_name"))
+
+        registry_name: str | None = None
+        if isinstance(registry_entry, dict):
+            registry_name = as_clean_string(registry_entry.get("name")) or as_clean_string(
+                registry_entry.get("original_name")
+            )
+
+        candidates.append(
+            {
+                "kind": kind,
+                "entity_id": entity_id,
+                "state": state,
+                "registry_entry": registry_entry,
+                "name": state_name or registry_name,
+                "config_key": derive_config_key(kind, entity_id, state, registry_entry),
+            }
+        )
+
+    return candidates
+
+
+def extract_reference_values(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, str):
+        cleaned = as_clean_string(raw_value)
+        return [cleaned] if cleaned else []
+
+    if isinstance(raw_value, (list, tuple, set)):
+        values: list[str] = []
+        for item in raw_value:
+            values.extend(extract_reference_values(item))
+        return values
+
+    return []
+
+
+def extract_config_references(raw_value: Any) -> dict[str, list[str]]:
+    collected: dict[str, list[str]] = {key: [] for key in REFERENCE_KEYS}
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in REFERENCE_KEYS:
+                    collected[key].extend(extract_reference_values(value))
+                visit(value)
+            return
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    visit(raw_value)
+
+    references: dict[str, list[str]] = {}
+    for key, values in collected.items():
+        deduped = unique_preserving_order(values)
+        if deduped:
+            references[key] = deduped
+    return references
+
+
+def summarize_config(kind: str, config: dict[str, Any]) -> dict[str, Any]:
+    use_blueprint = config.get("use_blueprint")
+    blueprint_path: str | None = None
+    if isinstance(use_blueprint, dict):
+        blueprint_path = as_clean_string(use_blueprint.get("path"))
+
+    summary = compact_dict(
+        {
+            "name": as_clean_string(config.get("alias")) or as_clean_string(config.get("name")),
+            "description": as_clean_string(config.get("description")),
+            "mode": as_clean_string(config.get("mode")),
+            "uses_blueprint": isinstance(use_blueprint, dict),
+            "blueprint_path": blueprint_path,
+        }
+    )
+
+    if kind == "automation":
+        summary["trigger_count"] = config_value_count(config, "triggers", "trigger")
+        summary["condition_count"] = config_value_count(config, "conditions", "condition")
+        summary["action_count"] = config_value_count(config, "actions", "action")
+    elif kind == "script":
+        summary["sequence_count"] = config_value_count(config, "sequence")
+    elif kind == "scene":
+        entities = config.get("entities")
+        if isinstance(entities, dict):
+            summary["entity_count"] = len(entities)
+        else:
+            summary["entity_count"] = len(as_list(entities))
+
+    return summary
+
+
+def get_latest_config_sync_run(session: Session, profile_id: int) -> ConfigSyncRun | None:
+    stmt = (
+        select(ConfigSyncRun)
+        .where(ConfigSyncRun.profile_id == profile_id)
+        .where(ConfigSyncRun.status.in_(["success", "partial"]))
+        .order_by(ConfigSyncRun.pulled_at.desc(), ConfigSyncRun.id.desc())
+    )
+    return session.exec(stmt).first()
+
+
+def build_config_item_stmt(
+    profile_id: int,
+    config_sync_run_id: int,
+    q: str,
+    kind: str,
+    status: str,
+):
+    stmt = select(ConfigSnapshot).where(
+        ConfigSnapshot.profile_id == profile_id,
+        ConfigSnapshot.config_sync_run_id == config_sync_run_id,
+    )
+
+    if q:
+        pattern = f"%{q.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(ConfigSnapshot.entity_id).like(pattern),
+                func.lower(func.coalesce(ConfigSnapshot.name, "")).like(pattern),
+                func.lower(func.coalesce(ConfigSnapshot.config_key, "")).like(pattern),
+                func.lower(func.coalesce(ConfigSnapshot.fetch_error, "")).like(pattern),
+                func.lower(func.coalesce(ConfigSnapshot.summary_json, "")).like(pattern),
+                func.lower(func.coalesce(ConfigSnapshot.references_json, "")).like(pattern),
+            )
+        )
+
+    if kind:
+        stmt = stmt.where(ConfigSnapshot.kind == kind)
+
+    if status:
+        stmt = stmt.where(ConfigSnapshot.fetch_status == status)
+
+    return stmt
+
+
+async def fetch_config_details(
+    client: HAClient,
+    kind: str,
+    entity_id: str,
+    config_key: str | None,
+    has_state: bool,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    if kind == "automation":
+        if has_state:
+            try:
+                return await client.fetch_automation_config_ws(entity_id), None, "ws"
+            except HAClientError as ws_exc:
+                if config_key:
+                    try:
+                        return await client.fetch_automation_config(config_key), None, "rest"
+                    except HAClientError as rest_exc:
+                        return None, str(rest_exc), None
+                return None, str(ws_exc), None
+        if config_key:
+            try:
+                return await client.fetch_automation_config(config_key), None, "rest"
+            except HAClientError as rest_exc:
+                return None, str(rest_exc), None
+        return None, "missing_config_locator", None
+
+    if kind == "script":
+        if has_state:
+            try:
+                return await client.fetch_script_config_ws(entity_id), None, "ws"
+            except HAClientError as ws_exc:
+                if config_key:
+                    try:
+                        return await client.fetch_script_config(config_key), None, "rest"
+                    except HAClientError as rest_exc:
+                        return None, str(rest_exc), None
+                return None, str(ws_exc), None
+        if config_key:
+            try:
+                return await client.fetch_script_config(config_key), None, "rest"
+            except HAClientError as rest_exc:
+                return None, str(rest_exc), None
+        return None, "missing_config_locator", None
+
+    if kind == "scene":
+        if config_key:
+            try:
+                return await client.fetch_scene_config(config_key), None, "rest"
+            except HAClientError as rest_exc:
+                return None, str(rest_exc), None
+        return None, "missing_config_locator", None
+
+    return None, f"unsupported_kind:{kind}", None
+
+
+async def build_config_snapshot_from_candidate(
+    client: HAClient,
+    semaphore: asyncio.Semaphore,
+    profile_id: int,
+    config_sync_run_id: int,
+    pulled_at: datetime,
+    candidate: dict[str, Any],
+) -> ConfigSnapshot:
+    async with semaphore:
+        kind = str(candidate.get("kind", "")).strip()
+        entity_id = str(candidate.get("entity_id", "")).strip()
+        state = candidate.get("state")
+        state_dict = state if isinstance(state, dict) else None
+        registry_entry_raw = candidate.get("registry_entry")
+        registry_entry = registry_entry_raw if isinstance(registry_entry_raw, dict) else None
+        has_state = state_dict is not None
+        config_key = as_clean_string(candidate.get("config_key"))
+
+        config_payload, fetch_error, detail_source = await fetch_config_details(
+            client=client,
+            kind=kind,
+            entity_id=entity_id,
+            config_key=config_key,
+            has_state=has_state,
+        )
+
+        name = as_clean_string(candidate.get("name"))
+        if not name and isinstance(config_payload, dict):
+            name = as_clean_string(config_payload.get("alias")) or as_clean_string(
+                config_payload.get("name")
+            )
+
+        attributes: dict[str, Any] = {}
+        state_value: str | None = None
+        last_changed: datetime | None = None
+        last_updated: datetime | None = None
+        if state_dict is not None:
+            raw_attributes = state_dict.get("attributes")
+            if isinstance(raw_attributes, dict):
+                attributes = raw_attributes
+            state_value = as_clean_string(state_dict.get("state"))
+            last_changed = parse_ha_datetime(state_dict.get("last_changed"))
+            last_updated = parse_ha_datetime(state_dict.get("last_updated"))
+
+        references_payload: dict[str, list[str]] = {}
+        summary_payload: dict[str, Any] = {}
+        if isinstance(config_payload, dict):
+            references_payload = extract_config_references(config_payload)
+            summary_payload = summarize_config(kind, config_payload)
+        elif name:
+            summary_payload = {"name": name}
+
+        metadata_payload = compact_dict(
+            {
+                "detail_source": detail_source,
+                "state_present": has_state,
+                "registry_present": registry_entry is not None,
+                "registry_unique_id": as_clean_string(
+                    registry_entry.get("unique_id") if registry_entry else None
+                ),
+                "registry_platform": as_clean_string(
+                    registry_entry.get("platform") if registry_entry else None
+                ),
+                "registry_disabled_by": as_clean_string(
+                    registry_entry.get("disabled_by") if registry_entry else None
+                ),
+                "registry_hidden_by": as_clean_string(
+                    registry_entry.get("hidden_by") if registry_entry else None
+                ),
+                "registry_entry": registry_entry,
+            }
+        )
+
+        fetch_status = "success" if fetch_error is None else "error"
+        return ConfigSnapshot(
+            profile_id=profile_id,
+            config_sync_run_id=config_sync_run_id,
+            kind=kind,
+            entity_id=entity_id,
+            config_key=config_key,
+            name=name,
+            state=state_value,
+            fetch_status=fetch_status,
+            fetch_error=fetch_error,
+            summary_json=safe_json_dump(summary_payload) if summary_payload else None,
+            references_json=safe_json_dump(references_payload) if references_payload else None,
+            config_json=safe_json_dump(config_payload) if isinstance(config_payload, dict) else None,
+            attributes_json=safe_json_dump(attributes) if attributes else None,
+            metadata_json=safe_json_dump(metadata_payload) if metadata_payload else None,
+            last_changed=last_changed,
+            last_updated=last_updated,
+            pulled_at=pulled_at,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
@@ -635,6 +1025,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Profile not found")
 
         deleted_name = profile.name
+        session.exec(delete(ConfigSnapshot).where(ConfigSnapshot.profile_id == profile_id))
+        session.exec(delete(ConfigSyncRun).where(ConfigSyncRun.profile_id == profile_id))
         session.exec(delete(EntitySnapshot).where(EntitySnapshot.profile_id == profile_id))
         session.exec(delete(SyncRun).where(SyncRun.profile_id == profile_id))
         session.delete(profile)
@@ -831,6 +1223,207 @@ def create_app() -> FastAPI:
 
         return RedirectResponse(url=next_target, status_code=303)
 
+    @app.post("/profiles/{profile_id}/sync-config")
+    async def sync_profile_config(
+        profile_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/config-items"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        profile = session.get(Profile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        token = resolve_profile_token(profile)
+        if not token:
+            set_flash(request, "error", "No token configured in profile or environment.")
+            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+
+        client = HAClient(
+            base_url=profile.base_url,
+            token=token,
+            verify_tls=profile.verify_tls,
+            timeout_seconds=profile.timeout_seconds,
+        )
+
+        pulled_at = utcnow()
+        start = perf_counter()
+        profile_id_value = profile.id
+        if profile_id_value is None:
+            raise HTTPException(status_code=500, detail="Profile ID is unavailable")
+
+        log_event(
+            "config_sync_started",
+            request_id=getattr(request.state, "request_id", None),
+            profile_id=profile_id_value,
+            profile_name=profile.name,
+            pulled_at=pulled_at.isoformat(),
+        )
+
+        try:
+            states = await client.fetch_states()
+        except HAClientError as exc:
+            failed_run = ConfigSyncRun(
+                profile_id=profile_id_value,
+                pulled_at=pulled_at,
+                item_count=0,
+                success_count=0,
+                error_count=0,
+                duration_ms=int((perf_counter() - start) * 1000),
+                status="failed",
+                error=str(exc),
+            )
+            session.add(failed_run)
+            session.commit()
+
+            set_flash(request, "error", f"Config sync failed: {exc}")
+            log_event(
+                "config_sync_failed",
+                request_id=getattr(request.state, "request_id", None),
+                profile_id=profile_id_value,
+                profile_name=profile.name,
+                error=str(exc),
+            )
+            return RedirectResponse(url=normalize_next_url(next_url), status_code=303)
+
+        registry_metadata: dict[str, list[dict[str, Any]]] = {}
+        try:
+            registry_metadata = await client.fetch_registry_metadata()
+        except HAClientError as exc:
+            log_event(
+                "config_sync_registry_metadata_unavailable",
+                request_id=getattr(request.state, "request_id", None),
+                profile_id=profile_id_value,
+                profile_name=profile.name,
+                error=str(exc),
+            )
+
+        candidates = build_config_candidates(states, registry_metadata)
+
+        config_sync_run = ConfigSyncRun(
+            profile_id=profile_id_value,
+            pulled_at=pulled_at,
+            item_count=len(candidates),
+            success_count=0,
+            error_count=0,
+            duration_ms=0,
+            status="success",
+            error=None,
+        )
+        session.add(config_sync_run)
+        session.commit()
+        session.refresh(config_sync_run)
+        config_sync_run_id = config_sync_run.id
+        if config_sync_run_id is None:
+            raise HTTPException(status_code=500, detail="Config sync run ID is unavailable")
+
+        snapshots: list[ConfigSnapshot] = []
+        if candidates:
+            semaphore = asyncio.Semaphore(CONFIG_SYNC_CONCURRENCY)
+            snapshots = await asyncio.gather(
+                *[
+                    build_config_snapshot_from_candidate(
+                        client=client,
+                        semaphore=semaphore,
+                        profile_id=profile_id_value,
+                        config_sync_run_id=config_sync_run_id,
+                        pulled_at=pulled_at,
+                        candidate=candidate,
+                    )
+                    for candidate in candidates
+                ]
+            )
+
+        success_count = sum(1 for snapshot in snapshots if snapshot.fetch_status == "success")
+        error_count = len(snapshots) - success_count
+        if error_count == 0:
+            final_status = "success"
+            final_error = None
+        elif success_count > 0:
+            final_status = "partial"
+            final_error = None
+        else:
+            final_status = "failed"
+            final_error = "No config items were fetched successfully."
+
+        config_sync_run.item_count = len(snapshots)
+        config_sync_run.success_count = success_count
+        config_sync_run.error_count = error_count
+        config_sync_run.duration_ms = int((perf_counter() - start) * 1000)
+        config_sync_run.status = final_status
+        config_sync_run.error = final_error
+
+        session.add_all(snapshots)
+        session.add(config_sync_run)
+        session.commit()
+
+        if final_status == "success":
+            set_flash(
+                request,
+                "success",
+                f"Config sync complete. Stored {success_count} config items.",
+            )
+            log_event(
+                "config_sync_completed",
+                request_id=getattr(request.state, "request_id", None),
+                profile_id=profile_id_value,
+                profile_name=profile.name,
+                config_sync_run_id=config_sync_run_id,
+                item_count=len(snapshots),
+                success_count=success_count,
+                error_count=error_count,
+                duration_ms=config_sync_run.duration_ms,
+                pulled_at=pulled_at.isoformat(),
+            )
+        elif final_status == "partial":
+            set_flash(
+                request,
+                "success",
+                "Config sync finished with partial results. "
+                f"Stored {success_count} items and {error_count} errors.",
+            )
+            log_event(
+                "config_sync_partial",
+                request_id=getattr(request.state, "request_id", None),
+                profile_id=profile_id_value,
+                profile_name=profile.name,
+                config_sync_run_id=config_sync_run_id,
+                item_count=len(snapshots),
+                success_count=success_count,
+                error_count=error_count,
+                duration_ms=config_sync_run.duration_ms,
+                pulled_at=pulled_at.isoformat(),
+            )
+        else:
+            set_flash(
+                request,
+                "error",
+                "Config sync failed. No config items were fetched successfully.",
+            )
+            log_event(
+                "config_sync_failed",
+                request_id=getattr(request.state, "request_id", None),
+                profile_id=profile_id_value,
+                profile_name=profile.name,
+                config_sync_run_id=config_sync_run_id,
+                item_count=len(snapshots),
+                success_count=success_count,
+                error_count=error_count,
+                duration_ms=config_sync_run.duration_ms,
+                error=final_error,
+                pulled_at=pulled_at.isoformat(),
+            )
+
+        next_target = normalize_next_url(next_url)
+        if next_target.startswith("/config-items") and "profile_id=" not in next_target:
+            query = build_query(profile_id=profile_id_value)
+            next_target = f"/config-items?{query}" if query else "/config-items"
+
+        return RedirectResponse(url=next_target, status_code=303)
+
     @app.get("/entities", response_class=HTMLResponse)
     async def list_entities(
         request: Request,
@@ -991,6 +1584,171 @@ def create_app() -> FastAPI:
                 "labels_pretty": safe_pretty_json(snapshot.labels_json),
                 "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
                 "back_url": f"/entities?{back_query}",
+            },
+        )
+
+    @app.get("/config-items", response_class=HTMLResponse)
+    async def list_config_items(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        config_sync_run_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        kind: str = Query(default=""),
+        status: str = Query(default=""),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        normalized_kind = kind.strip()
+        if normalized_kind and normalized_kind not in CONFIG_KINDS:
+            normalized_kind = ""
+
+        normalized_status = status.strip()
+        if normalized_status and normalized_status not in {"success", "error"}:
+            normalized_status = ""
+
+        profiles = session.exec(select(Profile).order_by(Profile.name)).all()
+        active_profile = choose_active_profile(session, profile_id)
+
+        config_runs: list[ConfigSyncRun] = []
+        active_config_sync_run: ConfigSyncRun | None = None
+        if active_profile is not None:
+            config_runs = session.exec(
+                select(ConfigSyncRun)
+                .where(ConfigSyncRun.profile_id == active_profile.id)
+                .order_by(ConfigSyncRun.pulled_at.desc(), ConfigSyncRun.id.desc())
+            ).all()
+            if config_sync_run_id is not None:
+                candidate = session.get(ConfigSyncRun, config_sync_run_id)
+                if candidate is not None and candidate.profile_id == active_profile.id:
+                    active_config_sync_run = candidate
+            if active_config_sync_run is None:
+                active_config_sync_run = get_latest_config_sync_run(session, active_profile.id)
+
+        config_items: list[ConfigSnapshot] = []
+        total = 0
+        total_pages = 1
+        kinds: list[str] = []
+        statuses: list[str] = []
+
+        if active_profile is not None and active_config_sync_run is not None:
+            filtered_stmt = build_config_item_stmt(
+                profile_id=active_profile.id,
+                config_sync_run_id=active_config_sync_run.id,
+                q=q,
+                kind=normalized_kind,
+                status=normalized_status,
+            )
+
+            count_stmt = select(func.count()).select_from(filtered_stmt.subquery())
+            total = int(session.exec(count_stmt).one())
+
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            offset = (page - 1) * page_size
+            config_items = session.exec(
+                filtered_stmt.order_by(ConfigSnapshot.kind, ConfigSnapshot.entity_id)
+                .offset(offset)
+                .limit(page_size)
+            ).all()
+
+            kinds = list(
+                session.exec(
+                    select(ConfigSnapshot.kind)
+                    .where(
+                        ConfigSnapshot.profile_id == active_profile.id,
+                        ConfigSnapshot.config_sync_run_id == active_config_sync_run.id,
+                    )
+                    .distinct()
+                    .order_by(ConfigSnapshot.kind)
+                ).all()
+            )
+            statuses = list(
+                session.exec(
+                    select(ConfigSnapshot.fetch_status)
+                    .where(
+                        ConfigSnapshot.profile_id == active_profile.id,
+                        ConfigSnapshot.config_sync_run_id == active_config_sync_run.id,
+                    )
+                    .distinct()
+                    .order_by(ConfigSnapshot.fetch_status)
+                ).all()
+            )
+
+        next_url_query = build_query(
+            profile_id=active_profile.id if active_profile else None,
+            config_sync_run_id=active_config_sync_run.id if active_config_sync_run else None,
+            q=q,
+            kind=normalized_kind,
+            status=normalized_status,
+            page=page,
+            page_size=page_size,
+        )
+        next_url = f"/config-items?{next_url_query}" if next_url_query else "/config-items"
+
+        return render_template(
+            request,
+            "config_items.html",
+            {
+                "profiles": profiles,
+                "active_profile": active_profile,
+                "config_runs": config_runs,
+                "active_config_sync_run": active_config_sync_run,
+                "config_items": config_items,
+                "kinds": kinds,
+                "statuses": statuses,
+                "q": q,
+                "kind": normalized_kind,
+                "status": normalized_status,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+                "next_url": next_url,
+            },
+        )
+
+    @app.get("/config-items/{snapshot_id}", response_class=HTMLResponse)
+    async def config_item_detail(
+        snapshot_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        config_sync_run_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        snapshot = session.get(ConfigSnapshot, snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Config item not found")
+
+        if profile_id is not None and snapshot.profile_id != profile_id:
+            raise HTTPException(status_code=404, detail="Config item not found in requested profile")
+
+        if config_sync_run_id is not None and snapshot.config_sync_run_id != config_sync_run_id:
+            raise HTTPException(status_code=404, detail="Config item not found in requested sync run")
+
+        profile = session.get(Profile, snapshot.profile_id)
+        sync_run = session.get(ConfigSyncRun, snapshot.config_sync_run_id)
+        if profile is None or sync_run is None:
+            raise HTTPException(status_code=404, detail="Related profile or sync run not found")
+
+        back_query = build_query(
+            profile_id=snapshot.profile_id,
+            config_sync_run_id=snapshot.config_sync_run_id,
+        )
+
+        return render_template(
+            request,
+            "config_item_detail.html",
+            {
+                "profile": profile,
+                "sync_run": sync_run,
+                "snapshot": snapshot,
+                "summary_pretty": safe_pretty_json(snapshot.summary_json),
+                "references_pretty": safe_pretty_json(snapshot.references_json),
+                "config_pretty": safe_pretty_json(snapshot.config_json),
+                "attributes_pretty": safe_pretty_json(snapshot.attributes_json),
+                "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
+                "back_url": f"/config-items?{back_query}",
             },
         )
 
