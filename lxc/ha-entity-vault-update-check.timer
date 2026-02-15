@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly HA Entity Vault update check timer
+
+[Timer]
+OnCalendar=Sun 03:00
+Persistent=true
+Unit=ha-entity-vault-update-check.service
+
+[Install]
+WantedBy=timers.target
