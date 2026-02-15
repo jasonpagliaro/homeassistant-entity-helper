@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ app_name }}</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container row between">
+        <h1>{{ app_name }}</h1>
+        <nav class="row gap-sm">
+          <a href="/entities">Entities</a>
+          <a href="/settings">Settings</a>
+          <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="container">
+      {% if flash %}
+      <div class="flash flash-{{ flash.level }}">{{ flash.message }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

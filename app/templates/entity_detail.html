@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Entity Detail</h2>
+  <p><a href="{{ back_url }}">Back to entities</a></p>
+
+  <div class="detail-grid">
+    <div><strong>Profile</strong></div><div>{{ profile.name }}</div>
+    <div><strong>Entity ID</strong></div><div><code>{{ snapshot.entity_id }}</code></div>
+    <div><strong>Domain</strong></div><div>{{ snapshot.domain }}</div>
+    <div><strong>State</strong></div><div>{{ snapshot.state }}</div>
+    <div><strong>Last Changed</strong></div><div>{{ snapshot.last_changed or '' }}</div>
+    <div><strong>Last Updated</strong></div><div>{{ snapshot.last_updated or '' }}</div>
+    <div><strong>Pulled At</strong></div><div>{{ snapshot.pulled_at }}</div>
+  </div>
+
+  <h3>Attributes</h3>
+  <pre>{{ attributes_pretty }}</pre>
+
+  <h3>Context</h3>
+  <pre>{{ context_pretty }}</pre>
+</section>
+{% endblock %}

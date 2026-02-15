@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Add Profile</h2>
+  <form method="post" action="/profiles" class="grid-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <label>
+      Profile Name
+      <input type="text" name="name" placeholder="default" required />
+    </label>
+    <label>
+      Base URL
+      <input type="url" name="base_url" placeholder="http://homeassistant.local:8123" required />
+    </label>
+    <label>
+      Token (Long-Lived Access Token)
+      <input type="password" name="token" placeholder="Paste token" autocomplete="off" />
+    </label>
+    <label>
+      Token Env Var Name
+      <input type="text" name="token_env_var" value="HA_TOKEN" />
+    </label>
+    <label>
+      Timeout Seconds
+      <input type="number" min="1" max="120" name="timeout_seconds" value="10" />
+    </label>
+    <label class="checkbox-row">
+      <input type="checkbox" name="verify_tls" checked />
+      Verify TLS Certificate
+    </label>
+    <button type="submit">Create Profile</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Profiles</h2>
+  {% if profiles %}
+    {% for profile in profiles %}
+      <article class="profile-card">
+        <h3>{{ profile.name }}</h3>
+        <form method="post" action="/profiles/{{ profile.id }}/update" class="grid-form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <label>
+            Profile Name
+            <input type="text" name="name" value="{{ profile.name }}" required />
+          </label>
+          <label>
+            Base URL
+            <input type="url" name="base_url" value="{{ profile.base_url }}" required />
+          </label>
+          <label>
+            New Token (leave blank to keep)
+            <input type="password" name="token" autocomplete="off" />
+          </label>
+          <label>
+            Token Env Var Name
+            <input type="text" name="token_env_var" value="{{ profile.token_env_var or 'HA_TOKEN' }}" />
+          </label>
+          <label>
+            Timeout Seconds
+            <input type="number" min="1" max="120" name="timeout_seconds" value="{{ profile.timeout_seconds }}" />
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="verify_tls" {% if profile.verify_tls %}checked{% endif %} />
+            Verify TLS Certificate
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="clear_token" />
+            Clear stored token
+          </label>
+          <button type="submit">Save Profile</button>
+        </form>
+
+        <div class="row gap-sm wrap">
+          <form method="post" action="/profiles/{{ profile.id }}/test">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="next_url" value="/settings" />
+            <button type="submit">Test Connection</button>
+          </form>
+          <form method="post" action="/profiles/{{ profile.id }}/sync">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="next_url" value="/entities?{{ build_query(profile_id=profile.id) }}" />
+            <button type="submit">Sync Now</button>
+          </form>
+          <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button type="submit" class="danger">Delete Profile</button>
+          </form>
+        </div>
+      </article>
+    {% endfor %}
+  {% else %}
+    <p>No profiles configured.</p>
+  {% endif %}
+</section>
+
+<section class="panel muted">
+  <h2>Security Note</h2>
+  <p>Tokens can be stored in SQLite for convenience. Prefer environment variable overrides for stronger secret hygiene.</p>
+</section>
+{% endblock %}
