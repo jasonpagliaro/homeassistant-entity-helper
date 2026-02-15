@@ -86,6 +86,11 @@ Update scripts:
 - Timer/service templates:
   - `lxc/ha-entity-vault-update-check.service`
   - `lxc/ha-entity-vault-update-check.timer`
+- Workflow helpers:
+  - `lxc/bootstrap-host-workflow.sh`
+  - `lxc/staging-apply-branch.sh`
+  - `lxc/configure-prod-auto-apply.sh`
+  - `lxc/configure-github-main-protection.sh`
 
 ### Command interface
 From repo root on the host:
@@ -145,6 +150,51 @@ sudo /Users/jason/Projects/homeassistant-entity-helper/lxc/update-host.sh apply
 ```
 
 All updater output is written to stdout/stderr for journald capture.
+
+### Branch -> Staging -> Main -> Production Auto-Deploy
+This workflow keeps branch validation isolated from production:
+
+1. Run one-time Ubuntu host bootstrap:
+```bash
+./lxc/bootstrap-host-workflow.sh
+```
+This creates/validates:
+- `/srv/ha-entity-vault-prod`
+- `/srv/ha-entity-vault-staging`
+- staging container `ha-entity-vault-staging` on `:18001`
+
+2. Configure production updater mode + timer:
+```bash
+sudo /srv/ha-entity-vault-prod/lxc/configure-prod-auto-apply.sh \
+  --prod-path /srv/ha-entity-vault-prod \
+  --container ha-entity-vault \
+  --mode auto_apply \
+  --branch main \
+  --allow-high-risk-auto false
+```
+
+3. Configure GitHub merge gates (repo admin):
+```bash
+/srv/ha-entity-vault-prod/lxc/configure-github-main-protection.sh
+```
+This script sets required checks (`lint`, `typecheck`, `tests`, `lxc-assets`) on `main` and disables non-squash merge methods.
+
+4. For each feature branch, deploy branch to staging:
+```bash
+/srv/ha-entity-vault-staging/lxc/staging-apply-branch.sh \
+  --branch codex/<feature-name> \
+  --staging-path /srv/ha-entity-vault-staging \
+  --staging-container ha-entity-vault-staging
+```
+
+5. Validate on staging URL (`http://<host-ip>:18001`), open PR, wait for CI, then squash merge to `main`.
+
+6. Production applies on weekly timer (`Sun 03:00` local host time) or immediately by:
+```bash
+sudo systemctl start ha-entity-vault-update-check.service
+```
+
+High-risk updates (`requirements.txt`, `migrations/`, `lxc/ha-entity-vault.service`) are blocked in `auto_apply` mode unless `HEV_UPDATE_ALLOW_HIGH_RISK_AUTO=true`.
 
 ## Manual LXC Setup (if not using helper script)
 1. Initialize LXD and launch container:
