@@ -99,6 +99,10 @@ require_command() {
   fi
 }
 
+git_repo() {
+  git -c safe.directory="${HEV_UPDATE_REPO_PATH}" -C "${HEV_UPDATE_REPO_PATH}" "$@"
+}
+
 acquire_lock() {
   mkdir -p "$(dirname "${HEV_UPDATE_LOCK_FILE}")"
   exec 9>"${HEV_UPDATE_LOCK_FILE}"
@@ -132,7 +136,7 @@ ensure_prereqs() {
     die 8 "Missing in-container helper at ${HEV_UPDATE_REPO_PATH}/lxc/update-in-container.sh"
   fi
 
-  git -C "${HEV_UPDATE_REPO_PATH}" remote get-url "${REMOTE_NAME}" >/dev/null 2>&1 || die 9 "Git remote '${REMOTE_NAME}' is not configured."
+  git_repo remote get-url "${REMOTE_NAME}" >/dev/null 2>&1 || die 9 "Git remote '${REMOTE_NAME}' is not configured."
 
   lxc info "${HEV_UPDATE_CONTAINER}" >/dev/null 2>&1 || die 10 "LXC container '${HEV_UPDATE_CONTAINER}' not found."
 
@@ -140,8 +144,8 @@ ensure_prereqs() {
 }
 
 fetch_remote() {
-  git -C "${HEV_UPDATE_REPO_PATH}" fetch --quiet "${REMOTE_NAME}" "${HEV_UPDATE_BRANCH}" || die 11 "Failed to fetch ${REMOTE_NAME}/${HEV_UPDATE_BRANCH}."
-  git -C "${HEV_UPDATE_REPO_PATH}" rev-parse --verify --quiet "refs/remotes/${REMOTE_NAME}/${HEV_UPDATE_BRANCH}" >/dev/null || \
+  git_repo fetch --quiet "${REMOTE_NAME}" "${HEV_UPDATE_BRANCH}" || die 11 "Failed to fetch ${REMOTE_NAME}/${HEV_UPDATE_BRANCH}."
+  git_repo rev-parse --verify --quiet "refs/remotes/${REMOTE_NAME}/${HEV_UPDATE_BRANCH}" >/dev/null || \
     die 12 "Remote branch ${REMOTE_NAME}/${HEV_UPDATE_BRANCH} not found."
 }
 
@@ -183,8 +187,8 @@ detect_high_risk() {
 evaluate_git_state() {
   fetch_remote
 
-  LOCAL_SHA="$(git -C "${HEV_UPDATE_REPO_PATH}" rev-parse HEAD)"
-  REMOTE_SHA="$(git -C "${HEV_UPDATE_REPO_PATH}" rev-parse "refs/remotes/${REMOTE_NAME}/${HEV_UPDATE_BRANCH}")"
+  LOCAL_SHA="$(git_repo rev-parse HEAD)"
+  REMOTE_SHA="$(git_repo rev-parse "refs/remotes/${REMOTE_NAME}/${HEV_UPDATE_BRANCH}")"
   COMMITS_AHEAD="0"
   CHECK_RESULT="none"
   LOCAL_AHEAD="false"
@@ -196,15 +200,15 @@ evaluate_git_state() {
     return
   fi
 
-  if git -C "${HEV_UPDATE_REPO_PATH}" merge-base --is-ancestor "${LOCAL_SHA}" "${REMOTE_SHA}"; then
+  if git_repo merge-base --is-ancestor "${LOCAL_SHA}" "${REMOTE_SHA}"; then
     CHECK_RESULT="updates"
-    COMMITS_AHEAD="$(git -C "${HEV_UPDATE_REPO_PATH}" rev-list --count "${LOCAL_SHA}..${REMOTE_SHA}")"
-    mapfile -t CHANGED_PATHS < <(git -C "${HEV_UPDATE_REPO_PATH}" diff --name-only "${LOCAL_SHA}" "${REMOTE_SHA}")
+    COMMITS_AHEAD="$(git_repo rev-list --count "${LOCAL_SHA}..${REMOTE_SHA}")"
+    mapfile -t CHANGED_PATHS < <(git_repo diff --name-only "${LOCAL_SHA}" "${REMOTE_SHA}")
     detect_high_risk
     return
   fi
 
-  if git -C "${HEV_UPDATE_REPO_PATH}" merge-base --is-ancestor "${REMOTE_SHA}" "${LOCAL_SHA}"; then
+  if git_repo merge-base --is-ancestor "${REMOTE_SHA}" "${LOCAL_SHA}"; then
     LOCAL_AHEAD="true"
     log "WARN" "Local branch is ahead of ${REMOTE_NAME}/${HEV_UPDATE_BRANCH}; no fast-forward update available."
     return
@@ -253,7 +257,7 @@ clear_pending_state() {
 }
 
 ensure_clean_worktree() {
-  if [[ -n "$(git -C "${HEV_UPDATE_REPO_PATH}" status --porcelain --untracked-files=normal)" ]]; then
+  if [[ -n "$(git_repo status --porcelain --untracked-files=normal)" ]]; then
     die 14 "Repository has uncommitted changes; refusing update. Commit/stash/clean first."
   fi
 }
@@ -276,7 +280,7 @@ rollback_after_failure() {
 
   log "ERROR" "Update failed post-pull; starting rollback to ${pre_sha}."
 
-  if ! git -C "${HEV_UPDATE_REPO_PATH}" reset --hard "${pre_sha}" >/dev/null; then
+  if ! git_repo reset --hard "${pre_sha}" >/dev/null; then
     die 31 "Rollback failed while resetting git state to ${pre_sha}."
   fi
   if ! run_container_helper install; then
@@ -317,7 +321,7 @@ apply_update() {
   fi
   log "INFO" "Pre-update database backup: ${backup_path}"
 
-  if ! git -C "${HEV_UPDATE_REPO_PATH}" pull --ff-only "${REMOTE_NAME}" "${HEV_UPDATE_BRANCH}"; then
+  if ! git_repo pull --ff-only "${REMOTE_NAME}" "${HEV_UPDATE_BRANCH}"; then
     die 16 "git pull --ff-only failed."
   fi
 
