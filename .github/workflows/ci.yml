@@ -59,6 +59,10 @@ jobs:
           bash -n lxc/setup-in-container.sh
           bash -n lxc/update-host.sh
           bash -n lxc/update-in-container.sh
+          bash -n lxc/bootstrap-host-workflow.sh
+          bash -n lxc/staging-apply-branch.sh
+          bash -n lxc/configure-prod-auto-apply.sh
+          bash -n lxc/configure-github-main-protection.sh
       - name: Verify systemd unit exists
         run: test -f lxc/ha-entity-vault.service
       - name: Verify update assets exist
