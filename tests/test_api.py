@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from app import db
 from app.ha_client import HAClientError
+from app.llm_client import LLMClientError
 from app.main import create_app
 from app.models import (
     ConfigSnapshot,
@@ -1070,6 +1071,301 @@ def test_missing_llm_key_and_disabled_connection_are_blocked(
     )
     assert queue_response.status_code == 200
     assert "No enabled LLM connection configured for this profile." in queue_response.text
+
+
+def test_llm_presets_api_returns_expected_catalog(client: TestClient) -> None:
+    response = client.get("/api/llm/presets")
+    assert response.status_code == 200
+    payload = response.json()
+    assert "presets" in payload
+
+    presets = payload["presets"]
+    assert isinstance(presets, list)
+    by_slug = {item["slug"]: item for item in presets}
+    assert set(by_slug) == {"chatgpt", "claude", "gemini", "manual"}
+    assert by_slug["chatgpt"]["default_api_key_env_var"] == "OPENAI_API_KEY"
+    assert by_slug["claude"]["default_api_key_env_var"] == "ANTHROPIC_API_KEY"
+    assert by_slug["gemini"]["default_api_key_env_var"] == "GOOGLE_API_KEY"
+    assert "base_url" in by_slug["chatgpt"]["required_fields"]
+    assert "model" in by_slug["chatgpt"]["required_fields"]
+    assert "api_key_env_var" in by_slug["chatgpt"]["required_fields"]
+
+
+def test_llm_models_api_discovers_provider_models(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "token-123")
+
+    async def fake_list_models(_: Any) -> list[str]:
+        return ["gpt-4o", "gpt-4o-mini"]
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.list_models", fake_list_models)
+
+    response = client.post(
+        "/api/llm/models",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "chatgpt",
+            "base_url": "",
+            "api_key_env_var": "",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["source"] == "provider"
+    assert payload["resolved_base_url"] == "https://api.openai.com/v1"
+    assert payload["resolved_api_key_env_var"] == "OPENAI_API_KEY"
+    assert payload["models"] == ["gpt-4o", "gpt-4o-mini"]
+    assert payload["default_model"] == "gpt-4o"
+    assert payload["api_key_env_var_status"]["is_set"] is True
+
+
+def test_llm_models_api_falls_back_when_discovery_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "token-123")
+
+    async def fake_list_models(_: Any) -> list[str]:
+        raise LLMClientError("provider unavailable")
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.list_models", fake_list_models)
+
+    response = client.post(
+        "/api/llm/models",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "chatgpt",
+            "base_url": "",
+            "api_key_env_var": "",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["source"] == "fallback"
+    assert payload["models"]
+    assert any("Model discovery failed" in warning for warning in payload["warnings"])
+    assert payload["api_key_env_var_status"]["env_var"] == "OPENAI_API_KEY"
+    assert payload["api_key_env_var_status"]["is_set"] is True
+
+
+def test_llm_models_api_accepts_direct_api_key(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+
+    async def fake_list_models(_: Any) -> list[str]:
+        return ["gpt-4o-mini"]
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.list_models", fake_list_models)
+
+    response = client.post(
+        "/api/llm/models",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "chatgpt",
+            "base_url": "https://api.openai.com/v1",
+            "api_key_env_var": "sk-svcacct-REDACTED",
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["source"] == "provider"
+    assert payload["models"] == ["gpt-4o", "gpt-4o-mini"]
+    assert payload["api_key_env_var_status"]["mode"] == "direct_key"
+    assert payload["api_key_env_var_status"]["using_direct_key"] is True
+    assert payload["api_key_env_var_status"]["env_var"] == ""
+    assert payload["api_key_env_var_status"]["valid_name"] is False
+    assert payload["api_key_env_var_status"]["looks_like_secret_value"] is True
+    assert payload["warnings"] == []
+
+
+def test_llm_test_draft_endpoint_success_and_validation(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "token-123")
+
+    async def fake_test_connection_verbose(_: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "message": "reachable",
+            "debug": {
+                "endpoint": "https://api.openai.com/v1/chat/completions",
+                "attempts": [
+                    {
+                        "request_body": {"model": "gpt-4o"},
+                        "response_status": 200,
+                        "response_body": {"choices": [{"message": {"content": "{\"ok\":true}"}}]},
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.test_connection_verbose", fake_test_connection_verbose)
+
+    success_response = client.post(
+        "/api/llm/test-draft",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "chatgpt",
+            "base_url": "",
+            "model": "",
+            "api_key_env_var": "",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+        },
+    )
+    assert success_response.status_code == 200
+    success_payload = success_response.json()
+    assert success_payload["ok"] is True
+    assert "reachable" in success_payload["message"].lower()
+    assert success_payload["debug"]["endpoint"].endswith("/chat/completions")
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    missing_key_response = client.post(
+        "/api/llm/test-draft",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "chatgpt",
+            "base_url": "",
+            "model": "",
+            "api_key_env_var": "",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+        },
+    )
+    assert missing_key_response.status_code == 200
+    missing_key_payload = missing_key_response.json()
+    assert missing_key_payload["ok"] is False
+    assert any("OPENAI_API_KEY" in error for error in missing_key_payload["errors"])
+    assert missing_key_payload["debug"] == {}
+
+    raw_key_response = client.post(
+        "/api/llm/test-draft",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "manual",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4o-mini",
+            "api_key_env_var": "sk-svcacct-REDACTED",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+        },
+    )
+    assert raw_key_response.status_code == 200
+    raw_key_payload = raw_key_response.json()
+    assert raw_key_payload["ok"] is True
+    assert raw_key_payload["api_key_env_var_status"]["mode"] == "direct_key"
+    assert raw_key_payload["debug"]["attempts"][0]["response_status"] == 200
+
+    invalid_url_response = client.post(
+        "/api/llm/test-draft",
+        data={
+            "csrf_token": csrf_token,
+            "preset_slug": "manual",
+            "base_url": "not-valid",
+            "model": "gpt-4o-mini",
+            "api_key_env_var": "OPENAI_API_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+        },
+    )
+    assert invalid_url_response.status_code == 200
+    invalid_url_payload = invalid_url_response.json()
+    assert invalid_url_payload["ok"] is False
+    assert "http:// or https://" in " ".join(invalid_url_payload["errors"])
+
+
+def test_llm_connection_create_and_update_hydrate_preset_defaults(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="preset-hydration")
+
+    create_response = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Preset Defaults",
+            "preset_slug": "chatgpt",
+            "base_url": "",
+            "model": "",
+            "api_key_env_var": "",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_response.status_code == 303
+    connection_id = get_llm_connection_id(profile_id, "Preset Defaults")
+
+    with Session(db.get_engine()) as session:
+        created = session.get(LLMConnection, connection_id)
+        assert created is not None
+        assert created.base_url == "https://api.openai.com/v1"
+        assert created.model == "gpt-4o"
+        assert created.api_key_env_var == "OPENAI_API_KEY"
+
+    update_response = client.post(
+        f"/llm-connections/{connection_id}/update",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Preset Defaults",
+            "preset_slug": "gemini",
+            "base_url": "",
+            "model": "",
+            "api_key_env_var": "",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert update_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        updated = session.get(LLMConnection, connection_id)
+        assert updated is not None
+        assert updated.base_url == "https://generativelanguage.googleapis.com/v1beta/openai"
+        assert updated.model == "gemini-2.5-pro"
+        assert updated.api_key_env_var == "GOOGLE_API_KEY"
 
 
 def test_config_items_shows_suggest_for_successful_automation_only(client: TestClient) -> None:

@@ -104,41 +104,90 @@
             <h5>LLM Connections</h5>
             <p class="muted-text">OpenAI-compatible endpoint support for cloud and local providers.</p>
 
-            <form method="post" action="/profiles/{{ profile.id }}/llm-connections" class="grid-form compact">
+            <form
+              method="post"
+              action="/profiles/{{ profile.id }}/llm-connections"
+              class="grid-form compact llm-config-form"
+              data-llm-form="true"
+            >
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+              <label>
+                Preset
+                <select name="preset_slug" data-llm-preset>
+                  {% for preset in llm_presets %}
+                    <option value="{{ preset.slug }}" {% if preset.slug == "manual" %}selected{% endif %}>
+                      {{ preset.label }}
+                    </option>
+                  {% endfor %}
+                </select>
+              </label>
               <label>
                 Name
                 <input type="text" name="name" placeholder="Connection name" required />
               </label>
               <label>
                 Base URL
-                <input type="url" name="base_url" placeholder="http://localhost:11434/v1" required />
+                <input
+                  type="url"
+                  name="base_url"
+                  placeholder="https://api.openai.com/v1 or http://localhost:11434/v1"
+                  data-llm-base-url
+                />
               </label>
               <label>
                 Model
-                <input type="text" name="model" placeholder="gpt-4o-mini or llama3.1" required />
+                <input type="text" name="model" placeholder="gpt-4o-mini or llama3.1" data-llm-model-input />
               </label>
               <label>
-                API Key Env Var
-                <input type="text" name="api_key_env_var" placeholder="OPENAI_API_KEY (optional for local)" />
+                Model List
+                <select data-llm-model-select>
+                  <option value="">Load models to choose from</option>
+                </select>
+              </label>
+              <label>
+                Known Features (Info)
+                <select data-llm-feature-select disabled>
+                  <option value="">Select a model to view known features</option>
+                </select>
+              </label>
+              <label>
+                API Key or Env Var
+                <input
+                  type="text"
+                  name="api_key_env_var"
+                  placeholder="OPENAI_API_KEY or sk-... (optional for local)"
+                  data-llm-api-key-env-var
+                />
               </label>
               <label>
                 Timeout Seconds
-                <input type="number" min="1" max="300" name="timeout_seconds" value="20" />
+                <input type="number" min="1" max="300" name="timeout_seconds" value="20" data-llm-timeout />
               </label>
               <label>
                 Temperature
-                <input type="number" min="0" max="2" step="0.1" name="temperature" value="0.2" />
+                <input type="number" min="0" max="2" step="0.1" name="temperature" value="0.2" data-llm-temperature />
               </label>
               <label>
                 Max Output Tokens
-                <input type="number" min="1" max="8192" name="max_output_tokens" value="900" />
+                <input type="number" min="1" max="8192" name="max_output_tokens" value="900" data-llm-max-output-tokens />
               </label>
               <label>
                 Extra Headers JSON
-                <input type="text" name="extra_headers_json" placeholder='{"HTTP-Referer":"..."}' />
+                <input type="text" name="extra_headers_json" placeholder='{"HTTP-Referer":"..."}' data-llm-extra-headers />
               </label>
+              <div class="llm-form-actions llm-form-actions-wide">
+                <button type="button" class="button-secondary" data-llm-refresh-models>Load Models</button>
+                <button type="button" class="button-secondary" data-llm-test-draft>Test Draft LLM</button>
+              </div>
+              <div class="llm-guidance" data-llm-required-fields></div>
+              <div class="llm-guidance" data-llm-api-key-status></div>
+              <div class="llm-guidance" data-llm-warnings></div>
+              <div class="llm-test-result" data-llm-test-result></div>
+              <details class="llm-test-debug" data-llm-test-debug hidden>
+                <summary>Debug details</summary>
+                <pre data-llm-test-debug-content></pre>
+              </details>
               <label class="checkbox-row">
                 <input type="checkbox" name="is_enabled" checked />
                 Enabled
@@ -164,41 +213,81 @@
                       {% endif %}
                     </div>
                   </div>
-                  <form method="post" action="/llm-connections/{{ connection.id }}/update" class="grid-form compact">
+                  {% set connection_preset_slug = llm_connection_preset_by_id.get(connection.id, "manual") %}
+                  <form
+                    method="post"
+                    action="/llm-connections/{{ connection.id }}/update"
+                    class="grid-form compact llm-config-form"
+                    data-llm-form="true"
+                  >
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                     <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+                    <label>
+                      Preset
+                      <select name="preset_slug" data-llm-preset>
+                        {% for preset in llm_presets %}
+                          <option value="{{ preset.slug }}" {% if preset.slug == connection_preset_slug %}selected{% endif %}>
+                            {{ preset.label }}
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </label>
                     <label>
                       Name
                       <input type="text" name="name" value="{{ connection.name }}" required />
                     </label>
                     <label>
                       Base URL
-                      <input type="url" name="base_url" value="{{ connection.base_url }}" required />
+                      <input type="url" name="base_url" value="{{ connection.base_url }}" data-llm-base-url />
                     </label>
                     <label>
                       Model
-                      <input type="text" name="model" value="{{ connection.model }}" required />
+                      <input type="text" name="model" value="{{ connection.model }}" data-llm-model-input />
                     </label>
                     <label>
-                      API Key Env Var
-                      <input type="text" name="api_key_env_var" value="{{ connection.api_key_env_var or '' }}" />
+                      Model List
+                      <select data-llm-model-select>
+                        <option value="">Load models to choose from</option>
+                      </select>
+                    </label>
+                    <label>
+                      Known Features (Info)
+                      <select data-llm-feature-select disabled>
+                        <option value="">Select a model to view known features</option>
+                      </select>
+                    </label>
+                    <label>
+                      API Key or Env Var
+                      <input type="text" name="api_key_env_var" value="{{ connection.api_key_env_var or '' }}" data-llm-api-key-env-var />
                     </label>
                     <label>
                       Timeout Seconds
-                      <input type="number" min="1" max="300" name="timeout_seconds" value="{{ connection.timeout_seconds }}" />
+                      <input type="number" min="1" max="300" name="timeout_seconds" value="{{ connection.timeout_seconds }}" data-llm-timeout />
                     </label>
                     <label>
                       Temperature
-                      <input type="number" min="0" max="2" step="0.1" name="temperature" value="{{ connection.temperature }}" />
+                      <input type="number" min="0" max="2" step="0.1" name="temperature" value="{{ connection.temperature }}" data-llm-temperature />
                     </label>
                     <label>
                       Max Output Tokens
-                      <input type="number" min="1" max="8192" name="max_output_tokens" value="{{ connection.max_output_tokens }}" />
+                      <input type="number" min="1" max="8192" name="max_output_tokens" value="{{ connection.max_output_tokens }}" data-llm-max-output-tokens />
                     </label>
                     <label>
                       Extra Headers JSON
-                      <input type="text" name="extra_headers_json" value="{{ connection.extra_headers_json or '' }}" />
+                      <input type="text" name="extra_headers_json" value="{{ connection.extra_headers_json or '' }}" data-llm-extra-headers />
                     </label>
+                    <div class="llm-form-actions llm-form-actions-wide">
+                      <button type="button" class="button-secondary" data-llm-refresh-models>Load Models</button>
+                      <button type="button" class="button-secondary" data-llm-test-draft>Test Draft LLM</button>
+                    </div>
+                    <div class="llm-guidance" data-llm-required-fields></div>
+                    <div class="llm-guidance" data-llm-api-key-status></div>
+                    <div class="llm-guidance" data-llm-warnings></div>
+                    <div class="llm-test-result" data-llm-test-result></div>
+                    <details class="llm-test-debug" data-llm-test-debug hidden>
+                      <summary>Debug details</summary>
+                      <pre data-llm-test-debug-content></pre>
+                    </details>
                     <label class="checkbox-row">
                       <input type="checkbox" name="is_enabled" {% if connection.is_enabled %}checked{% endif %} />
                       Enabled
@@ -363,6 +452,8 @@
   </div>
 </div>
 
+<script id="llm-presets-data" type="application/json">{{ llm_presets_json | safe }}</script>
+
 <script>
   (function () {
     function openModal(id) {
@@ -415,6 +506,517 @@
       }
       closeModal(openModalEl.id);
     });
+  })();
+</script>
+<script>
+  (function () {
+    const presetsScript = document.getElementById("llm-presets-data");
+    if (!(presetsScript instanceof HTMLScriptElement)) {
+      return;
+    }
+
+    let presets = [];
+    try {
+      const parsed = JSON.parse(presetsScript.textContent || "[]");
+      if (Array.isArray(parsed)) {
+        presets = parsed;
+      }
+    } catch (error) {
+      presets = [];
+    }
+    const presetsBySlug = new Map();
+    for (const preset of presets) {
+      if (preset && typeof preset.slug === "string") {
+        presetsBySlug.set(preset.slug, preset);
+      }
+    }
+
+    const requiredFieldLabels = {
+      base_url: "Base URL",
+      model: "Model",
+      api_key_env_var: "API Key or Env Var",
+    };
+
+    function getPreset(slug) {
+      if (typeof slug !== "string") {
+        return presetsBySlug.get("manual") || null;
+      }
+      return presetsBySlug.get(slug) || presetsBySlug.get("manual") || null;
+    }
+
+    function asStringArray(value) {
+      if (!Array.isArray(value)) {
+        return [];
+      }
+      const items = [];
+      for (const item of value) {
+        if (typeof item === "string" && item.trim()) {
+          items.push(item.trim());
+        }
+      }
+      return items;
+    }
+
+    function asFeaturesMap(value) {
+      if (!value || typeof value !== "object") {
+        return {};
+      }
+      const output = {};
+      for (const [modelId, features] of Object.entries(value)) {
+        if (typeof modelId !== "string") {
+          continue;
+        }
+        output[modelId] = asStringArray(features);
+      }
+      return output;
+    }
+
+    function setStatusMessage(el, message, level) {
+      if (!(el instanceof HTMLElement)) {
+        return;
+      }
+      el.textContent = message;
+      el.classList.remove("llm-message-success", "llm-message-error", "llm-message-muted");
+      if (level === "success") {
+        el.classList.add("llm-message-success");
+      } else if (level === "error") {
+        el.classList.add("llm-message-error");
+      } else {
+        el.classList.add("llm-message-muted");
+      }
+    }
+
+    function formatRequiredFields(fields, valuesByField) {
+      const labels = [];
+      for (const field of fields) {
+        const label = requiredFieldLabels[field] || field;
+        const value = valuesByField[field] || "";
+        labels.push(value ? `${label}: set` : `${label}: required`);
+      }
+      return labels.join(" | ");
+    }
+
+    function initLlmForm(form) {
+      const csrfInput = form.querySelector('input[name="csrf_token"]');
+      const presetSelect = form.querySelector("[data-llm-preset]");
+      const baseUrlInput = form.querySelector("[data-llm-base-url]");
+      const modelInput = form.querySelector("[data-llm-model-input]");
+      const modelSelect = form.querySelector("[data-llm-model-select]");
+      const featureSelect = form.querySelector("[data-llm-feature-select]");
+      const apiKeyEnvVarInput = form.querySelector("[data-llm-api-key-env-var]");
+      const timeoutInput = form.querySelector("[data-llm-timeout]");
+      const temperatureInput = form.querySelector("[data-llm-temperature]");
+      const maxOutputTokensInput = form.querySelector("[data-llm-max-output-tokens]");
+      const extraHeadersInput = form.querySelector("[data-llm-extra-headers]");
+      const refreshModelsButton = form.querySelector("[data-llm-refresh-models]");
+      const testDraftButton = form.querySelector("[data-llm-test-draft]");
+      const requiredFieldsMessage = form.querySelector("[data-llm-required-fields]");
+      const apiKeyStatusMessage = form.querySelector("[data-llm-api-key-status]");
+      const warningsMessage = form.querySelector("[data-llm-warnings]");
+      const testResultMessage = form.querySelector("[data-llm-test-result]");
+      const debugDetails = form.querySelector("[data-llm-test-debug]");
+      const debugContent = form.querySelector("[data-llm-test-debug-content]");
+
+      if (!(csrfInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(presetSelect instanceof HTMLSelectElement)) {
+        return;
+      }
+      if (!(baseUrlInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(modelInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(modelSelect instanceof HTMLSelectElement)) {
+        return;
+      }
+      if (!(featureSelect instanceof HTMLSelectElement)) {
+        return;
+      }
+      if (!(apiKeyEnvVarInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(timeoutInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(temperatureInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(maxOutputTokensInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(extraHeadersInput instanceof HTMLInputElement)) {
+        return;
+      }
+      if (!(refreshModelsButton instanceof HTMLButtonElement)) {
+        return;
+      }
+      if (!(testDraftButton instanceof HTMLButtonElement)) {
+        return;
+      }
+      if (!(debugDetails instanceof HTMLDetailsElement)) {
+        return;
+      }
+      if (!(debugContent instanceof HTMLElement)) {
+        return;
+      }
+
+      let requiredFields = [];
+      let knownFeaturesByModel = {};
+
+      function localApiKeyStatusFromInput() {
+        const envVar = apiKeyEnvVarInput.value.trim();
+        if (!envVar) {
+          return {
+            env_var: "",
+            configured: false,
+            is_set: false,
+            status_message: "API key: not configured (optional for local providers).",
+            status_level: "muted",
+          };
+        }
+        const validName = /^[A-Za-z_][A-Za-z0-9_]*$/.test(envVar);
+        if (validName) {
+          return {
+            env_var: envVar,
+            configured: true,
+            is_set: false,
+            status_message: `API key env var '${envVar}' is configured (set status checked on load/test).`,
+            status_level: "muted",
+          };
+        }
+        return {
+          env_var: "",
+          configured: true,
+          is_set: true,
+          status_message: "Using direct API key value.",
+          status_level: "success",
+        };
+      }
+
+      function currentPreset() {
+        return getPreset(presetSelect.value);
+      }
+
+      function setModelOptions(models) {
+        const currentModel = modelInput.value.trim();
+        const uniqueModels = [];
+        for (const modelId of models) {
+          if (!uniqueModels.includes(modelId)) {
+            uniqueModels.push(modelId);
+          }
+        }
+        if (currentModel && !uniqueModels.includes(currentModel)) {
+          uniqueModels.unshift(currentModel);
+        }
+
+        modelSelect.textContent = "";
+        if (!uniqueModels.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No models available";
+          modelSelect.appendChild(option);
+          return;
+        }
+        for (const modelId of uniqueModels) {
+          const option = document.createElement("option");
+          option.value = modelId;
+          option.textContent = modelId;
+          if (modelId === currentModel) {
+            option.selected = true;
+          }
+          modelSelect.appendChild(option);
+        }
+      }
+
+      function updateFeatureSelect() {
+        const modelId = modelInput.value.trim();
+        const features = asStringArray(knownFeaturesByModel[modelId]);
+        featureSelect.textContent = "";
+        if (!modelId) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "Select a model to view known features";
+          featureSelect.appendChild(option);
+          featureSelect.disabled = true;
+          return;
+        }
+        if (!features.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No known features for this model";
+          featureSelect.appendChild(option);
+          featureSelect.disabled = true;
+          return;
+        }
+        for (const feature of features) {
+          const option = document.createElement("option");
+          option.value = feature;
+          option.textContent = feature;
+          featureSelect.appendChild(option);
+        }
+        featureSelect.disabled = false;
+      }
+
+      function renderRequiredFields() {
+        if (!(requiredFieldsMessage instanceof HTMLElement)) {
+          return;
+        }
+        const valuesByField = {
+          base_url: baseUrlInput.value.trim(),
+          model: modelInput.value.trim(),
+          api_key_env_var: apiKeyEnvVarInput.value.trim(),
+        };
+        const text = formatRequiredFields(requiredFields, valuesByField);
+        setStatusMessage(requiredFieldsMessage, text || "No required fields.", "muted");
+      }
+
+      function renderApiKeyStatus(statusPayload) {
+        if (!(apiKeyStatusMessage instanceof HTMLElement)) {
+          return;
+        }
+        const statusMessage =
+          statusPayload && typeof statusPayload.status_message === "string"
+            ? statusPayload.status_message
+            : "";
+        const statusLevel =
+          statusPayload && typeof statusPayload.status_level === "string"
+            ? statusPayload.status_level
+            : "";
+        if (statusMessage) {
+          if (statusLevel === "success") {
+            setStatusMessage(apiKeyStatusMessage, statusMessage, "success");
+            return;
+          }
+          if (statusLevel === "error") {
+            setStatusMessage(apiKeyStatusMessage, statusMessage, "error");
+            return;
+          }
+          setStatusMessage(apiKeyStatusMessage, statusMessage, "muted");
+          return;
+        }
+        const configured = Boolean(statusPayload && statusPayload.configured);
+        const envVar = configured ? String(statusPayload.env_var || "") : "";
+        const isSet = Boolean(statusPayload && statusPayload.is_set);
+        if (!configured) {
+          setStatusMessage(
+            apiKeyStatusMessage,
+            "API key env var: not configured (optional for local providers).",
+            "muted"
+          );
+          return;
+        }
+        if (isSet) {
+          setStatusMessage(apiKeyStatusMessage, `API key env var '${envVar}' is set.`, "success");
+          return;
+        }
+        setStatusMessage(apiKeyStatusMessage, `API key env var '${envVar}' is not set.`, "error");
+      }
+
+      function renderWarnings(warnings) {
+        if (!(warningsMessage instanceof HTMLElement)) {
+          return;
+        }
+        const cleanedWarnings = asStringArray(warnings);
+        if (!cleanedWarnings.length) {
+          setStatusMessage(warningsMessage, "", "muted");
+          return;
+        }
+        setStatusMessage(warningsMessage, cleanedWarnings.join(" "), "error");
+      }
+
+      function renderDebugDetails(debugPayload) {
+        if (!debugPayload || typeof debugPayload !== "object") {
+          debugDetails.hidden = true;
+          debugDetails.open = false;
+          debugContent.textContent = "";
+          return;
+        }
+        const serialized = JSON.stringify(debugPayload, null, 2);
+        if (!serialized || serialized === "{}") {
+          debugDetails.hidden = true;
+          debugDetails.open = false;
+          debugContent.textContent = "";
+          return;
+        }
+        debugDetails.hidden = false;
+        debugContent.textContent = serialized;
+      }
+
+      function applyPresetDefaults(fillAll) {
+        const preset = currentPreset();
+        if (!preset || preset.slug === "manual") {
+          requiredFields = asStringArray(preset && preset.required_fields);
+          knownFeaturesByModel = asFeaturesMap(preset && preset.known_features_by_model);
+          if (!modelInput.value.trim()) {
+            setModelOptions([]);
+          }
+          renderRequiredFields();
+          renderApiKeyStatus(localApiKeyStatusFromInput());
+          updateFeatureSelect();
+          return;
+        }
+
+        if (fillAll || !baseUrlInput.value.trim()) {
+          baseUrlInput.value = String(preset.default_base_url || "");
+        }
+        if (fillAll || !apiKeyEnvVarInput.value.trim()) {
+          apiKeyEnvVarInput.value = String(preset.default_api_key_env_var || "");
+        }
+        const fallbackModels = asStringArray(preset.fallback_models);
+        if ((fillAll || !modelInput.value.trim()) && fallbackModels.length) {
+          modelInput.value = fallbackModels[0];
+        }
+        requiredFields = asStringArray(preset.required_fields);
+        knownFeaturesByModel = asFeaturesMap(preset.known_features_by_model);
+        setModelOptions(fallbackModels);
+        renderRequiredFields();
+        renderApiKeyStatus(localApiKeyStatusFromInput());
+        updateFeatureSelect();
+      }
+
+      async function loadModels() {
+        refreshModelsButton.disabled = true;
+        setStatusMessage(warningsMessage, "Loading models...", "muted");
+        const body = new URLSearchParams();
+        body.set("csrf_token", csrfInput.value);
+        body.set("preset_slug", presetSelect.value);
+        body.set("base_url", baseUrlInput.value);
+        body.set("api_key_env_var", apiKeyEnvVarInput.value);
+
+        try {
+          const response = await fetch("/api/llm/models", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: body.toString(),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload || payload.ok === false) {
+            const warnings = payload && Array.isArray(payload.warnings) ? payload.warnings : ["Unable to load models."];
+            renderWarnings(warnings);
+            return;
+          }
+
+          if (!baseUrlInput.value.trim() && typeof payload.resolved_base_url === "string") {
+            baseUrlInput.value = payload.resolved_base_url;
+          }
+          if (!apiKeyEnvVarInput.value.trim() && typeof payload.resolved_api_key_env_var === "string") {
+            apiKeyEnvVarInput.value = payload.resolved_api_key_env_var;
+          }
+
+          const models = asStringArray(payload.models);
+          setModelOptions(models);
+          if (!modelInput.value.trim() && typeof payload.default_model === "string") {
+            modelInput.value = payload.default_model;
+          }
+
+          requiredFields = asStringArray(payload.required_fields);
+          knownFeaturesByModel = asFeaturesMap(payload.known_features_by_model);
+          renderRequiredFields();
+          renderApiKeyStatus(payload.api_key_env_var_status || {});
+          renderWarnings(payload.warnings);
+          updateFeatureSelect();
+        } catch (error) {
+          renderWarnings(["Unable to load models."]);
+        } finally {
+          refreshModelsButton.disabled = false;
+        }
+      }
+
+      async function testDraftConnection() {
+        testDraftButton.disabled = true;
+        setStatusMessage(testResultMessage, "Testing LLM connection...", "muted");
+        renderDebugDetails({});
+        const body = new URLSearchParams();
+        body.set("csrf_token", csrfInput.value);
+        body.set("preset_slug", presetSelect.value);
+        body.set("base_url", baseUrlInput.value);
+        body.set("model", modelInput.value);
+        body.set("api_key_env_var", apiKeyEnvVarInput.value);
+        body.set("timeout_seconds", timeoutInput.value);
+        body.set("temperature", temperatureInput.value);
+        body.set("max_output_tokens", maxOutputTokensInput.value);
+        body.set("extra_headers_json", extraHeadersInput.value);
+
+        try {
+          const response = await fetch("/api/llm/test-draft", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: body.toString(),
+          });
+          const payload = await response.json();
+          const requiredFromPayload = asStringArray(payload && payload.required_fields);
+          if (requiredFromPayload.length) {
+            requiredFields = requiredFromPayload;
+          }
+          renderRequiredFields();
+          renderApiKeyStatus((payload && payload.api_key_env_var_status) || {});
+          renderWarnings((payload && payload.warnings) || []);
+          renderDebugDetails(payload && payload.debug);
+          if (payload && payload.ok) {
+            setStatusMessage(testResultMessage, payload.message || "LLM connection test passed.", "success");
+            return;
+          }
+          const errors = asStringArray(payload && payload.errors);
+          const errorText = errors.join(" ");
+          setStatusMessage(
+            testResultMessage,
+            errorText || ((payload && payload.message) || "LLM connection test failed."),
+            "error"
+          );
+        } catch (error) {
+          renderDebugDetails({});
+          setStatusMessage(testResultMessage, "Unable to test LLM connection.", "error");
+        } finally {
+          testDraftButton.disabled = false;
+        }
+      }
+
+      presetSelect.addEventListener("change", function () {
+        applyPresetDefaults(false);
+        setStatusMessage(testResultMessage, "", "muted");
+        renderDebugDetails({});
+      });
+      modelSelect.addEventListener("change", function () {
+        modelInput.value = modelSelect.value;
+        updateFeatureSelect();
+        renderRequiredFields();
+      });
+      modelInput.addEventListener("input", function () {
+        updateFeatureSelect();
+        renderRequiredFields();
+      });
+      baseUrlInput.addEventListener("input", renderRequiredFields);
+      apiKeyEnvVarInput.addEventListener("input", function () {
+        renderRequiredFields();
+        renderApiKeyStatus(localApiKeyStatusFromInput());
+      });
+      refreshModelsButton.addEventListener("click", loadModels);
+      testDraftButton.addEventListener("click", testDraftConnection);
+
+      applyPresetDefaults(false);
+      renderWarnings([]);
+      setStatusMessage(testResultMessage, "", "muted");
+      renderDebugDetails({});
+      if (modelInput.value.trim()) {
+        setModelOptions(asStringArray(currentPreset() && currentPreset().fallback_models));
+      }
+      updateFeatureSelect();
+    }
+
+    const llmForms = document.querySelectorAll("[data-llm-form]");
+    for (const form of llmForms) {
+      if (!(form instanceof HTMLFormElement)) {
+        continue;
+      }
+      initLlmForm(form);
+    }
   })();
 </script>
 {% endblock %}

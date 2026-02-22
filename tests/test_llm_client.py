@@ -10,6 +10,8 @@ from app.llm_client import (
     LLMClientError,
     LLMSettings,
     OpenAICompatibleLLMClient,
+    _chat_completions_path,
+    _models_path,
     _validate_automation_draft_response,
     _validate_entity_suggestion_response,
 )
@@ -188,3 +190,245 @@ async def test_chat_json_allows_local_without_key(monkeypatch: pytest.MonkeyPatc
     )
     response = await client.chat_json("system", {"ping": "pong"})
     assert response["ok"] is True
+
+
+def test_openai_compatible_endpoint_path_normalization() -> None:
+    assert _chat_completions_path("https://api.openai.com/v1") == "https://api.openai.com/v1/chat/completions"
+    assert _chat_completions_path("https://api.anthropic.com/v1") == "https://api.anthropic.com/v1/chat/completions"
+    assert (
+        _chat_completions_path("https://generativelanguage.googleapis.com/v1beta/openai")
+        == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    assert _chat_completions_path("https://api.example.com") == "https://api.example.com/v1/chat/completions"
+
+    assert _models_path("https://api.openai.com/v1") == "https://api.openai.com/v1/models"
+    assert _models_path("https://generativelanguage.googleapis.com/v1beta/openai") == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/models"
+    )
+    assert _models_path("https://api.example.com") == "https://api.example.com/v1/models"
+
+
+@pytest.mark.asyncio
+async def test_list_models_parses_multiple_payload_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "data": [
+                    {"id": "gpt-4o"},
+                    {"id": "models/gemini-2.5-flash"},
+                    {"name": "claude-sonnet-4-5"},
+                    {"model": "mixtral-8x7b"},
+                    "llama3.1",
+                ]
+            }
+
+    class FakeClient:
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            return FakeResponse()
+
+    monkeypatch.setattr("app.llm_client.httpx.AsyncClient", lambda *args, **kwargs: FakeClient())
+    client = OpenAICompatibleLLMClient(
+        LLMSettings(
+            enabled=True,
+            base_url="https://api.example.com/v1",
+            api_key="token",
+            model="unused",
+            timeout_seconds=1,
+            max_concurrency=1,
+        )
+    )
+    models = await client.list_models()
+    assert models == [
+        "gpt-4o",
+        "gemini-2.5-flash",
+        "claude-sonnet-4-5",
+        "mixtral-8x7b",
+        "llama3.1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_json_retries_without_response_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingResponse:
+        def __init__(self) -> None:
+            request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
+            self.response = httpx.Response(
+                400,
+                request=request,
+                json={"error": {"message": "Unsupported response_format value."}},
+            )
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError("bad request", request=self.response.request, response=self.response)
+
+    class SuccessfulResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"choices": [{"message": {"content": json.dumps({"ok": True})}}]}
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.post_bodies: list[dict[str, Any]] = []
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def post(self, *args: Any, **kwargs: Any) -> Any:
+            body = kwargs.get("json")
+            if isinstance(body, dict):
+                self.post_bodies.append(body)
+            else:
+                self.post_bodies.append({})
+            if len(self.post_bodies) == 1:
+                return FailingResponse()
+            return SuccessfulResponse()
+
+    fake_client = FakeClient()
+    monkeypatch.setattr("app.llm_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+
+    client = OpenAICompatibleLLMClient(
+        LLMSettings(
+            enabled=True,
+            base_url="https://api.example.com/v1",
+            api_key="token",
+            model="test-model",
+            timeout_seconds=1,
+            max_concurrency=1,
+        )
+    )
+    response = await client.chat_json("system", {"ping": "pong"})
+    assert response["ok"] is True
+    assert len(fake_client.post_bodies) == 2
+    assert "response_format" in fake_client.post_bodies[0]
+    assert "response_format" not in fake_client.post_bodies[1]
+
+
+@pytest.mark.asyncio
+async def test_chat_json_retries_with_max_completion_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingResponse:
+        def __init__(self) -> None:
+            request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
+            self.response = httpx.Response(
+                400,
+                request=request,
+                json={
+                    "error": {
+                        "message": (
+                            "Unsupported parameter: 'max_tokens' is not supported with this model. "
+                            "Use 'max_completion_tokens' instead."
+                        )
+                    }
+                },
+            )
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError("bad request", request=self.response.request, response=self.response)
+
+    class SuccessfulResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {"choices": [{"message": {"content": json.dumps({"ok": True})}}]}
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.post_bodies: list[dict[str, Any]] = []
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def post(self, *args: Any, **kwargs: Any) -> Any:
+            body = kwargs.get("json")
+            if isinstance(body, dict):
+                self.post_bodies.append(body)
+            else:
+                self.post_bodies.append({})
+            if len(self.post_bodies) == 1:
+                return FailingResponse()
+            return SuccessfulResponse()
+
+    fake_client = FakeClient()
+    monkeypatch.setattr("app.llm_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+
+    client = OpenAICompatibleLLMClient(
+        LLMSettings(
+            enabled=True,
+            base_url="https://api.example.com/v1",
+            api_key="token",
+            model="test-model",
+            timeout_seconds=1,
+            max_concurrency=1,
+        )
+    )
+    response = await client.chat_json("system", {"ping": "pong"})
+    assert response["ok"] is True
+    assert len(fake_client.post_bodies) == 2
+    assert "max_tokens" in fake_client.post_bodies[0]
+    assert "max_completion_tokens" not in fake_client.post_bodies[0]
+    assert "max_tokens" not in fake_client.post_bodies[1]
+    assert "max_completion_tokens" in fake_client.post_bodies[1]
+
+
+@pytest.mark.asyncio
+async def test_test_connection_verbose_captures_http_400_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingResponse:
+        def __init__(self) -> None:
+            request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
+            self.response = httpx.Response(
+                400,
+                request=request,
+                json={"error": {"message": "Bad request payload"}},
+            )
+
+        def raise_for_status(self) -> None:
+            raise httpx.HTTPStatusError("bad request", request=self.response.request, response=self.response)
+
+        def json(self) -> dict[str, Any]:
+            return {"error": {"message": "Bad request payload"}}
+
+    class FakeClient:
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def post(self, *args: Any, **kwargs: Any) -> Any:
+            return FailingResponse()
+
+    monkeypatch.setattr("app.llm_client.httpx.AsyncClient", lambda *args, **kwargs: FakeClient())
+    client = OpenAICompatibleLLMClient(
+        LLMSettings(
+            enabled=True,
+            base_url="https://api.example.com/v1",
+            api_key="token",
+            model="test-model",
+            timeout_seconds=1,
+            max_concurrency=1,
+        )
+    )
+    result = await client.test_connection_verbose()
+    assert result["ok"] is False
+    assert "HTTP 400" in result["message"]
+    debug = result["debug"]
+    assert debug["endpoint"].endswith("/chat/completions")
+    assert debug["headers"]["Authorization"] == "Bearer ***redacted***"
+    assert debug["attempts"][0]["response_status"] == 400

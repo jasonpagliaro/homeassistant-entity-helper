@@ -107,9 +107,110 @@ def llm_is_configured(settings: LLMSettings | None = None) -> bool:
 
 def _chat_completions_path(base_url: str) -> str:
     normalized = base_url.rstrip("/")
-    if normalized.endswith("/v1"):
+    if normalized.endswith("/v1") or normalized.endswith("/openai"):
         return f"{normalized}/chat/completions"
     return f"{normalized}/v1/chat/completions"
+
+
+def _models_path(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1") or normalized.endswith("/openai"):
+        return f"{normalized}/models"
+    return f"{normalized}/v1/models"
+
+
+def _error_text_from_response(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return (response.text or "").strip().lower()
+    return json.dumps(payload, ensure_ascii=True).lower()
+
+
+def _should_retry_without_response_format(status_code: int, error_text: str) -> bool:
+    if status_code not in {400, 404, 415, 422}:
+        return False
+    lowered = (error_text or "").lower()
+    indicators = (
+        "response_format",
+        "json_schema",
+        "json_object",
+        "unsupported response format",
+    )
+    return any(indicator in lowered for indicator in indicators)
+
+
+def _should_retry_with_max_completion_tokens(status_code: int, error_text: str) -> bool:
+    if status_code not in {400, 422}:
+        return False
+    lowered = (error_text or "").lower()
+    return "max_tokens" in lowered and "max_completion_tokens" in lowered
+
+
+def _should_retry_with_max_tokens(status_code: int, error_text: str) -> bool:
+    if status_code not in {400, 422}:
+        return False
+    lowered = (error_text or "").lower()
+    return "max_completion_tokens" in lowered and "max_tokens" in lowered
+
+
+def _retry_body_for_compat(
+    request_body: dict[str, Any],
+    status_code: int,
+    error_text: str,
+) -> tuple[dict[str, Any], str] | None:
+    if _should_retry_without_response_format(status_code, error_text) and "response_format" in request_body:
+        retry_body = dict(request_body)
+        retry_body.pop("response_format", None)
+        return retry_body, "remove_response_format"
+    if _should_retry_with_max_completion_tokens(status_code, error_text) and "max_tokens" in request_body:
+        retry_body = dict(request_body)
+        retry_body["max_completion_tokens"] = retry_body.pop("max_tokens")
+        return retry_body, "use_max_completion_tokens"
+    if (
+        _should_retry_with_max_tokens(status_code, error_text)
+        and "max_completion_tokens" in request_body
+        and "max_tokens" not in request_body
+    ):
+        retry_body = dict(request_body)
+        retry_body["max_tokens"] = retry_body.pop("max_completion_tokens")
+        return retry_body, "use_max_tokens"
+    return None
+
+
+def _extract_model_id(item: Any) -> str | None:
+    if isinstance(item, str):
+        candidate = item.strip()
+    elif isinstance(item, dict):
+        raw = item.get("id") or item.get("name") or item.get("model")
+        if not isinstance(raw, str):
+            return None
+        candidate = raw.strip()
+    else:
+        return None
+    if not candidate:
+        return None
+    if candidate.startswith("models/"):
+        candidate = candidate[len("models/") :]
+    return candidate or None
+
+
+def _sanitize_headers_for_debug(headers: dict[str, str]) -> dict[str, str]:
+    sanitized: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() == "authorization":
+            sanitized[key] = "Bearer ***redacted***"
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def _response_body_for_debug(response: httpx.Response) -> Any:
+    try:
+        parsed = response.json()
+    except ValueError:
+        return (response.text or "").strip()
+    return parsed
 
 
 class OpenAICompatibleLLMClient:
@@ -138,10 +239,76 @@ class OpenAICompatibleLLMClient:
         )
         return {"status": "ok", "response_keys": sorted(payload.keys())}
 
+    async def test_connection_verbose(self) -> dict[str, Any]:
+        debug_context: dict[str, Any] = {}
+        try:
+            payload = await self._complete_json(
+                "Respond with a small JSON object confirming connectivity.",
+                {"ping": "haev"},
+                debug_context=debug_context,
+            )
+        except LLMClientError as exc:
+            return {
+                "ok": False,
+                "message": str(exc),
+                "debug": debug_context,
+            }
+        return {
+            "ok": True,
+            "message": "reachable",
+            "response_keys": sorted(payload.keys()),
+            "debug": debug_context,
+        }
+
+    async def list_models(self) -> list[str]:
+        if not self.settings.enabled or not self.settings.base_url:
+            raise LLMClientError("LLM is not enabled or configured.")
+        api_key_ok = bool(self.settings.api_key) or self.settings.allow_missing_api_key or is_probably_local_base_url(
+            self.settings.base_url
+        )
+        if not api_key_ok:
+            raise LLMClientError("LLM is not enabled or configured.")
+
+        endpoint = _models_path(self.settings.base_url)
+        headers = self._headers()
+
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.timeout_seconds) as client:
+                response = await client.get(endpoint, headers=headers)
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            raise LLMClientError(f"LLM provider returned HTTP {status}.") from exc
+        except httpx.RequestError as exc:
+            raise LLMClientError(f"Unable to reach LLM provider: {exc}") from exc
+
+        payload = response.json()
+        candidates: list[Any]
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                candidates = data
+            elif isinstance(payload.get("models"), list):
+                candidates = payload["models"]
+            else:
+                candidates = []
+        elif isinstance(payload, list):
+            candidates = payload
+        else:
+            candidates = []
+
+        models: list[str] = []
+        for item in candidates:
+            model_id = _extract_model_id(item)
+            if model_id and model_id not in models:
+                models.append(model_id)
+        return models
+
     async def _complete_json(
         self,
         system_prompt: str,
         user_payload: dict[str, Any],
+        debug_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not llm_is_configured(self.settings):
             raise LLMClientError("LLM is not enabled or configured.")
@@ -159,15 +326,54 @@ class OpenAICompatibleLLMClient:
         }
 
         headers = self._headers()
+        if debug_context is not None:
+            debug_context["endpoint"] = endpoint
+            debug_context["headers"] = _sanitize_headers_for_debug(headers)
+            debug_context["attempts"] = []
 
         try:
             async with httpx.AsyncClient(timeout=self.settings.timeout_seconds) as client:
-                response = await client.post(endpoint, headers=headers, json=request_body)
-                response.raise_for_status()
+                max_attempts = 4
+                attempt_number = 0
+                retry_reason: str | None = None
+                while True:
+                    attempt_number += 1
+                    if debug_context is not None:
+                        attempt_entry: dict[str, Any] = {"request_body": dict(request_body)}
+                        if retry_reason:
+                            attempt_entry["retry_reason"] = retry_reason
+                        attempts = debug_context.setdefault("attempts", [])
+                        if isinstance(attempts, list):
+                            attempts.append(attempt_entry)
+                    response = await client.post(endpoint, headers=headers, json=request_body)
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        if debug_context is not None:
+                            attempts = debug_context.get("attempts")
+                            if isinstance(attempts, list) and attempts:
+                                attempts[-1]["response_status"] = exc.response.status_code
+                                attempts[-1]["response_body"] = _response_body_for_debug(exc.response)
+                        error_text = _error_text_from_response(exc.response)
+                        retry_data = _retry_body_for_compat(request_body, exc.response.status_code, error_text)
+                        if retry_data is None or attempt_number >= max_attempts:
+                            raise
+                        request_body, retry_reason = retry_data
+                        continue
+                    if debug_context is not None:
+                        attempts = debug_context.get("attempts")
+                        if isinstance(attempts, list) and attempts:
+                            attempts[-1]["response_status"] = response.status_code
+                            attempts[-1]["response_body"] = _response_body_for_debug(response)
+                    break
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             raise LLMClientError(f"LLM provider returned HTTP {status}.") from exc
         except httpx.RequestError as exc:
+            if debug_context is not None:
+                attempts = debug_context.setdefault("attempts", [])
+                if isinstance(attempts, list):
+                    attempts.append({"network_error": str(exc)})
             raise LLMClientError(f"Unable to reach LLM provider: {exc}") from exc
 
         payload = response.json()

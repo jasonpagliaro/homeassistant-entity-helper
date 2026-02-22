@@ -198,6 +198,57 @@ a:hover {
   margin-bottom: 1rem;
 }
 
+.llm-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.llm-form-actions-wide,
+.llm-guidance,
+.llm-test-result {
+  grid-column: 1 / -1;
+}
+
+.llm-guidance,
+.llm-test-result {
+  min-height: 1.1rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.llm-test-debug {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.llm-test-debug summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+  user-select: none;
+}
+
+.llm-test-debug pre {
+  margin-top: 0.45rem;
+  max-height: 260px;
+  overflow: auto;
+  font-size: 0.78rem;
+}
+
+.llm-message-success {
+  color: #0f5132;
+}
+
+.llm-message-error {
+  color: #8f1f13;
+}
+
+.llm-message-muted {
+  color: var(--muted);
+}
+
 label {
   display: flex;
   flex-direction: column;
