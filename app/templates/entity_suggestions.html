@@ -81,11 +81,16 @@
           method="post"
           action="/profiles/{{ active_profile.id }}/run-entity-suggestions"
           data-sync-modal="true"
-          data-sync-modal-label="Running entity suggestions..."
-        >
+        data-sync-modal-label="Running entity suggestions..."
+      >
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <input type="hidden" name="next_url" value="{{ next_url }}" />
-          <button type="submit">Run Suggestions Check</button>
+          <button
+            type="submit"
+            data-tooltip="Run entity suggestion checks for this profile and refresh suggestion results."
+          >
+            Run Suggestions Check
+          </button>
         </form>
         {% if active_suggestion_run %}
           <form
@@ -98,7 +103,12 @@
             <input type="hidden" name="suggestion_run_id" value="{{ active_suggestion_run.id }}" />
             <input type="hidden" name="readiness_status" value="ready" />
             <input type="hidden" name="next_url" value="/automation-drafts?{{ build_query(profile_id=active_profile.id) }}" />
-            <button type="submit">Generate Drafts (Ready)</button>
+            <button
+              type="submit"
+              data-tooltip="Generate automation drafts for suggestions currently marked ready."
+            >
+              Generate Drafts (Ready)
+            </button>
           </form>
         {% endif %}
       </div>

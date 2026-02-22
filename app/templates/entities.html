@@ -73,7 +73,12 @@
       >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="{{ next_url }}" />
-        <button type="submit">Sync Now</button>
+        <button
+          type="submit"
+          data-tooltip="Pull the latest entities from Home Assistant for this profile."
+        >
+          Sync Now
+        </button>
       </form>
       <form
         method="post"
@@ -83,7 +88,12 @@
       >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="/config-items?{{ build_query(profile_id=active_profile.id) }}" />
-        <button type="submit">Sync Config Items</button>
+        <button
+          type="submit"
+          data-tooltip="Pull the latest config item snapshots for this profile."
+        >
+          Sync Config Items
+        </button>
       </form>
       <form
         method="post"
@@ -93,7 +103,12 @@
       >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}" />
-        <button type="submit">Run Suggestions Check</button>
+        <button
+          type="submit"
+          data-tooltip="Run entity suggestion checks for this profile and refresh suggestion results."
+        >
+          Run Suggestions Check
+        </button>
       </form>
       <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id) }}">View Config Items</a>
       <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}">View Suggestions</a>

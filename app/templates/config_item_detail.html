@@ -16,7 +16,12 @@
         <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=profile.id) }}" />
         <input type="hidden" name="llm_connection_id" value="{{ active_llm_connection.id }}" />
         <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}" />
-        <button type="submit">Suggest Automation Update</button>
+        <button
+          type="submit"
+          data-tooltip="Queue an automation update suggestion for this config item."
+        >
+          Suggest Automation Update
+        </button>
       </form>
     {% elif snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
       <span>No enabled LLM connection configured for this profile.</span>

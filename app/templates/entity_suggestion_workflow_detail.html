@@ -128,7 +128,12 @@
     </label>
 
     <div class="row gap-sm align-end">
-      <button type="submit">Apply to Home Assistant</button>
+      <button
+        type="submit"
+        data-tooltip="Apply these updates to Home Assistant for this entity."
+      >
+        Apply to Home Assistant
+      </button>
     </div>
   </form>
 
@@ -154,7 +159,13 @@
       <input type="text" name="reason" value="" />
     </label>
     <div class="row gap-sm align-end">
-      <button type="submit" class="button-secondary">Skip for Now</button>
+      <button
+        type="submit"
+        class="button-secondary"
+        data-tooltip="Skip this suggestion for now and keep it for later review."
+      >
+        Skip for Now
+      </button>
     </div>
   </form>
 </section>

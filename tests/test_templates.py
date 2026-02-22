@@ -66,10 +66,76 @@ TEMPLATE_TABLE_LABELS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+HIGH_IMPACT_BUTTON_TOOLTIP_LABELS: dict[str, dict[str, int]] = {
+    "settings.html": {
+        "Run Suggestions Check": 1,
+        "Disable Profile": 1,
+        "Enable Profile": 1,
+        "Delete Profile": 2,
+        "Delete LLM": 1,
+    },
+    "entities.html": {
+        "Sync Now": 1,
+        "Sync Config Items": 1,
+        "Run Suggestions Check": 1,
+    },
+    "config_items.html": {
+        "Sync Config Items": 1,
+        "Suggest Automation Updates": 1,
+        "Suggest": 1,
+    },
+    "config_item_detail.html": {
+        "Suggest Automation Update": 1,
+    },
+    "suggestions.html": {
+        "Queue Suggestion Run": 1,
+    },
+    "suggestion_run_detail.html": {
+        "Accept": 1,
+        "Reject": 1,
+    },
+    "entity_suggestions.html": {
+        "Run Suggestions Check": 1,
+        "Generate Drafts (Ready)": 1,
+    },
+    "entity_suggestion_workflow_queue.html": {
+        "Recheck Now": 1,
+    },
+    "entity_suggestion_workflow_detail.html": {
+        "Apply to Home Assistant": 1,
+        "Skip for Now": 1,
+    },
+    "automation_draft_detail.html": {
+        "Accept Draft": 1,
+        "Reject Draft": 1,
+    },
+}
+
 
 def _read_template(template_name: str) -> str:
     root = Path(__file__).resolve().parents[1]
     return (root / "app" / "templates" / template_name).read_text(encoding="utf-8")
+
+
+def _normalize_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _button_counts(template: str, label: str) -> tuple[int, int]:
+    total = 0
+    with_tooltip = 0
+
+    for match in re.finditer(r"<button\b([^>]*)>(.*?)</button>", template, flags=re.DOTALL):
+        attrs = match.group(1)
+        text = re.sub(r"<[^>]+>", " ", match.group(2))
+        if _normalize_text(text) != label:
+            continue
+
+        total += 1
+        if re.search(r'\bdata-tooltip\s*=\s*(["\']).+?\1', attrs):
+            with_tooltip += 1
+
+    return total, with_tooltip
 
 
 def test_responsive_table_markup_contract() -> None:
@@ -82,3 +148,20 @@ def test_responsive_table_markup_contract() -> None:
 
         for label in labels:
             assert f'data-label="{label}"' in template
+
+
+def test_high_impact_buttons_have_tooltips() -> None:
+    for template_name, labels in HIGH_IMPACT_BUTTON_TOOLTIP_LABELS.items():
+        template = _read_template(template_name)
+
+        for label, expected_count in labels.items():
+            total_count, tooltip_count = _button_counts(template, label)
+
+            assert total_count == expected_count, (
+                f"{template_name}: expected {expected_count} '{label}' button(s), "
+                f"found {total_count}"
+            )
+            assert tooltip_count == expected_count, (
+                f"{template_name}: expected all '{label}' button(s) to include data-tooltip, "
+                f"found {tooltip_count}/{expected_count}"
+            )
