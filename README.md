@@ -138,6 +138,18 @@ LLM API key resolution for profile-scoped automation suggestions:
 - Base URLs are normalized to avoid trailing slash issues.
 - TLS verify can be disabled for self-signed LAN deployments (`verify_tls=false`).
 
+## Entity Suggestions Policy
+- Candidate scope is intentionally limited to actionable domains: `sensor`, `binary_sensor`, `lock`.
+- `event` entities are excluded from suggestion runs.
+- Missing area is a blocker only when at least one candidate in the run has area/device enrichment.
+- If a run has no area/device enrichment at all, missing area is downgraded to review warning for that run.
+- If enrichment is unavailable, verify Home Assistant WebSocket/registry access and rerun suggestions after connectivity or permission fixes.
+- Existing historical suggestion runs are not backfilled when policy changes; run a new suggestions check to apply current scoring logic.
+- Missing details workflow supports direct HA registry updates for area, friendly name, sensor/binary-sensor `device_class`, and labels.
+- Workflow writes require an HA admin-capable token because registry update commands are admin-only.
+- Use workflow queue for batched edits, then run one batch recheck (`sync + suggestions`) to verify updated statuses.
+- Manual-only issues remain visible with guidance and are not auto-editable in the workflow.
+
 ## App Endpoint Reference (Manual)
 - `GET /healthz` - health check.
 - `GET /settings` - profile settings page.
@@ -163,6 +175,11 @@ LLM API key resolution for profile-scoped automation suggestions:
 - `POST /suggestions/proposals/{proposal_id}/status` - mark proposal accepted/rejected.
 - `GET /entity-suggestions` - readiness suggestion list.
 - `GET /entity-suggestions/{suggestion_id}` - readiness suggestion detail.
+- `GET /entity-suggestions/workflow` - missing details workflow queue.
+- `GET /entity-suggestions/{suggestion_id}/workflow` - missing details workflow detail/action view.
+- `POST /entity-suggestions/{suggestion_id}/workflow/apply` - apply workflow changes directly to HA registry.
+- `POST /entity-suggestions/{suggestion_id}/workflow/skip` - skip workflow item for now.
+- `POST /profiles/{profile_id}/entity-suggestions/recheck` - run batch verification (`sync` then `suggestions`).
 - `GET /automation-drafts` - automation draft list.
 - `GET /automation-drafts/{draft_id}` - automation draft detail.
 - `POST /automation-drafts/{draft_id}/accept` - mark draft accepted.
