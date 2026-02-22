@@ -106,7 +106,7 @@
   {% if active_profile and active_config_sync_run %}
     <p>{{ total }} config items match filters.</p>
     <div class="table-wrap">
-      <table>
+      <table class="data-table">
         <thead>
           <tr>
             <th>ID</th>
@@ -122,14 +122,14 @@
         <tbody>
           {% for item in config_items %}
           <tr>
-            <td>{{ item.id }}</td>
-            <td>{{ item.kind }}</td>
-            <td><code>{{ item.entity_id }}</code></td>
-            <td>{{ item.name or '' }}</td>
-            <td><code>{{ item.config_key or '' }}</code></td>
-            <td><span class="status-chip status-{{ item.fetch_status }}">{{ item.fetch_status }}</span></td>
-            <td>{{ item.pulled_at }}</td>
-            <td>
+            <td data-label="ID">{{ item.id }}</td>
+            <td data-label="Kind">{{ item.kind }}</td>
+            <td data-label="Entity ID"><code>{{ item.entity_id }}</code></td>
+            <td data-label="Name">{{ item.name or '' }}</td>
+            <td data-label="Config Key"><code>{{ item.config_key or '' }}</code></td>
+            <td data-label="Status"><span class="status-chip status-{{ item.fetch_status }}">{{ item.fetch_status }}</span></td>
+            <td data-label="Pulled At">{{ item.pulled_at }}</td>
+            <td data-label="Actions">
               <a href="/config-items/{{ item.id }}?{{ build_query(profile_id=active_profile.id, config_sync_run_id=active_config_sync_run.id) }}">Details</a>
               {% if active_llm_connection and item.kind == "automation" and item.fetch_status == "success" %}
                 <form

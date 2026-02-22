@@ -389,7 +389,8 @@ button.danger {
 }
 
 .table-wrap {
-  overflow-x: auto;
+  width: 100%;
+  max-width: 100%;
 }
 
 table {
@@ -404,6 +405,29 @@ td {
   border-bottom: 1px solid var(--border);
   padding: 0.6rem;
   vertical-align: top;
+}
+
+.data-table {
+  table-layout: fixed;
+}
+
+.data-table th,
+.data-table td {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.data-table code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.data-table .status-chip {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 pre {
@@ -504,6 +528,73 @@ body.modal-open {
 @keyframes sync-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 960px) {
+  .data-table {
+    table-layout: auto;
+    margin-bottom: 0;
+  }
+
+  .data-table thead {
+    border: 0;
+    clip: rect(0 0 0 0);
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    padding: 0;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+  }
+
+  .data-table tbody {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .data-table tr {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fff;
+    padding: 0.15rem 0;
+  }
+
+  .data-table td {
+    display: block;
+    width: 100%;
+    position: relative;
+    min-height: 2.35rem;
+    border-bottom: 1px solid var(--border);
+    padding: 0.55rem 0.75rem 0.55rem 8.1rem;
+  }
+
+  .data-table td:last-child {
+    border-bottom: 0;
+  }
+
+  .data-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 0.75rem;
+    top: 0.55rem;
+    width: 6.6rem;
+    max-width: calc(100% - 1.5rem);
+    color: var(--muted);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .data-table td > * {
+    min-width: 0;
+  }
+
+  .data-table .inline-form {
+    margin-left: 0;
+    margin-top: 0.45rem;
   }
 }
 

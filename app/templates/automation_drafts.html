@@ -89,7 +89,7 @@
   {% if active_profile and active_draft_run %}
     <p>{{ total }} drafts match filters.</p>
     <div class="table-wrap">
-      <table>
+      <table class="data-table">
         <thead>
           <tr>
             <th>ID</th>
@@ -105,14 +105,14 @@
         <tbody>
           {% for item in drafts %}
           <tr>
-            <td>{{ item.id }}</td>
-            <td><code>{{ item.entity_id }}</code></td>
-            <td><code>{{ item.template_id }}</code></td>
-            <td>{{ item.title }}</td>
-            <td><span class="status-chip status-{{ item.generation_status }}">{{ item.generation_status }}</span></td>
-            <td><span class="status-chip status-{{ item.review_status }}">{{ item.review_status }}</span></td>
-            <td>{{ item.pulled_at }}</td>
-            <td>
+            <td data-label="ID">{{ item.id }}</td>
+            <td data-label="Entity ID"><code>{{ item.entity_id }}</code></td>
+            <td data-label="Template"><code>{{ item.template_id }}</code></td>
+            <td data-label="Title">{{ item.title }}</td>
+            <td data-label="Generation"><span class="status-chip status-{{ item.generation_status }}">{{ item.generation_status }}</span></td>
+            <td data-label="Review"><span class="status-chip status-{{ item.review_status }}">{{ item.review_status }}</span></td>
+            <td data-label="Pulled At">{{ item.pulled_at }}</td>
+            <td data-label="Actions">
               <a href="/automation-drafts/{{ item.id }}?{{ build_query(profile_id=active_profile.id, draft_run_id=active_draft_run.id) }}">Details</a>
             </td>
           </tr>

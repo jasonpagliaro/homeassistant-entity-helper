@@ -109,7 +109,7 @@
   {% if active_profile and active_sync_run %}
     <p>{{ total }} entities match filters.</p>
     <div class="table-wrap">
-      <table>
+      <table class="data-table">
         <thead>
           <tr>
             <th>Entity ID</th>
@@ -126,15 +126,15 @@
         <tbody>
           {% for entity in entities %}
           <tr>
-            <td><code>{{ entity.entity_id }}</code></td>
-            <td>{{ entity.friendly_name or '' }}</td>
-            <td>{{ entity.domain }}</td>
-            <td>{{ entity.state }}</td>
-            <td>{{ entity.area_name or '' }}</td>
-            <td>{{ entity.location_name or '' }}</td>
-            <td>{{ entity.last_updated or '' }}</td>
-            <td>{{ entity.pulled_at }}</td>
-            <td>
+            <td data-label="Entity ID"><code>{{ entity.entity_id }}</code></td>
+            <td data-label="Name">{{ entity.friendly_name or '' }}</td>
+            <td data-label="Domain">{{ entity.domain }}</td>
+            <td data-label="State">{{ entity.state }}</td>
+            <td data-label="Area">{{ entity.area_name or '' }}</td>
+            <td data-label="Location">{{ entity.location_name or '' }}</td>
+            <td data-label="Last Updated">{{ entity.last_updated or '' }}</td>
+            <td data-label="Pulled At">{{ entity.pulled_at }}</td>
+            <td data-label="Actions">
               <a href="/entities/{{ entity.entity_id }}?{{ build_query(profile_id=active_profile.id, sync_run_id=active_sync_run.id) }}">Details</a>
             </td>
           </tr>

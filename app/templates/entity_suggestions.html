@@ -108,7 +108,7 @@
   {% if active_profile and active_suggestion_run %}
     <p>{{ total }} suggestions match filters.</p>
     <div class="table-wrap">
-      <table>
+      <table class="data-table">
         <thead>
           <tr>
             <th>ID</th>
@@ -124,14 +124,14 @@
         <tbody>
           {% for item in suggestions %}
           <tr>
-            <td>{{ item.id }}</td>
-            <td><code>{{ item.entity_id }}</code></td>
-            <td>{{ item.domain }}</td>
-            <td><span class="status-chip status-{{ item.readiness_status }}">{{ item.readiness_status }}</span></td>
-            <td><span class="status-chip status-{{ item.workflow_status }}">{{ item.workflow_status }}</span></td>
-            <td>{{ item.missing_fields_json or '[]' }}</td>
-            <td>{{ item.pulled_at }}</td>
-            <td>
+            <td data-label="ID">{{ item.id }}</td>
+            <td data-label="Entity ID"><code>{{ item.entity_id }}</code></td>
+            <td data-label="Domain">{{ item.domain }}</td>
+            <td data-label="Readiness"><span class="status-chip status-{{ item.readiness_status }}">{{ item.readiness_status }}</span></td>
+            <td data-label="Workflow"><span class="status-chip status-{{ item.workflow_status }}">{{ item.workflow_status }}</span></td>
+            <td data-label="Missing Fields">{{ item.missing_fields_json or '[]' }}</td>
+            <td data-label="Pulled At">{{ item.pulled_at }}</td>
+            <td data-label="Actions">
               <a href="/entity-suggestions/{{ item.id }}?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Details</a>
               <span> | </span>
               <a href="/entity-suggestions/{{ item.id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Fix</a>

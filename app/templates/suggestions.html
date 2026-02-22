@@ -49,7 +49,7 @@
   {% if active_profile and runs %}
     <p>{{ runs|length }} runs.</p>
     <div class="table-wrap">
-      <table>
+      <table class="data-table">
         <thead>
           <tr>
             <th>Run</th>
@@ -64,13 +64,13 @@
         <tbody>
           {% for run in runs %}
           <tr>
-            <td>#{{ run.id }}</td>
-            <td><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></td>
-            <td>{{ run.processed_count }} / {{ run.target_count }}</td>
-            <td>{{ run.success_count }} proposed, {{ run.invalid_count }} invalid, {{ run.error_count }} errors</td>
-            <td>{{ run.created_at }}</td>
-            <td>{{ run.finished_at or '' }}</td>
-            <td>
+            <td data-label="Run">#{{ run.id }}</td>
+            <td data-label="Status"><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></td>
+            <td data-label="Progress">{{ run.processed_count }} / {{ run.target_count }}</td>
+            <td data-label="Results">{{ run.success_count }} proposed, {{ run.invalid_count }} invalid, {{ run.error_count }} errors</td>
+            <td data-label="Created">{{ run.created_at }}</td>
+            <td data-label="Finished">{{ run.finished_at or '' }}</td>
+            <td data-label="Actions">
               <a href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id) }}">Details</a>
             </td>
           </tr>

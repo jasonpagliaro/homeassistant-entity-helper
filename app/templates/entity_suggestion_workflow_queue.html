@@ -101,7 +101,7 @@
     <p>{{ total }} workflow items match filters.</p>
 
     <div class="table-wrap">
-      <table>
+      <table class="data-table">
         <thead>
           <tr>
             <th>ID</th>
@@ -117,18 +117,18 @@
         <tbody>
           {% for item in queue_items %}
             <tr>
-              <td>{{ item.suggestion.id }}</td>
-              <td><code>{{ item.suggestion.entity_id }}</code></td>
-              <td>{{ item.suggestion.domain }}</td>
-              <td><span class="status-chip status-{{ item.suggestion.readiness_status }}">{{ item.suggestion.readiness_status }}</span></td>
-              <td><span class="status-chip status-{{ item.suggestion.workflow_status }}">{{ item.suggestion.workflow_status }}</span></td>
-              <td>
+              <td data-label="ID">{{ item.suggestion.id }}</td>
+              <td data-label="Entity ID"><code>{{ item.suggestion.entity_id }}</code></td>
+              <td data-label="Domain">{{ item.suggestion.domain }}</td>
+              <td data-label="Readiness"><span class="status-chip status-{{ item.suggestion.readiness_status }}">{{ item.suggestion.readiness_status }}</span></td>
+              <td data-label="Workflow"><span class="status-chip status-{{ item.suggestion.workflow_status }}">{{ item.suggestion.workflow_status }}</span></td>
+              <td data-label="Fixable Issues">
                 {% for issue in item.fixable_issues %}
                   <code>{{ issue.code or "unknown" }}</code>{% if not loop.last %}, {% endif %}
                 {% endfor %}
               </td>
-              <td>{{ item.manual_issues|length }}</td>
-              <td>
+              <td data-label="Manual Issues">{{ item.manual_issues|length }}</td>
+              <td data-label="Actions">
                 <a href="/entity-suggestions/{{ item.suggestion.id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Open</a>
               </td>
             </tr>
