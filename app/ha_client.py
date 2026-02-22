@@ -8,6 +8,8 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
+_UNSET = object()
+
 
 class HAClientError(Exception):
     def __init__(self, message: str, status_code: int | None = None) -> None:
@@ -274,3 +276,91 @@ class HAClient:
             metadata[bucket] = [item for item in payload if isinstance(item, dict)]
 
         return metadata
+
+    async def fetch_area_registry_entries(self) -> list[dict[str, Any]]:
+        try:
+            payload = await self._ws_request("config/area_registry/list")
+        except HAClientError as exc:
+            raise HAClientError(f"Unable to fetch area registry entries: {exc}") from exc
+
+        if not isinstance(payload, list):
+            raise HAClientError("Unexpected response format from config/area_registry/list.")
+        return [item for item in payload if isinstance(item, dict)]
+
+    @staticmethod
+    def _clean_entity_id(entity_id: Any) -> str:
+        if not isinstance(entity_id, str):
+            raise HAClientError("Entity ID must be a string.")
+        cleaned = entity_id.strip()
+        if "." not in cleaned:
+            raise HAClientError("Entity ID must include a domain prefix (domain.object_id).")
+        return cleaned
+
+    @staticmethod
+    def _clean_optional_str(value: Any, *, field_name: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise HAClientError(f"{field_name} must be a string or null.")
+        cleaned = value.strip()
+        return cleaned or None
+
+    @staticmethod
+    def _clean_label_ids(labels: Any) -> list[str]:
+        if not isinstance(labels, list):
+            raise HAClientError("labels must be an array of strings.")
+        cleaned: list[str] = []
+        for item in labels:
+            if not isinstance(item, str):
+                raise HAClientError("labels must only contain strings.")
+            normalized = item.strip()
+            if normalized:
+                cleaned.append(normalized)
+        return cleaned
+
+    async def update_entity_registry_entry(
+        self,
+        *,
+        entity_id: str,
+        name: Any = _UNSET,
+        area_id: Any = _UNSET,
+        device_class: Any = _UNSET,
+        labels: Any = _UNSET,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "entity_id": self._clean_entity_id(entity_id),
+        }
+
+        if name is not _UNSET:
+            payload["name"] = self._clean_optional_str(name, field_name="name")
+        if area_id is not _UNSET:
+            payload["area_id"] = self._clean_optional_str(area_id, field_name="area_id")
+        if device_class is not _UNSET:
+            payload["device_class"] = self._clean_optional_str(
+                device_class,
+                field_name="device_class",
+            )
+        if labels is not _UNSET:
+            payload["labels"] = self._clean_label_ids(labels)
+
+        if len(payload) == 1:
+            raise HAClientError("No entity registry changes were provided.")
+
+        result = await self._ws_request("config/entity_registry/update", **payload)
+        if not isinstance(result, dict):
+            raise HAClientError("Unexpected response format from config/entity_registry/update.")
+        entry = result.get("entity_entry")
+        if not isinstance(entry, dict):
+            raise HAClientError("Entity registry update response did not include entity_entry.")
+        return entry
+
+    async def create_area_registry_entry(self, *, name: str) -> dict[str, Any]:
+        cleaned_name = self._clean_optional_str(name, field_name="name")
+        if cleaned_name is None:
+            raise HAClientError("Area name is required.")
+        result = await self._ws_request("config/area_registry/create", name=cleaned_name)
+        if not isinstance(result, dict):
+            raise HAClientError("Unexpected response format from config/area_registry/create.")
+        if not isinstance(result.get("area_id"), str):
+            raise HAClientError("Area creation response did not include area_id.")
+        return result
