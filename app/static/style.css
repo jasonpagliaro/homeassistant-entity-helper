@@ -257,6 +257,33 @@ label {
   font-size: 0.92rem;
 }
 
+.field-label-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.field-help {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 1px solid #98a2b3;
+  background: #f8fafc;
+  color: #475467;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
+.field-help:focus-visible {
+  outline: 2px solid #0b5d57;
+  outline-offset: 2px;
+}
+
 input,
 select,
 button,

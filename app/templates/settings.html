@@ -165,8 +165,28 @@
                 <input type="number" min="1" max="300" name="timeout_seconds" value="20" data-llm-timeout />
               </label>
               <label>
-                Temperature
-                <input type="number" min="0" max="2" step="0.1" name="temperature" value="0.2" data-llm-temperature />
+                <span class="field-label-inline">
+                  Temperature
+                  <span
+                    class="field-help"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Temperature parameter help"
+                    data-tooltip="Controls response randomness. Suggested values: 0.0 deterministic, 0.2 balanced (default), 0.7 creative drafting."
+                    data-llm-temperature-help
+                    >?</span
+                  >
+                </span>
+                <input
+                  type="number"
+                  min="0"
+                  max="2"
+                  step="0.1"
+                  name="temperature"
+                  value="0.2"
+                  list="llm-temperature-suggestions"
+                  data-llm-temperature
+                />
               </label>
               <label>
                 Max Output Tokens
@@ -265,8 +285,28 @@
                       <input type="number" min="1" max="300" name="timeout_seconds" value="{{ connection.timeout_seconds }}" data-llm-timeout />
                     </label>
                     <label>
-                      Temperature
-                      <input type="number" min="0" max="2" step="0.1" name="temperature" value="{{ connection.temperature }}" data-llm-temperature />
+                      <span class="field-label-inline">
+                        Temperature
+                        <span
+                          class="field-help"
+                          role="button"
+                          tabindex="0"
+                          aria-label="Temperature parameter help"
+                          data-tooltip="Controls response randomness. Suggested values: 0.0 deterministic, 0.2 balanced (default), 0.7 creative drafting."
+                          data-llm-temperature-help
+                          >?</span
+                        >
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        name="temperature"
+                        value="{{ connection.temperature }}"
+                        list="llm-temperature-suggestions"
+                        data-llm-temperature
+                      />
                     </label>
                     <label>
                       Max Output Tokens
@@ -453,6 +493,11 @@
 </div>
 
 <script id="llm-presets-data" type="application/json">{{ llm_presets_json | safe }}</script>
+<datalist id="llm-temperature-suggestions">
+  <option value="0.0" label="Deterministic"></option>
+  <option value="0.2" label="Balanced (default)"></option>
+  <option value="0.7" label="Creative drafting"></option>
+</datalist>
 
 <script>
   (function () {
