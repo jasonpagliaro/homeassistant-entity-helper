@@ -10,6 +10,9 @@ HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entit
 
 Containerization is intentionally deferred. This repository currently targets standalone execution.
 
+## What's New
+- 2026-02-22: Header/page navigation was cleaned up with accessible primary tabs, active-route highlighting, mobile horizontal scrolling, and API Docs moved to a global footer utility link. See `/Users/jason/Projects/homeassistant-entity-helper/CHANGELOG.md` for details.
+
 ## MVP Features
 - Multiple Home Assistant profiles.
 - Settings per profile:
