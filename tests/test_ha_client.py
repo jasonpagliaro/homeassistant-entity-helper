@@ -147,3 +147,84 @@ async def test_not_found_error_includes_status() -> None:
 def test_websocket_url_normalization() -> None:
     client = HAClient(base_url="https://ha.local:8123/root/", token="abc123")
     assert client._websocket_url() == "wss://ha.local:8123/root/api/websocket"
+
+
+@pytest.mark.asyncio
+async def test_update_entity_registry_entry_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ws_request(self: HAClient, command_type: str, **payload: Any) -> Any:
+        assert command_type == "config/entity_registry/update"
+        assert payload["entity_id"] == "sensor.office_temp"
+        assert payload["name"] == "Office Temperature"
+        assert payload["area_id"] == "office"
+        assert payload["device_class"] == "temperature"
+        assert payload["labels"] == ["label_climate"]
+        return {"entity_entry": {"entity_id": payload["entity_id"]}}
+
+    monkeypatch.setattr(HAClient, "_ws_request", fake_ws_request)
+    client = HAClient(base_url="http://example.local", token="abc123")
+    entry = await client.update_entity_registry_entry(
+        entity_id="sensor.office_temp",
+        name="Office Temperature",
+        area_id="office",
+        device_class="temperature",
+        labels=["label_climate"],
+    )
+    assert entry["entity_id"] == "sensor.office_temp"
+
+
+@pytest.mark.asyncio
+async def test_update_entity_registry_entry_requires_changes() -> None:
+    client = HAClient(base_url="http://example.local", token="abc123")
+    with pytest.raises(HAClientError) as exc_info:
+        await client.update_entity_registry_entry(entity_id="sensor.office_temp")
+    assert "No entity registry changes were provided" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_create_area_registry_entry_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ws_request(self: HAClient, command_type: str, **payload: Any) -> Any:
+        assert command_type == "config/area_registry/create"
+        assert payload["name"] == "Office"
+        return {"area_id": "office", "name": "Office"}
+
+    monkeypatch.setattr(HAClient, "_ws_request", fake_ws_request)
+    client = HAClient(base_url="http://example.local", token="abc123")
+    area = await client.create_area_registry_entry(name=" Office ")
+    assert area["area_id"] == "office"
+
+
+@pytest.mark.asyncio
+async def test_fetch_area_registry_entries_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_ws_request(self: HAClient, command_type: str, **payload: Any) -> Any:
+        assert command_type == "config/area_registry/list"
+        assert payload == {}
+        return [
+            {"area_id": "office", "name": "Office"},
+            "invalid-entry",
+            {"id": "garage", "name": "Garage"},
+        ]
+
+    monkeypatch.setattr(HAClient, "_ws_request", fake_ws_request)
+    client = HAClient(base_url="http://example.local", token="abc123")
+
+    areas = await client.fetch_area_registry_entries()
+    assert areas == [
+        {"area_id": "office", "name": "Office"},
+        {"id": "garage", "name": "Garage"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_area_registry_entries_rejects_non_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_ws_request(self: HAClient, command_type: str, **payload: Any) -> Any:
+        assert command_type == "config/area_registry/list"
+        return {"area_id": "office"}
+
+    monkeypatch.setattr(HAClient, "_ws_request", fake_ws_request)
+    client = HAClient(base_url="http://example.local", token="abc123")
+
+    with pytest.raises(HAClientError) as exc_info:
+        await client.fetch_area_registry_entries()
+    assert "Unexpected response format from config/area_registry/list." in str(exc_info.value)

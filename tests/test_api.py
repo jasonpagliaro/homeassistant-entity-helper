@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,15 @@ from sqlmodel import Session, select
 from app import db
 from app.ha_client import HAClientError
 from app.main import create_app
-from app.models import Profile
+from app.models import (
+    ConfigSnapshot,
+    ConfigSyncRun,
+    EntitySuggestion,
+    LLMConnection,
+    Profile,
+    SuggestionProposal,
+    utcnow,
+)
 
 
 @pytest.fixture
@@ -67,6 +76,114 @@ def create_profile(
     )
     assert create_response.status_code == 303
     return get_profile_id_by_name(name)
+
+
+def get_llm_connection_id(profile_id: int, name: str) -> int:
+    with Session(db.get_engine()) as session:
+        connection = session.exec(
+            select(LLMConnection).where(
+                LLMConnection.profile_id == profile_id,
+                LLMConnection.name == name,
+            )
+        ).first()
+        assert connection is not None
+        assert connection.id is not None
+        return connection.id
+
+
+def seed_config_snapshot(
+    profile_id: int,
+    *,
+    entity_id: str = "automation.evening_mode",
+    kind: str = "automation",
+    fetch_status: str = "success",
+) -> tuple[int, int]:
+    with Session(db.get_engine()) as session:
+        config_run = ConfigSyncRun(
+            profile_id=profile_id,
+            item_count=1,
+            success_count=1 if fetch_status == "success" else 0,
+            error_count=0 if fetch_status == "success" else 1,
+            duration_ms=1,
+            status="success",
+            error=None,
+            pulled_at=utcnow(),
+        )
+        session.add(config_run)
+        session.commit()
+        session.refresh(config_run)
+        assert config_run.id is not None
+
+        snapshot = ConfigSnapshot(
+            profile_id=profile_id,
+            config_sync_run_id=config_run.id,
+            kind=kind,
+            entity_id=entity_id,
+            config_key="auto_evening_mode",
+            name="Evening Mode",
+            state="on",
+            fetch_status=fetch_status,
+            fetch_error=None if fetch_status == "success" else "failed",
+            summary_json=json.dumps({"name": "Evening Mode"}),
+            references_json=json.dumps({"entity_id": ["person.jason"]}),
+            config_json=json.dumps(
+                {
+                    "alias": "Evening Mode",
+                    "trigger": [{"platform": "time", "at": "19:00:00"}],
+                    "condition": [],
+                    "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+                }
+            ),
+            attributes_json=json.dumps({"friendly_name": "Evening Mode"}),
+            metadata_json=json.dumps({"detail_source": "test"}),
+            pulled_at=config_run.pulled_at,
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(snapshot)
+        assert snapshot.id is not None
+        return config_run.id, snapshot.id
+
+
+def wait_for_suggestion_run(
+    client: TestClient,
+    profile_id: int,
+    run_id: int,
+    *,
+    attempts: int = 40,
+    delay_seconds: float = 0.05,
+) -> dict[str, Any]:
+    for _ in range(attempts):
+        response = client.get(f"/api/suggestions/runs/{run_id}?profile_id={profile_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        status = payload["run"]["status"]
+        if status not in {"queued", "running"}:
+            return payload
+        time.sleep(delay_seconds)
+    pytest.fail(f"Suggestion run {run_id} did not complete in time")
+
+
+def run_sync_and_suggestions(client: TestClient, profile_id: int, csrf_token: str) -> None:
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    suggestion_response = client.post(
+        f"/profiles/{profile_id}/run-entity-suggestions",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entity-suggestions?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert suggestion_response.status_code == 303
 
 
 def assert_sync_modal_markup(html: str) -> None:
@@ -655,3 +772,1438 @@ def test_disabling_active_profile_reassigns_active_profile(client: TestClient) -
     assert "Active Profile:</strong> alpha" in entities_response.text
     assert f'<option value="{beta_id}"' not in entities_response.text
     assert f'<option value="{alpha_id}"' in entities_response.text
+
+
+def test_llm_connection_and_automation_suggestion_run_flow(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="lab")
+
+    create_connection = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Primary LLM",
+            "base_url": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "api_key_env_var": "TEST_LLM_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_connection.status_code == 303
+    connection_id = get_llm_connection_id(profile_id, "Primary LLM")
+
+    monkeypatch.setenv("TEST_LLM_KEY", "key-123")
+
+    async def fake_chat_json(_: Any, __: str, ___: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "suggestions": [
+                {
+                    "target_entity_id": "automation.evening_mode",
+                    "summary": "Add a guard condition before turning on lights.",
+                    "confidence": 0.81,
+                    "risk_level": "low",
+                    "proposed_patch": [
+                        {
+                            "op": "replace",
+                            "path": "/description",
+                            "value": "Updated by suggestion engine",
+                        }
+                    ],
+                    "verification_steps": [
+                        "Run the automation manually in Home Assistant.",
+                        "Confirm light.kitchen state changes as expected.",
+                    ],
+                }
+            ],
+            "provider_debug": "token=key-123",
+        }
+
+    async def fake_test_connection(_: Any) -> dict[str, Any]:
+        return {"status": "ok"}
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.chat_json", fake_chat_json)
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.test_connection", fake_test_connection)
+
+    config_sync_run_id, snapshot_id = seed_config_snapshot(profile_id)
+
+    queue_response = client.post(
+        f"/profiles/{profile_id}/suggestions/runs",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/suggestions?profile_id={profile_id}",
+            "llm_connection_id": str(connection_id),
+            "config_sync_run_id": str(config_sync_run_id),
+            "snapshot_id": str(snapshot_id),
+        },
+        follow_redirects=False,
+    )
+    assert queue_response.status_code == 303
+    location = queue_response.headers.get("location", "")
+    run_match = re.search(r"/suggestions/(\d+)\?", location)
+    assert run_match is not None
+    run_id = int(run_match.group(1))
+
+    run_payload = wait_for_suggestion_run(client, profile_id, run_id)
+    assert run_payload["run"]["status"] == "succeeded"
+    assert run_payload["proposal_counts"].get("proposed", 0) >= 1
+    proposal_id = int(run_payload["proposals"][0]["id"])
+
+    with Session(db.get_engine()) as session:
+        proposal = session.get(SuggestionProposal, proposal_id)
+        assert proposal is not None
+        assert proposal.raw_response_json is not None
+        assert "key-123" not in proposal.raw_response_json
+        assert "***redacted***" in proposal.raw_response_json
+
+    accept_response = client.post(
+        f"/suggestions/proposals/{proposal_id}/status",
+        data={
+            "csrf_token": csrf_token,
+            "status": "accepted",
+            "next_url": f"/suggestions/{run_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert accept_response.status_code == 303
+
+    detail_response = client.get(f"/suggestions/{run_id}?profile_id={profile_id}")
+    assert detail_response.status_code == 200
+    assert "automation.evening_mode" in detail_response.text
+    assert "accepted" in detail_response.text
+
+    test_connection_response = client.post(
+        f"/llm-connections/{connection_id}/test",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+        },
+        follow_redirects=True,
+    )
+    assert test_connection_response.status_code == 200
+    assert "is reachable" in test_connection_response.text
+
+    delete_response = client.post(
+        f"/llm-connections/{connection_id}/delete",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+        },
+        follow_redirects=True,
+    )
+    assert delete_response.status_code == 200
+    assert "Primary LLM" not in delete_response.text
+
+
+def test_missing_llm_key_and_disabled_connection_are_blocked(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="remote")
+
+    create_connection = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Remote LLM",
+            "base_url": "https://api.example.com/v1",
+            "model": "gpt-4o-mini",
+            "api_key_env_var": "MISSING_REMOTE_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_connection.status_code == 303
+    connection_id = get_llm_connection_id(profile_id, "Remote LLM")
+
+    monkeypatch.delenv("MISSING_REMOTE_KEY", raising=False)
+    test_response = client.post(
+        f"/llm-connections/{connection_id}/test",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+        },
+        follow_redirects=True,
+    )
+    assert test_response.status_code == 200
+    assert "LLM connection test failed" in test_response.text
+
+    config_sync_run_id, snapshot_id = seed_config_snapshot(profile_id)
+    disable_response = client.post(
+        f"/llm-connections/{connection_id}/update",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Remote LLM",
+            "base_url": "https://api.example.com/v1",
+            "model": "gpt-4o-mini",
+            "api_key_env_var": "MISSING_REMOTE_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            # is_enabled omitted on purpose -> false
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert disable_response.status_code == 303
+
+    queue_response = client.post(
+        f"/profiles/{profile_id}/suggestions/runs",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/config-items?profile_id={profile_id}&config_sync_run_id={config_sync_run_id}",
+            "llm_connection_id": str(connection_id),
+            "snapshot_id": str(snapshot_id),
+        },
+        follow_redirects=True,
+    )
+    assert queue_response.status_code == 200
+    assert "No enabled LLM connection configured for this profile." in queue_response.text
+
+
+def test_config_items_shows_suggest_for_successful_automation_only(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="buttons")
+
+    create_connection = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Buttons LLM",
+            "base_url": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "api_key_env_var": "",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_connection.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        run = ConfigSyncRun(
+            profile_id=profile_id,
+            pulled_at=utcnow(),
+            item_count=2,
+            success_count=1,
+            error_count=1,
+            duration_ms=1,
+            status="partial",
+            error=None,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        assert run.id is not None
+
+        auto = ConfigSnapshot(
+            profile_id=profile_id,
+            config_sync_run_id=run.id,
+            kind="automation",
+            entity_id="automation.ok_rule",
+            config_key="ok_rule",
+            name="OK Rule",
+            state="on",
+            fetch_status="success",
+            fetch_error=None,
+            summary_json=json.dumps({"name": "OK Rule"}),
+            references_json=json.dumps({"entity_id": ["person.jason"]}),
+            config_json=json.dumps({"alias": "OK Rule", "trigger": [], "action": []}),
+            attributes_json=json.dumps({}),
+            metadata_json=json.dumps({}),
+            pulled_at=run.pulled_at,
+        )
+        script = ConfigSnapshot(
+            profile_id=profile_id,
+            config_sync_run_id=run.id,
+            kind="script",
+            entity_id="script.bad_rule",
+            config_key="bad_rule",
+            name="Bad Rule",
+            state="off",
+            fetch_status="error",
+            fetch_error="failed",
+            summary_json=json.dumps({"name": "Bad Rule"}),
+            references_json=json.dumps({"entity_id": ["light.kitchen"]}),
+            config_json=None,
+            attributes_json=json.dumps({}),
+            metadata_json=json.dumps({}),
+            pulled_at=run.pulled_at,
+        )
+        session.add(auto)
+        session.add(script)
+        session.commit()
+        session.refresh(auto)
+        session.refresh(script)
+        assert auto.id is not None
+        assert script.id is not None
+        run_id = run.id
+        auto_snapshot_id = auto.id
+        script_snapshot_id = script.id
+
+    response = client.get(f"/config-items?profile_id={profile_id}&config_sync_run_id={run_id}")
+    assert response.status_code == 200
+    assert f'name="snapshot_id" value="{auto_snapshot_id}"' in response.text
+    assert f'name="snapshot_id" value="{script_snapshot_id}"' not in response.text
+
+
+def test_run_entity_suggestions_and_readiness_api(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="home")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.living_temp",
+                "state": "72",
+                "attributes": {
+                    "friendly_name": "Living Room Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                    "unit_of_measurement": "F",
+                },
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+            {
+                "entity_id": "event.scene_button",
+                "state": "2026-02-15T01:00:00+00:00",
+                "attributes": {"friendly_name": "Scene Button", "event_type": "KeyPressed"},
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+            {
+                "entity_id": "light.unassigned",
+                "state": "on",
+                "attributes": {"friendly_name": "Unassigned Light"},
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "living_room", "name": "Living Room"}],
+            "devices": [
+                {
+                    "id": "dev_temp",
+                    "name_by_user": "Living Temp Device",
+                    "area_id": "living_room",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "entities": [
+                {
+                    "entity_id": "sensor.living_temp",
+                    "device_id": "dev_temp",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "labels": [{"label_id": "label_climate", "name": "Climate"}],
+            "floors": [],
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    suggestion_response = client.post(
+        f"/profiles/{profile_id}/run-entity-suggestions",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entity-suggestions?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert suggestion_response.status_code == 303
+
+    suggestions_page = client.get(f"/entity-suggestions?profile_id={profile_id}")
+    assert suggestions_page.status_code == 200
+    assert "sensor.living_temp" in suggestions_page.text
+    assert "light.unassigned" not in suggestions_page.text
+    assert "event.scene_button" not in suggestions_page.text
+    assert "Run Summary (run-wide):" in suggestions_page.text
+    assert "Candidate Scope:" in suggestions_page.text
+    assert "sensor, binary_sensor, lock" in suggestions_page.text
+
+    api_response = client.get(f"/api/entity-suggestions?profile_id={profile_id}")
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["total"] == 1
+    assert payload["suggestion_run"] is not None
+
+    by_entity = {item["entity_id"]: item for item in payload["items"]}
+    assert by_entity["sensor.living_temp"]["readiness_status"] == "ready"
+    assert "light.unassigned" not in by_entity
+    assert "event.scene_button" not in by_entity
+
+
+def test_run_entity_suggestions_downgrades_area_when_enrichment_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="no-enrichment")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.office_temp",
+                "state": "71",
+                "attributes": {
+                    "friendly_name": "Office Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+            {
+                "entity_id": "binary_sensor.office_motion",
+                "state": "off",
+                "attributes": {
+                    "friendly_name": "Office Motion",
+                    "device_class": "motion",
+                },
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+            {
+                "entity_id": "lock.front_door",
+                "state": "locked",
+                "attributes": {"friendly_name": "Front Door Lock"},
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    suggestion_response = client.post(
+        f"/profiles/{profile_id}/run-entity-suggestions",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entity-suggestions?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert suggestion_response.status_code == 303
+
+    suggestions_page = client.get(f"/entity-suggestions?profile_id={profile_id}")
+    assert suggestions_page.status_code == 200
+    assert "Area checks were downgraded for this run because no area/device enrichment was available during scoring." in suggestions_page.text
+
+    api_response = client.get(f"/api/entity-suggestions?profile_id={profile_id}")
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["total"] == 3
+    assert payload["suggestion_run"]["blocked_count"] == 0
+    assert payload["suggestion_run"]["needs_review_count"] == 3
+
+    for item in payload["items"]:
+        assert item["readiness_status"] == "needs_review"
+        issue_codes = {issue["code"] for issue in item["issues"]}
+        assert "missing_area_enrichment_unavailable" in issue_codes
+        assert "missing_area" not in issue_codes
+
+
+def test_run_entity_suggestions_keeps_strict_area_when_any_enrichment_present(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="strict-enrichment")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.good_temp",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Good Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+            {
+                "entity_id": "sensor.missing_area_temp",
+                "state": "69",
+                "attributes": {
+                    "friendly_name": "Missing Area Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "living_room", "name": "Living Room"}],
+            "devices": [
+                {
+                    "id": "dev_good",
+                    "name_by_user": "Good Sensor Device",
+                    "area_id": "living_room",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "entities": [
+                {
+                    "entity_id": "sensor.good_temp",
+                    "device_id": "dev_good",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "labels": [{"label_id": "label_climate", "name": "Climate"}],
+            "floors": [],
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    suggestion_response = client.post(
+        f"/profiles/{profile_id}/run-entity-suggestions",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entity-suggestions?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert suggestion_response.status_code == 303
+
+    suggestions_page = client.get(f"/entity-suggestions?profile_id={profile_id}")
+    assert suggestions_page.status_code == 200
+    assert "Area checks were downgraded for this run because no area/device enrichment was available during scoring." not in suggestions_page.text
+
+    api_response = client.get(f"/api/entity-suggestions?profile_id={profile_id}")
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    by_entity = {item["entity_id"]: item for item in payload["items"]}
+    assert by_entity["sensor.missing_area_temp"]["readiness_status"] == "blocked"
+    missing_area_codes = {issue["code"] for issue in by_entity["sensor.missing_area_temp"]["issues"]}
+    assert "missing_area" in missing_area_codes
+    assert "missing_area_enrichment_unavailable" not in missing_area_codes
+
+
+def test_workflow_queue_only_includes_fixable_suggestions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-queue")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.fixable_area",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Fixable Area Sensor",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            },
+            {
+                "entity_id": "sensor.manual_only",
+                "state": "72",
+                "attributes": {
+                    "friendly_name": "Manual Only Sensor",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                    "area_id": "office_area",
+                },
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "office_area", "name": "Office"}],
+            "devices": [],
+            "entities": [
+                {
+                    "entity_id": "sensor.manual_only",
+                    "labels": ["label_existing"],
+                }
+            ],
+            "labels": [{"label_id": "label_existing", "name": "Existing"}],
+            "floors": [],
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+
+    queue_response = client.get(f"/entity-suggestions/workflow?profile_id={profile_id}")
+    assert queue_response.status_code == 200
+    assert "sensor.fixable_area" in queue_response.text
+    assert "sensor.manual_only" not in queue_response.text
+
+
+def test_workflow_detail_uses_registry_areas_dropdown_with_create_option(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-area-dropdown")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.office_temp",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Office Temp",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    sync_metadata_calls = {"count": 0}
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        sync_metadata_calls["count"] += 1
+        return {
+            "areas": [
+                {"area_id": "office_area", "name": "Office"},
+                {"area_id": "garage_area", "name": "Garage"},
+            ],
+            "devices": [],
+            "entities": [],
+            "labels": [],
+            "floors": [],
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    assert sync_metadata_calls["count"] == 1
+
+    async def fail_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        raise AssertionError("workflow detail should not call fetch_registry_metadata")
+
+    area_registry_calls = {"count": 0}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        area_registry_calls["count"] += 1
+        return [
+            {"area_id": "office_area", "name": "Office"},
+            {"area_id": "garage_area", "name": "Garage"},
+        ]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fail_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+    detail_response = client.get(
+        f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert area_registry_calls["count"] == 1
+    assert 'option value="__create_new_area__"' in detail_response.text
+    assert 'option value="office_area">Office</option>' in detail_response.text
+    assert 'option value="garage_area">Garage</option>' in detail_response.text
+
+
+def test_workflow_detail_area_dropdown_falls_back_to_snapshot_on_ha_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-area-fallback")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.target_missing_area",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Target Missing Area",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            },
+            {
+                "entity_id": "sensor.snapshot_area_source",
+                "state": "71",
+                "attributes": {
+                    "friendly_name": "Snapshot Area Source",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "office_area", "name": "Office"}],
+            "devices": [],
+            "entities": [{"entity_id": "sensor.snapshot_area_source", "area_id": "office_area"}],
+            "labels": [],
+            "floors": [],
+        }
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        raise HAClientError(
+            "Unable to reach Home Assistant WebSocket API: sent 1009 frame exceeds limit"
+        )
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    by_entity = {item["entity_id"]: item for item in suggestions_payload["items"]}
+    suggestion_id = by_entity["sensor.target_missing_area"]["id"]
+
+    detail_response = client.get(
+        f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert "Area options source: current suggestion run snapshot." in detail_response.text
+    assert "Unable to refresh from Home Assistant: Unable to reach Home Assistant WebSocket API: sent 1009 frame exceeds limit." in detail_response.text
+    assert 'option value="office_area">Office</option>' in detail_response.text
+
+
+def test_workflow_apply_friendly_name_and_existing_area(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-apply")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.office_temp",
+                "state": "69",
+                "attributes": {
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    applied: dict[str, Any] = {}
+
+    async def fake_update_entity_registry_entry(_: Any, **payload: Any) -> dict[str, Any]:
+        applied.update(payload)
+        return {"entity_id": payload["entity_id"]}
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.update_entity_registry_entry",
+        fake_update_entity_registry_entry,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+
+    apply_response = client.post(
+        f"/entity-suggestions/{suggestion_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "Office Temperature",
+            "area_id": "office_area",
+            "new_area_name": "",
+            "device_class": "",
+            "labels_csv": "",
+        },
+        follow_redirects=False,
+    )
+    assert apply_response.status_code == 303
+    assert applied["entity_id"] == "sensor.office_temp"
+    assert applied["name"] == "Office Temperature"
+    assert applied["area_id"] == "office_area"
+
+    detail_payload = client.get(
+        f"/api/entity-suggestions/{suggestion_id}?profile_id={profile_id}"
+    ).json()
+    assert detail_payload["workflow_status"] == "applied_pending_recheck"
+    assert detail_payload["workflow_updated_at"] is not None
+
+
+def test_workflow_apply_creates_new_area_when_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-new-area")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.garage_temp",
+                "state": "66",
+                "attributes": {
+                    "friendly_name": "Garage Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [{"area_id": "kitchen_area", "name": "Kitchen"}], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "kitchen_area", "name": "Kitchen"}]
+
+    async def fake_create_area_registry_entry(_: Any, *, name: str) -> dict[str, Any]:
+        assert name == "Garage"
+        return {"area_id": "garage_area", "name": "Garage"}
+
+    applied: dict[str, Any] = {}
+
+    async def fake_update_entity_registry_entry(_: Any, **payload: Any) -> dict[str, Any]:
+        applied.update(payload)
+        return {"entity_id": payload["entity_id"]}
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.create_area_registry_entry",
+        fake_create_area_registry_entry,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.update_entity_registry_entry",
+        fake_update_entity_registry_entry,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+
+    apply_response = client.post(
+        f"/entity-suggestions/{suggestion_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "",
+            "area_id": "",
+            "new_area_name": "Garage",
+            "device_class": "",
+            "labels_csv": "",
+        },
+        follow_redirects=False,
+    )
+    assert apply_response.status_code == 303
+    assert applied["area_id"] == "garage_area"
+
+    with Session(db.get_engine()) as session:
+        row = session.get(EntitySuggestion, suggestion_id)
+        assert row is not None
+        result_payload = json.loads(row.workflow_result_json or "{}")
+        assert result_payload["area_resolution"]["mode"] == "created"
+
+
+def test_workflow_apply_reuses_existing_area_by_name_with_areas_only_lookup(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-existing-area-by-name")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.garage_temp",
+                "state": "66",
+                "attributes": {
+                    "friendly_name": "Garage Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "garage_area", "name": "Garage"}]
+
+    async def fail_create_area_registry_entry(_: Any, *, name: str) -> dict[str, Any]:
+        raise AssertionError(f"create_area_registry_entry should not be called: {name}")
+
+    applied: dict[str, Any] = {}
+
+    async def fake_update_entity_registry_entry(_: Any, **payload: Any) -> dict[str, Any]:
+        applied.update(payload)
+        return {"entity_id": payload["entity_id"]}
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.create_area_registry_entry",
+        fail_create_area_registry_entry,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.update_entity_registry_entry",
+        fake_update_entity_registry_entry,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+
+    apply_response = client.post(
+        f"/entity-suggestions/{suggestion_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "",
+            "area_id": "",
+            "new_area_name": "garage",
+            "device_class": "",
+            "labels_csv": "",
+        },
+        follow_redirects=False,
+    )
+    assert apply_response.status_code == 303
+    assert applied["area_id"] == "garage_area"
+
+    with Session(db.get_engine()) as session:
+        row = session.get(EntitySuggestion, suggestion_id)
+        assert row is not None
+        result_payload = json.loads(row.workflow_result_json or "{}")
+        assert result_payload["area_resolution"]["mode"] == "existing_by_name"
+        assert result_payload["area_resolution"]["area_id"] == "garage_area"
+
+
+def test_workflow_apply_device_class_and_labels(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-device-label")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.semantic_missing",
+                "state": "1",
+                "attributes": {"friendly_name": "Semantic Missing", "area_id": "office_area"},
+            },
+            {
+                "entity_id": "sensor.labels_missing",
+                "state": "22",
+                "attributes": {
+                    "friendly_name": "Labels Missing",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "office_area", "name": "Office"}],
+            "devices": [
+                {
+                    "id": "dev_labels",
+                    "name_by_user": "Label Sensor Device",
+                    "area_id": "office_area",
+                }
+            ],
+            "entities": [
+                {"entity_id": "sensor.semantic_missing", "area_id": "office_area"},
+                {"entity_id": "sensor.labels_missing", "device_id": "dev_labels"},
+            ],
+            "labels": [],
+            "floors": [],
+        }
+
+    updates: list[dict[str, Any]] = []
+
+    async def fake_update_entity_registry_entry(_: Any, **payload: Any) -> dict[str, Any]:
+        updates.append(payload)
+        return {"entity_id": payload["entity_id"]}
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.update_entity_registry_entry",
+        fake_update_entity_registry_entry,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    by_entity = {item["entity_id"]: item for item in suggestions_payload["items"]}
+
+    semantic_id = by_entity["sensor.semantic_missing"]["id"]
+    labels_id = by_entity["sensor.labels_missing"]["id"]
+
+    semantic_apply = client.post(
+        f"/entity-suggestions/{semantic_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{semantic_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "",
+            "area_id": "",
+            "new_area_name": "",
+            "device_class": "temperature",
+            "labels_csv": "",
+        },
+        follow_redirects=False,
+    )
+    assert semantic_apply.status_code == 303
+
+    labels_apply = client.post(
+        f"/entity-suggestions/{labels_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{labels_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "",
+            "area_id": "",
+            "new_area_name": "",
+            "device_class": "",
+            "labels_csv": "label_custom",
+        },
+        follow_redirects=False,
+    )
+    assert labels_apply.status_code == 303
+
+    semantic_update = next(item for item in updates if item["entity_id"] == "sensor.semantic_missing")
+    labels_update = next(item for item in updates if item["entity_id"] == "sensor.labels_missing")
+    assert semantic_update["device_class"] == "temperature"
+    assert labels_update["labels"] == ["label_custom"]
+
+
+def test_workflow_apply_rejects_manual_only_and_skip_sets_status(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-manual-skip")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.manual_only",
+                "state": "55",
+                "attributes": {
+                    "friendly_name": "Manual Only",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                    "area_id": "office_area",
+                },
+            },
+            {
+                "entity_id": "sensor.skip_me",
+                "state": "65",
+                "attributes": {
+                    "friendly_name": "Skip Me",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "office_area", "name": "Office"}],
+            "devices": [],
+            "entities": [
+                {"entity_id": "sensor.manual_only", "labels": ["label_existing"]},
+            ],
+            "labels": [{"label_id": "label_existing", "name": "Existing"}],
+            "floors": [],
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    by_entity = {item["entity_id"]: item for item in suggestions_payload["items"]}
+
+    manual_id = by_entity["sensor.manual_only"]["id"]
+    skip_id = by_entity["sensor.skip_me"]["id"]
+
+    manual_apply = client.post(
+        f"/entity-suggestions/{manual_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{manual_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "Manual Only Updated",
+            "area_id": "",
+            "new_area_name": "",
+            "device_class": "",
+            "labels_csv": "",
+        },
+        follow_redirects=False,
+    )
+    assert manual_apply.status_code == 303
+
+    manual_detail = client.get(f"/api/entity-suggestions/{manual_id}?profile_id={profile_id}").json()
+    assert manual_detail["workflow_status"] == "error"
+    assert "no workflow-editable issues" in manual_detail["workflow_error"].lower()
+
+    skip_response = client.post(
+        f"/entity-suggestions/{skip_id}/workflow/skip",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/workflow?profile_id={profile_id}",
+            "reason": "Will handle later",
+        },
+        follow_redirects=False,
+    )
+    assert skip_response.status_code == 303
+
+    skip_detail = client.get(f"/api/entity-suggestions/{skip_id}?profile_id={profile_id}").json()
+    assert skip_detail["workflow_status"] == "skipped"
+
+
+def test_entity_suggestion_recheck_endpoint_and_api_workflow_fields(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-recheck")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.recheck_target",
+                "state": "72",
+                "attributes": {
+                    "friendly_name": "Recheck Target",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "office_area", "name": "Office"}],
+            "devices": [
+                {
+                    "id": "dev_recheck",
+                    "name_by_user": "Recheck Device",
+                    "area_id": "office_area",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "entities": [
+                {
+                    "entity_id": "sensor.recheck_target",
+                    "device_id": "dev_recheck",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "labels": [{"label_id": "label_climate", "name": "Climate"}],
+            "floors": [],
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    recheck_response = client.post(
+        f"/profiles/{profile_id}/entity-suggestions/recheck",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entity-suggestions/workflow?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert recheck_response.status_code == 303
+    location = recheck_response.headers.get("location", "")
+    assert "/entity-suggestions/workflow" in location
+    run_match = re.search(r"suggestion_run_id=(\d+)", location)
+    assert run_match is not None
+    run_id = int(run_match.group(1))
+
+    list_payload = client.get(
+        f"/api/entity-suggestions?profile_id={profile_id}&suggestion_run_id={run_id}"
+    ).json()
+    assert list_payload["suggestion_run"]["id"] == run_id
+    assert list_payload["items"]
+    first_item = list_payload["items"][0]
+    assert "workflow_status" in first_item
+    assert "workflow_error" in first_item
+    assert "workflow_updated_at" in first_item
+    assert first_item["workflow_status"] == "open"
+
+    detail_payload = client.get(
+        f"/api/entity-suggestions/{first_item['id']}?profile_id={profile_id}"
+    ).json()
+    assert detail_payload["workflow_status"] == "open"
+    assert "workflow_error" in detail_payload
+    assert "workflow_updated_at" in detail_payload
+
+
+def test_generate_automation_drafts_and_review_flow(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="draft-home")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.living_temp",
+                "state": "72",
+                "attributes": {
+                    "friendly_name": "Living Room Temperature",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+                "last_changed": "2026-02-15T01:00:00+00:00",
+                "last_updated": "2026-02-15T01:00:00+00:00",
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [{"area_id": "living_room", "name": "Living Room"}],
+            "devices": [
+                {
+                    "id": "dev_temp",
+                    "name_by_user": "Living Temp Device",
+                    "area_id": "living_room",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "entities": [
+                {
+                    "entity_id": "sensor.living_temp",
+                    "device_id": "dev_temp",
+                    "labels": ["label_climate"],
+                }
+            ],
+            "labels": [{"label_id": "label_climate", "name": "Climate"}],
+            "floors": [],
+        }
+
+    async def fake_generate_automation_draft(
+        _: Any,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        assert payload["template_id"] == "temperature_alert"
+        return {
+            "title": "Living Room Temperature Alert",
+            "alias": "Living Room Temperature Alert",
+            "description": "Notify when temperature is high.",
+            "trigger": [{"platform": "numeric_state", "entity_id": "sensor.living_temp", "above": 80}],
+            "condition": [],
+            "action": [{"service": "notify.notify", "data": {"message": "Temperature alert"}}],
+            "rationale": "Temperature sensor should trigger alert automation.",
+        }
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.OpenAICompatibleLLMClient.generate_automation_draft",
+        fake_generate_automation_draft,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "true")
+    monkeypatch.setenv("HEV_LLM_BASE_URL", "http://llm.local")
+    monkeypatch.setenv("HEV_LLM_API_KEY", "token")
+    monkeypatch.setenv("HEV_LLM_MODEL", "test-model")
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    suggestion_response = client.post(
+        f"/profiles/{profile_id}/run-entity-suggestions",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entity-suggestions?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert suggestion_response.status_code == 303
+
+    suggestions_api = client.get(f"/api/entity-suggestions?profile_id={profile_id}")
+    assert suggestions_api.status_code == 200
+    suggestions_payload = suggestions_api.json()
+    suggestion_run_id = suggestions_payload["suggestion_run"]["id"]
+    assert suggestions_payload["items"][0]["readiness_status"] == "ready"
+
+    draft_response = client.post(
+        f"/profiles/{profile_id}/generate-automation-drafts",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/automation-drafts?profile_id={profile_id}",
+            "suggestion_run_id": str(suggestion_run_id),
+            "readiness_status": "ready",
+        },
+        follow_redirects=False,
+    )
+    assert draft_response.status_code == 303
+
+    drafts_page = client.get(f"/automation-drafts?profile_id={profile_id}")
+    assert drafts_page.status_code == 200
+    assert "temperature_alert" in drafts_page.text
+
+    drafts_api = client.get(f"/api/automation-drafts?profile_id={profile_id}")
+    assert drafts_api.status_code == 200
+    drafts_payload = drafts_api.json()
+    assert drafts_payload["total"] == 1
+    draft_id = drafts_payload["items"][0]["id"]
+    assert drafts_payload["items"][0]["generation_status"] == "success"
+
+    accept_response = client.post(
+        f"/automation-drafts/{draft_id}/accept",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/automation-drafts?profile_id={profile_id}",
+            "review_note": "Looks good",
+        },
+        follow_redirects=False,
+    )
+    assert accept_response.status_code == 303
+
+    accepted_detail = client.get(f"/api/automation-drafts/{draft_id}?profile_id={profile_id}")
+    assert accepted_detail.status_code == 200
+    assert accepted_detail.json()["review_status"] == "accepted"
+
+    reject_response = client.post(
+        f"/automation-drafts/{draft_id}/reject",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/automation-drafts?profile_id={profile_id}",
+            "review_note": "Needs changes",
+        },
+        follow_redirects=False,
+    )
+    assert reject_response.status_code == 303
+
+    rejected_detail = client.get(f"/api/automation-drafts/{draft_id}?profile_id={profile_id}")
+    assert rejected_detail.status_code == 200
+    assert rejected_detail.json()["review_status"] == "rejected"

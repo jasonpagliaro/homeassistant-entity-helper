@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Missing Details Workflow</h2>
+
+  <form method="get" action="/entity-suggestions/workflow" class="grid-form compact">
+    <label>
+      Profile
+      <select name="profile_id" onchange="this.form.submit()">
+        {% for profile in profiles %}
+          <option value="{{ profile.id }}" {% if active_profile and profile.id == active_profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Suggestion Run
+      <select name="suggestion_run_id">
+        <option value="">Latest</option>
+        {% for run in suggestion_runs %}
+          <option value="{{ run.id }}" {% if active_suggestion_run and run.id == active_suggestion_run.id %}selected{% endif %}>#{{ run.id }} ({{ run.pulled_at }}, {{ run.status }})</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Search
+      <input type="text" name="q" value="{{ q }}" placeholder="entity/issue..." />
+    </label>
+
+    <label>
+      Domain
+      <select name="domain">
+        <option value="">All</option>
+        {% for item in domains %}
+          <option value="{{ item }}" {% if item == domain %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Workflow Status
+      <select name="workflow_status">
+        <option value="">All</option>
+        {% for item in workflow_statuses %}
+          <option value="{{ item }}" {% if item == workflow_status %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Page Size
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </label>
+
+    <div class="row gap-sm align-end">
+      <button type="submit">Apply Filters</button>
+      <a class="button" href="/entity-suggestions/workflow?{{ build_query(profile_id=active_profile.id if active_profile else None, suggestion_run_id=active_suggestion_run.id if active_suggestion_run else None) }}">Reset</a>
+    </div>
+  </form>
+
+  <div class="row between wrap gap-sm">
+    <div>
+      {% if active_profile %}
+        <strong>Active Profile:</strong> {{ active_profile.name }}
+      {% endif %}
+      {% if active_suggestion_run %}
+        <div><strong>Run:</strong> #{{ active_suggestion_run.id }} ({{ active_suggestion_run.status }})</div>
+        <div><strong>Run Summary:</strong> {{ active_suggestion_run.ready_count }} ready / {{ active_suggestion_run.needs_review_count }} needs review / {{ active_suggestion_run.blocked_count }} blocked</div>
+      {% endif %}
+      <div>
+        <strong>Workflow Counts:</strong>
+        open={{ workflow_counts.get("open", 0) }},
+        applied_pending_recheck={{ workflow_counts.get("applied_pending_recheck", 0) }},
+        skipped={{ workflow_counts.get("skipped", 0) }},
+        error={{ workflow_counts.get("error", 0) }}
+      </div>
+    </div>
+
+    {% if active_profile and active_suggestion_run %}
+      <div class="row gap-sm wrap">
+        {% if next_unresolved_id %}
+          <a class="button" href="/entity-suggestions/{{ next_unresolved_id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Open Next Unresolved</a>
+        {% endif %}
+        <form
+          method="post"
+          action="/profiles/{{ active_profile.id }}/entity-suggestions/recheck"
+          data-sync-modal="true"
+          data-sync-modal-label="Running sync and suggestion recheck..."
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <input type="hidden" name="next_url" value="{{ next_url }}" />
+          <button type="submit">Recheck Now</button>
+        </form>
+        <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Back to Suggestions</a>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if active_profile and active_suggestion_run %}
+    <p>{{ total }} workflow items match filters.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Entity ID</th>
+            <th>Domain</th>
+            <th>Readiness</th>
+            <th>Workflow</th>
+            <th>Fixable Issues</th>
+            <th>Manual Issues</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in queue_items %}
+            <tr>
+              <td>{{ item.suggestion.id }}</td>
+              <td><code>{{ item.suggestion.entity_id }}</code></td>
+              <td>{{ item.suggestion.domain }}</td>
+              <td><span class="status-chip status-{{ item.suggestion.readiness_status }}">{{ item.suggestion.readiness_status }}</span></td>
+              <td><span class="status-chip status-{{ item.suggestion.workflow_status }}">{{ item.suggestion.workflow_status }}</span></td>
+              <td>
+                {% for issue in item.fixable_issues %}
+                  <code>{{ issue.code or "unknown" }}</code>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+              </td>
+              <td>{{ item.manual_issues|length }}</td>
+              <td>
+                <a href="/entity-suggestions/{{ item.suggestion.id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Open</a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }}</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a class="button" href="/entity-suggestions/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id, q=q, domain=domain, workflow_status=workflow_status, page=page-1, page_size=page_size) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="button" href="/entity-suggestions/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id, q=q, domain=domain, workflow_status=workflow_status, page=page+1, page_size=page_size) }}">Next</a>
+        {% endif %}
+      </div>
+    </div>
+  {% elif active_profile %}
+    <p>No workflow-eligible suggestions for this profile/run yet.</p>
+  {% elif profile_count > 0 %}
+    <p>No enabled profiles are available. Enable a profile on the <a href="/settings">Profiles page</a>.</p>
+  {% else %}
+    <p>No profiles are configured yet. Add one on the <a href="/settings">Profiles page</a>.</p>
+  {% endif %}
+</section>
+{% endblock %}

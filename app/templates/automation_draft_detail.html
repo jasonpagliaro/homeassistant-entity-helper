@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Automation Draft Detail</h2>
+  <p><a href="{{ back_url }}">Back to automation drafts</a></p>
+
+  <div class="detail-grid">
+    <div><strong>Run</strong></div><div>#{{ run.id }} ({{ run.status }})</div>
+    <div><strong>Entity ID</strong></div><div><code>{{ draft.entity_id }}</code></div>
+    <div><strong>Template</strong></div><div><code>{{ draft.template_id }}</code></div>
+    <div><strong>Title</strong></div><div>{{ draft.title }}</div>
+    <div><strong>Generation</strong></div><div><span class="status-chip status-{{ draft.generation_status }}">{{ draft.generation_status }}</span></div>
+    <div><strong>Review</strong></div><div><span class="status-chip status-{{ draft.review_status }}">{{ draft.review_status }}</span></div>
+    <div><strong>Review Note</strong></div><div>{{ draft.review_note or '' }}</div>
+    <div><strong>Reviewed At</strong></div><div>{{ draft.reviewed_at or '' }}</div>
+    <div><strong>Pulled At</strong></div><div>{{ draft.pulled_at }}</div>
+  </div>
+
+  <div class="row gap-sm wrap">
+    <form method="post" action="/automation-drafts/{{ draft.id }}/accept">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="{{ back_url }}" />
+      <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+      <label>
+        Accept Note
+        <input type="text" name="review_note" placeholder="Optional note" />
+      </label>
+      <button type="submit">Accept Draft</button>
+    </form>
+
+    <form method="post" action="/automation-drafts/{{ draft.id }}/reject">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="{{ back_url }}" />
+      <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+      <label>
+        Reject Note
+        <input type="text" name="review_note" placeholder="Optional note" />
+      </label>
+      <button type="submit" class="danger">Reject Draft</button>
+    </form>
+  </div>
+
+  <h3>YAML</h3>
+  <pre>{{ draft.yaml_text or '' }}</pre>
+
+  <h3>Structured Payload</h3>
+  <pre>{{ structured_pretty }}</pre>
+
+  <h3>Rationale</h3>
+  <pre>{{ rationale_pretty }}</pre>
+</section>
+{% endblock %}

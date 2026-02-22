@@ -79,14 +79,29 @@ a:hover {
   background: #f8fafc;
 }
 
+.panel-inner {
+  background: #f8fafc;
+  border-style: dashed;
+}
+
 .profile-card {
   border-top: 1px solid var(--border);
   margin-top: 1rem;
   padding-top: 1rem;
 }
 
+.profile-card-sub {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
 .profile-card-disabled {
   opacity: 0.92;
+}
+
+.muted-text {
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .grid-form {
@@ -209,6 +224,60 @@ button.danger {
   border-color: #f6b5b5;
 }
 
+.status-queued {
+  background: #fff4d6;
+  border-color: #f0cc7a;
+}
+
+.status-running {
+  background: #dceeff;
+  border-color: #8bbce8;
+}
+
+.status-succeeded {
+  background: #ddf7e9;
+  border-color: #8ad0ac;
+}
+
+.status-invalid {
+  background: #fde5e5;
+  border-color: #f6b5b5;
+}
+
+.status-ready,
+.status-accepted {
+  background: #ddf7e9;
+  border-color: #8ad0ac;
+}
+
+.status-needs_review,
+.status-pending,
+.status-partial {
+  background: #fff4d6;
+  border-color: #f0cc7a;
+}
+
+.status-blocked,
+.status-rejected {
+  background: #fde5e5;
+  border-color: #f6b5b5;
+}
+
+.status-open {
+  background: #fff4d6;
+  border-color: #f0cc7a;
+}
+
+.status-applied_pending_recheck {
+  background: #dceeff;
+  border-color: #8bbce8;
+}
+
+.status-skipped {
+  background: #eef2f6;
+  border-color: #cbd5e1;
+}
+
 .row {
   display: flex;
   align-items: center;
@@ -224,6 +293,12 @@ button.danger {
 
 .row.gap-sm {
   gap: 0.55rem;
+}
+
+.inline-form {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.35rem;
 }
 
 .align-end {

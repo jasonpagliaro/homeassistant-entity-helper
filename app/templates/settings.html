@@ -63,6 +63,16 @@
               <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
               <button type="submit">Test Connection</button>
             </form>
+            <form
+              method="post"
+              action="/profiles/{{ profile.id }}/run-entity-suggestions"
+              data-sync-modal="true"
+              data-sync-modal-label="Running entity suggestions..."
+            >
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="next_url" value="/entity-suggestions?{{ build_query(profile_id=profile.id) }}" />
+              <button type="submit">Run Suggestions Check</button>
+            </form>
             <form method="post" action="/profiles/{{ profile.id }}/disable">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <button type="submit">Disable Profile</button>
@@ -71,6 +81,135 @@
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <button type="submit" class="danger">Delete Profile</button>
             </form>
+          </div>
+
+          {% set profile_connections = llm_connections_by_profile.get(profile.id, []) %}
+          <div class="panel panel-inner">
+            <h5>LLM Connections</h5>
+            <p class="muted-text">OpenAI-compatible endpoint support for cloud and local providers.</p>
+
+            <form method="post" action="/profiles/{{ profile.id }}/llm-connections" class="grid-form compact">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+              <label>
+                Name
+                <input type="text" name="name" placeholder="Connection name" required />
+              </label>
+              <label>
+                Base URL
+                <input type="url" name="base_url" placeholder="http://localhost:11434/v1" required />
+              </label>
+              <label>
+                Model
+                <input type="text" name="model" placeholder="gpt-4o-mini or llama3.1" required />
+              </label>
+              <label>
+                API Key Env Var
+                <input type="text" name="api_key_env_var" placeholder="OPENAI_API_KEY (optional for local)" />
+              </label>
+              <label>
+                Timeout Seconds
+                <input type="number" min="1" max="300" name="timeout_seconds" value="20" />
+              </label>
+              <label>
+                Temperature
+                <input type="number" min="0" max="2" step="0.1" name="temperature" value="0.2" />
+              </label>
+              <label>
+                Max Output Tokens
+                <input type="number" min="1" max="8192" name="max_output_tokens" value="900" />
+              </label>
+              <label>
+                Extra Headers JSON
+                <input type="text" name="extra_headers_json" placeholder='{"HTTP-Referer":"..."}' />
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" name="is_enabled" checked />
+                Enabled
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" name="is_default" />
+                Default for Suggestions
+              </label>
+              <button type="submit">Add LLM Connection</button>
+            </form>
+
+            {% if profile_connections %}
+              {% for connection in profile_connections %}
+                <article class="profile-card profile-card-sub">
+                  <div class="row between wrap gap-sm">
+                    <strong>{{ connection.name }}</strong>
+                    <div class="row gap-sm wrap">
+                      <span class="status-chip {% if connection.is_enabled %}status-success{% else %}status-error{% endif %}">
+                        {% if connection.is_enabled %}Enabled{% else %}Disabled{% endif %}
+                      </span>
+                      {% if connection.is_default %}
+                        <span class="status-chip">Default</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                  <form method="post" action="/llm-connections/{{ connection.id }}/update" class="grid-form compact">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                    <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+                    <label>
+                      Name
+                      <input type="text" name="name" value="{{ connection.name }}" required />
+                    </label>
+                    <label>
+                      Base URL
+                      <input type="url" name="base_url" value="{{ connection.base_url }}" required />
+                    </label>
+                    <label>
+                      Model
+                      <input type="text" name="model" value="{{ connection.model }}" required />
+                    </label>
+                    <label>
+                      API Key Env Var
+                      <input type="text" name="api_key_env_var" value="{{ connection.api_key_env_var or '' }}" />
+                    </label>
+                    <label>
+                      Timeout Seconds
+                      <input type="number" min="1" max="300" name="timeout_seconds" value="{{ connection.timeout_seconds }}" />
+                    </label>
+                    <label>
+                      Temperature
+                      <input type="number" min="0" max="2" step="0.1" name="temperature" value="{{ connection.temperature }}" />
+                    </label>
+                    <label>
+                      Max Output Tokens
+                      <input type="number" min="1" max="8192" name="max_output_tokens" value="{{ connection.max_output_tokens }}" />
+                    </label>
+                    <label>
+                      Extra Headers JSON
+                      <input type="text" name="extra_headers_json" value="{{ connection.extra_headers_json or '' }}" />
+                    </label>
+                    <label class="checkbox-row">
+                      <input type="checkbox" name="is_enabled" {% if connection.is_enabled %}checked{% endif %} />
+                      Enabled
+                    </label>
+                    <label class="checkbox-row">
+                      <input type="checkbox" name="is_default" {% if connection.is_default %}checked{% endif %} />
+                      Default for Suggestions
+                    </label>
+                    <button type="submit">Save Connection</button>
+                  </form>
+                  <div class="row gap-sm wrap">
+                    <form method="post" action="/llm-connections/{{ connection.id }}/test">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                      <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+                      <button type="submit">Test LLM</button>
+                    </form>
+                    <form method="post" action="/llm-connections/{{ connection.id }}/delete" onsubmit="return confirm('Delete LLM connection {{ connection.name }}?');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                      <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
+                      <button type="submit" class="danger">Delete LLM</button>
+                    </form>
+                  </div>
+                </article>
+              {% endfor %}
+            {% else %}
+              <p>No LLM connections configured for this profile.</p>
+            {% endif %}
           </div>
         </article>
       {% endfor %}

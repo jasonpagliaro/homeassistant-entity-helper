@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Automation Drafts</h2>
+
+  <form method="get" action="/automation-drafts" class="grid-form compact">
+    <label>
+      Profile
+      <select name="profile_id" onchange="this.form.submit()">
+        {% for profile in profiles %}
+          <option value="{{ profile.id }}" {% if active_profile and profile.id == active_profile.id %}selected{% endif %}>{{ profile.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Draft Run
+      <select name="draft_run_id">
+        <option value="">Latest</option>
+        {% for run in draft_runs %}
+          <option value="{{ run.id }}" {% if active_draft_run and run.id == active_draft_run.id %}selected{% endif %}>#{{ run.id }} ({{ run.pulled_at }}, {{ run.status }})</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Search
+      <input type="text" name="q" value="{{ q }}" placeholder="entity/title/template/error..." />
+    </label>
+
+    <label>
+      Review Status
+      <select name="review_status">
+        <option value="">All</option>
+        {% for item in review_statuses %}
+          <option value="{{ item }}" {% if item == review_status %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Template
+      <select name="template_id">
+        <option value="">All</option>
+        {% for item in template_ids %}
+          <option value="{{ item }}" {% if item == template_id %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Generation Status
+      <select name="generation_status">
+        <option value="">All</option>
+        {% for item in generation_statuses %}
+          <option value="{{ item }}" {% if item == generation_status %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Page Size
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </label>
+
+    <div class="row gap-sm align-end">
+      <button type="submit">Apply Filters</button>
+      <a class="button" href="/automation-drafts?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
+  </form>
+
+  <div class="row between wrap gap-sm">
+    <div>
+      {% if active_profile %}
+        <strong>Active Profile:</strong> {{ active_profile.name }}
+      {% endif %}
+      {% if active_draft_run %}
+        <div><strong>Run:</strong> #{{ active_draft_run.id }} ({{ active_draft_run.status }})</div>
+        <div><strong>Summary:</strong> {{ active_draft_run.generated_count }} generated / {{ active_draft_run.error_count }} errors</div>
+      {% endif %}
+    </div>
+    {% if active_profile %}
+      <div class="row gap-sm wrap">
+        <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}">Back to Suggestions</a>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if active_profile and active_draft_run %}
+    <p>{{ total }} drafts match filters.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Entity ID</th>
+            <th>Template</th>
+            <th>Title</th>
+            <th>Generation</th>
+            <th>Review</th>
+            <th>Pulled At</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in drafts %}
+          <tr>
+            <td>{{ item.id }}</td>
+            <td><code>{{ item.entity_id }}</code></td>
+            <td><code>{{ item.template_id }}</code></td>
+            <td>{{ item.title }}</td>
+            <td><span class="status-chip status-{{ item.generation_status }}">{{ item.generation_status }}</span></td>
+            <td><span class="status-chip status-{{ item.review_status }}">{{ item.review_status }}</span></td>
+            <td>{{ item.pulled_at }}</td>
+            <td>
+              <a href="/automation-drafts/{{ item.id }}?{{ build_query(profile_id=active_profile.id, draft_run_id=active_draft_run.id) }}">Details</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }}</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a class="button" href="/automation-drafts?{{ build_query(profile_id=active_profile.id, draft_run_id=active_draft_run.id, q=q, review_status=review_status, template_id=template_id, generation_status=generation_status, page=page-1, page_size=page_size) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="button" href="/automation-drafts?{{ build_query(profile_id=active_profile.id, draft_run_id=active_draft_run.id, q=q, review_status=review_status, template_id=template_id, generation_status=generation_status, page=page+1, page_size=page_size) }}">Next</a>
+        {% endif %}
+      </div>
+    </div>
+  {% elif active_profile %}
+    <p>No draft runs yet for this profile.</p>
+  {% else %}
+    <p>No profiles found. Create one on the settings page.</p>
+  {% endif %}
+</section>
+{% endblock %}

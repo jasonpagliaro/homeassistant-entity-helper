@@ -1,0 +1,21 @@
+{
+  "name": "homeassistant-entity-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Home Assistant entity helper build orchestration",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "bootstrap": "node scripts/npm/bootstrap.mjs",
+    "build": "npm run lint && npm run typecheck && npm run test",
+    "lint": "node scripts/npm/run-python.mjs -m ruff check app tests",
+    "typecheck": "node scripts/npm/run-python.mjs -m mypy app tests",
+    "test": "node scripts/npm/run-python.mjs -m pytest -q",
+    "format": "node scripts/npm/run-python.mjs -m ruff check --fix app tests",
+    "run": "node scripts/npm/run-python.mjs -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
+    "db:migrate": "node scripts/npm/run-python.mjs -m alembic upgrade head",
+    "clean": "node scripts/npm/clean.mjs"
+  }
+}
