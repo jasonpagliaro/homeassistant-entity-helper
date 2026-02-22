@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
@@ -92,6 +92,22 @@ SUGGESTION_MAX_PATCH_OPS = 12
 SUGGESTION_WORKER: SuggestionWorker | None = None
 
 
+class PrimaryNavLink(TypedDict):
+    label: str
+    href: str
+    is_active: bool
+
+
+PRIMARY_NAV_ITEMS: tuple[tuple[str, str], ...] = (
+    ("Entities", "/entities"),
+    ("Config Items", "/config-items"),
+    ("Automation Suggestions", "/suggestions"),
+    ("Entity Suggestions", "/entity-suggestions"),
+    ("Automation Drafts", "/automation-drafts"),
+    ("Profiles", "/settings"),
+)
+
+
 def app_name() -> str:
     return os.getenv("APP_NAME", "HA Entity Vault")
 
@@ -124,6 +140,23 @@ def get_current_url(request: Request) -> str:
     if query:
         return f"{request.url.path}?{query}"
     return request.url.path
+
+
+def is_primary_nav_active_path(current_path: str, nav_path: str) -> bool:
+    return current_path == nav_path or current_path.startswith(f"{nav_path}/")
+
+
+def build_primary_nav_links(current_path: str) -> list[PrimaryNavLink]:
+    links: list[PrimaryNavLink] = []
+    for label, href in PRIMARY_NAV_ITEMS:
+        links.append(
+            {
+                "label": label,
+                "href": href,
+                "is_active": is_primary_nav_active_path(current_path, href),
+            }
+        )
+    return links
 
 
 def set_active_profile_id(request: Request, profile_id: int | None) -> None:
@@ -2060,6 +2093,7 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         context["nav_profiles"] = get_enabled_profiles(session)
         context["nav_active_profile"] = active_profile
+        context["nav_primary_links"] = build_primary_nav_links(request.url.path)
         context["current_url"] = get_current_url(request)
         return context
 

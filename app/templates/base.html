@@ -33,14 +33,22 @@
             </select>
           </form>
         </div>
-        <nav class="row gap-sm wrap">
-          <a href="/entities">Entities</a>
-          <a href="/config-items">Config Items</a>
-          <a href="/suggestions">Automation Suggestions</a>
-          <a href="/entity-suggestions">Entity Suggestions</a>
-          <a href="/automation-drafts">Automation Drafts</a>
-          <a href="/settings">Profiles</a>
-          <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+        <nav class="primary-nav" aria-label="Primary">
+          <div class="primary-nav__scroller">
+            <ul class="primary-nav__list">
+              {% for link in nav_primary_links %}
+                <li>
+                  <a
+                    class="primary-nav__link{% if link.is_active %} is-active{% endif %}"
+                    href="{{ link.href }}"
+                    {% if link.is_active %}aria-current="page"{% endif %}
+                  >
+                    {{ link.label }}
+                  </a>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
         </nav>
       </div>
     </header>
@@ -51,6 +59,12 @@
       {% endif %}
       {% block content %}{% endblock %}
     </main>
+
+    <footer class="site-footer">
+      <div class="container site-footer__inner">
+        <a class="site-footer__docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+      </div>
+    </footer>
 
     <div id="sync-modal" class="sync-modal" aria-hidden="true" hidden>
       <div class="sync-modal__panel" role="status" aria-live="polite" aria-atomic="true">

@@ -213,6 +213,72 @@ def assert_form_absent(html: str, action_pattern: str) -> None:
     assert match is None
 
 
+def extract_primary_nav(html: str) -> str:
+    match = re.search(
+        r'<nav class="primary-nav" aria-label="Primary">(.+?)</nav>',
+        html,
+        re.DOTALL,
+    )
+    assert match is not None
+    return match.group(1)
+
+
+def extract_primary_nav_links(html: str) -> list[dict[str, Any]]:
+    nav_html = extract_primary_nav(html)
+    anchors = re.findall(
+        r'<a\s+class="primary-nav__link(?: is-active)?"\s+href="[^"]+"(?:\s+aria-current="page")?\s*>.+?</a>',
+        nav_html,
+        re.DOTALL,
+    )
+    assert anchors
+
+    links: list[dict[str, Any]] = []
+    for anchor in anchors:
+        href_match = re.search(r'href="([^"]+)"', anchor)
+        label_match = re.search(r">(.+?)</a>", anchor, re.DOTALL)
+        class_match = re.search(r'class="([^"]+)"', anchor)
+        assert href_match is not None
+        assert label_match is not None
+        assert class_match is not None
+        links.append(
+            {
+                "href": href_match.group(1),
+                "label": " ".join(label_match.group(1).split()),
+                "is_active": "is-active" in class_match.group(1).split(),
+                "has_aria_current": 'aria-current="page"' in anchor,
+            }
+        )
+    return links
+
+
+def assert_primary_nav_active_link(html: str, *, active_href: str, active_label: str) -> None:
+    links = extract_primary_nav_links(html)
+    active_links = [link for link in links if link["is_active"]]
+    assert len(active_links) == 1
+    active_link = active_links[0]
+    assert active_link["href"] == active_href
+    assert active_link["label"] == active_label
+    assert active_link["has_aria_current"]
+
+    for link in links:
+        if link["href"] == active_href:
+            continue
+        assert not link["is_active"]
+        assert not link["has_aria_current"]
+
+
+def assert_docs_link_in_footer_not_primary_nav(html: str) -> None:
+    nav_html = extract_primary_nav(html)
+    assert 'href="/docs"' not in nav_html
+
+    footer_match = re.search(r'<footer class="site-footer">(.+?)</footer>', html, re.DOTALL)
+    assert footer_match is not None
+    footer_html = footer_match.group(1)
+    assert 'class="site-footer__docs-link"' in footer_html
+    assert 'href="/docs"' in footer_html
+    assert 'target="_blank"' in footer_html
+
+
 def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     settings_response = client.get("/settings")
     assert settings_response.status_code == 200
@@ -252,6 +318,29 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
         "Syncing config items...",
     )
     assert f"/profiles/{profile_id}/sync-config" in config_items_html
+
+
+@pytest.mark.parametrize(
+    ("path", "active_href", "active_label"),
+    [
+        ("/entities", "/entities", "Entities"),
+        ("/config-items", "/config-items", "Config Items"),
+        ("/suggestions", "/suggestions", "Automation Suggestions"),
+        ("/entity-suggestions", "/entity-suggestions", "Entity Suggestions"),
+        ("/automation-drafts", "/automation-drafts", "Automation Drafts"),
+        ("/settings", "/settings", "Profiles"),
+    ],
+)
+def test_primary_navigation_active_state_on_top_level_pages(
+    client: TestClient,
+    path: str,
+    active_href: str,
+    active_label: str,
+) -> None:
+    response = client.get(path)
+    assert response.status_code == 200
+    assert_primary_nav_active_link(response.text, active_href=active_href, active_label=active_label)
+    assert_docs_link_in_footer_not_primary_nav(response.text)
 
 
 def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -357,6 +446,8 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert "Kitchen Light" in detail_response.text
     assert "Kitchen Ceiling" in detail_response.text
     assert "Lighting" in detail_response.text
+    assert_primary_nav_active_link(detail_response.text, active_href="/entities", active_label="Entities")
+    assert_docs_link_in_footer_not_primary_nav(detail_response.text)
 
     export_json_response = client.get(f"/export/json?profile_id={profile_id}&q=light")
     assert export_json_response.status_code == 200
