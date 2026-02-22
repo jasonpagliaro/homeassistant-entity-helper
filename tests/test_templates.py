@@ -165,3 +165,15 @@ def test_high_impact_buttons_have_tooltips() -> None:
                 f"{template_name}: expected all '{label}' button(s) to include data-tooltip, "
                 f"found {tooltip_count}/{expected_count}"
             )
+
+
+def test_settings_llm_preset_form_contract() -> None:
+    template = _read_template("settings.html")
+    assert 'data-llm-form="true"' in template
+    assert 'name="preset_slug"' in template
+    assert "data-llm-model-select" in template
+    assert "data-llm-feature-select" in template
+    assert "data-llm-required-fields" in template
+    assert "data-llm-test-draft" in template
+    assert "/api/llm/models" in template
+    assert "/api/llm/test-draft" in template

@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -38,9 +39,11 @@ from app.llm_client import (
     LLMClientError,
     LLMSettings,
     OpenAICompatibleLLMClient,
+    is_probably_local_base_url,
     llm_is_configured,
     load_llm_settings,
 )
+from app.llm_presets import LLMPreset, get_llm_preset, get_llm_presets, infer_preset_slug
 from app.models import (
     AutomationDraft,
     AutomationDraftRun,
@@ -90,6 +93,8 @@ SUGGESTION_PROPOSAL_STATUSES = {"proposed", "accepted", "rejected", "invalid"}
 SUGGESTION_MAX_TARGETS_PER_RUN = 25
 SUGGESTION_MAX_PATCH_OPS = 12
 SUGGESTION_WORKER: SuggestionWorker | None = None
+API_KEY_ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+LIKELY_API_KEY_PREFIXES = ("sk-", "sk_proj_", "sk-svcacct-", "gsk_", "AIza", "xai-", "ak-")
 
 
 class PrimaryNavLink(TypedDict):
@@ -860,12 +865,164 @@ def parse_extra_headers_json(raw_json: str) -> dict[str, str]:
     return headers
 
 
+def normalize_llm_preset_slug(raw_slug: str) -> str:
+    cleaned_slug = raw_slug.strip().lower()
+    if not cleaned_slug:
+        return "manual"
+    if get_llm_preset(cleaned_slug) is None:
+        raise ValueError("Unknown LLM preset.")
+    return cleaned_slug
+
+
+def resolve_llm_form_values(
+    preset_slug: str,
+    base_url: str,
+    model: str,
+    api_key_env_var: str,
+) -> tuple[LLMPreset, str, str, str]:
+    normalized_slug = normalize_llm_preset_slug(preset_slug)
+    preset = get_llm_preset(normalized_slug)
+    if preset is None:
+        raise ValueError("Unknown LLM preset.")
+
+    cleaned_base_url = base_url.strip().rstrip("/")
+    cleaned_model = model.strip()
+    cleaned_env_var = api_key_env_var.strip()
+
+    if preset.slug != "manual":
+        if not cleaned_base_url:
+            cleaned_base_url = preset.default_base_url.strip().rstrip("/")
+        if not cleaned_env_var:
+            cleaned_env_var = preset.default_api_key_env_var.strip()
+        if not cleaned_model and preset.fallback_models:
+            cleaned_model = preset.fallback_models[0]
+    return preset, cleaned_base_url, cleaned_model, cleaned_env_var
+
+
+def resolve_api_key_from_env_var(api_key_env_var: str) -> str:
+    cleaned_env_var = api_key_env_var.strip()
+    if not cleaned_env_var:
+        return ""
+    value = os.getenv(cleaned_env_var)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def resolve_api_key_input(api_key_input: str) -> tuple[str, dict[str, Any]]:
+    cleaned_env_var = api_key_input.strip()
+    configured = bool(cleaned_env_var)
+    if not configured:
+        return (
+            "",
+            {
+                "mode": "none",
+                "env_var": "",
+                "configured": False,
+                "is_set": False,
+                "valid_name": False,
+                "looks_like_secret_value": False,
+                "using_direct_key": False,
+                "status_message": "API key: not configured (optional for local providers).",
+                "status_level": "muted",
+            },
+        )
+
+    valid_name = bool(API_KEY_ENV_VAR_PATTERN.fullmatch(cleaned_env_var))
+    if valid_name:
+        value = resolve_api_key_from_env_var(cleaned_env_var)
+        return (
+            value,
+            {
+                "mode": "env_var",
+                "env_var": cleaned_env_var,
+                "configured": True,
+                "is_set": bool(value),
+                "valid_name": True,
+                "looks_like_secret_value": False,
+                "using_direct_key": False,
+                "status_message": (
+                    f"API key env var '{cleaned_env_var}' is set."
+                    if value
+                    else f"API key env var '{cleaned_env_var}' is not set."
+                ),
+                "status_level": "success" if value else "error",
+            },
+        )
+
+    looks_like_secret_value = cleaned_env_var.startswith(LIKELY_API_KEY_PREFIXES) or len(cleaned_env_var) >= 20
+    return (
+        cleaned_env_var,
+        {
+            "mode": "direct_key",
+            "env_var": "",
+            "configured": True,
+            "is_set": True,
+            "valid_name": False,
+            "looks_like_secret_value": looks_like_secret_value,
+            "using_direct_key": True,
+            "status_message": "Using direct API key value.",
+            "status_level": "success",
+        },
+    )
+
+
+def llm_api_key_env_var_status(api_key_env_var: str) -> dict[str, Any]:
+    _, status = resolve_api_key_input(api_key_env_var)
+    return status
+
+
+def infer_model_features(model_id: str) -> list[str]:
+    lowered = model_id.lower()
+    features: list[str] = ["json_output"]
+    if any(token in lowered for token in ("gpt-4", "4o", "claude", "gemini")):
+        features.append("vision")
+    if any(token in lowered for token in ("mini", "flash", "haiku")):
+        features.append("fast_inference")
+    if any(token in lowered for token in ("pro", "sonnet", "claude", "gpt-4", "gemini-2.5")):
+        features.append("long_context")
+    return unique_preserving_order(features)
+
+
+def build_known_features_for_models(preset: LLMPreset, models: list[str]) -> dict[str, list[str]]:
+    known_features: dict[str, list[str]] = {
+        model: list(features) for model, features in preset.known_features_by_model.items()
+    }
+    for model_id in models:
+        if model_id in known_features:
+            continue
+        known_features[model_id] = infer_model_features(model_id)
+    return known_features
+
+
+async def test_llm_settings_connectivity(settings: LLMSettings) -> tuple[bool, str]:
+    client = OpenAICompatibleLLMClient(settings)
+    try:
+        await client.test_connection()
+    except LLMClientError as exc:
+        return False, str(exc)
+    return True, "reachable"
+
+
+async def test_llm_settings_connectivity_verbose(
+    settings: LLMSettings,
+    secrets_to_redact: list[str],
+) -> tuple[bool, str, dict[str, Any]]:
+    client = OpenAICompatibleLLMClient(settings)
+    result = await client.test_connection_verbose()
+    ok = bool(result.get("ok"))
+    message = str(result.get("message") or "")
+    debug_payload = result.get("debug")
+    if isinstance(debug_payload, dict):
+        sanitized_debug = sanitize_payload(debug_payload, secrets_to_redact)
+    else:
+        sanitized_debug = {}
+    return ok, message, sanitized_debug
+
+
 def resolve_llm_api_key(connection: LLMConnection) -> str:
-    if connection.api_key_env_var:
-        value = os.getenv(connection.api_key_env_var)
-        if value:
-            return value.strip()
-    return ""
+    api_key, _ = resolve_api_key_input(connection.api_key_env_var or "")
+    return api_key
 
 
 def build_llm_settings_from_connection(
@@ -2159,8 +2316,13 @@ def create_app() -> FastAPI:
             ).all()
         )
         llm_connections_by_profile: dict[int, list[LLMConnection]] = {}
+        llm_connection_preset_by_id: dict[int, str] = {}
         for connection in llm_connections:
             llm_connections_by_profile.setdefault(connection.profile_id, []).append(connection)
+            if connection.id is not None:
+                llm_connection_preset_by_id[connection.id] = infer_preset_slug(connection.base_url)
+
+        llm_presets = [preset.as_public_dict() for preset in get_llm_presets()]
 
         return render_template(
             request,
@@ -2174,6 +2336,9 @@ def create_app() -> FastAPI:
                     "disabled_profiles": disabled_profiles,
                     "active_profile": active_profile,
                     "llm_connections_by_profile": llm_connections_by_profile,
+                    "llm_connection_preset_by_id": llm_connection_preset_by_id,
+                    "llm_presets": llm_presets,
+                    "llm_presets_json": safe_json_dump(llm_presets),
                 },
                 active_profile,
             ),
@@ -2412,8 +2577,9 @@ def create_app() -> FastAPI:
         profile_id: int,
         request: Request,
         name: str = Form(...),
-        base_url: str = Form(...),
-        model: str = Form(...),
+        preset_slug: str = Form(default="manual"),
+        base_url: str = Form(default=""),
+        model: str = Form(default=""),
         api_key_env_var: str = Form(default=""),
         timeout_seconds: int = Form(default=20),
         temperature: float = Form(default=0.2),
@@ -2432,9 +2598,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Profile not found")
 
         cleaned_name = name.strip()
-        cleaned_base_url = base_url.strip().rstrip("/")
-        cleaned_model = model.strip()
-        cleaned_env_var = api_key_env_var.strip()
+        try:
+            _, cleaned_base_url, cleaned_model, cleaned_env_var = resolve_llm_form_values(
+                preset_slug,
+                base_url,
+                model,
+                api_key_env_var,
+            )
+        except ValueError as exc:
+            set_flash(request, "error", str(exc))
+            return RedirectResponse(url=with_profile_id(next_url, profile_id), status_code=303)
         if not cleaned_name:
             set_flash(request, "error", "Connection name is required.")
             return RedirectResponse(url=with_profile_id(next_url, profile_id), status_code=303)
@@ -2506,8 +2679,9 @@ def create_app() -> FastAPI:
         connection_id: int,
         request: Request,
         name: str = Form(...),
-        base_url: str = Form(...),
-        model: str = Form(...),
+        preset_slug: str = Form(default="manual"),
+        base_url: str = Form(default=""),
+        model: str = Form(default=""),
         api_key_env_var: str = Form(default=""),
         timeout_seconds: int = Form(default=20),
         temperature: float = Form(default=0.2),
@@ -2526,9 +2700,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="LLM connection not found")
 
         cleaned_name = name.strip()
-        cleaned_base_url = base_url.strip().rstrip("/")
-        cleaned_model = model.strip()
-        cleaned_env_var = api_key_env_var.strip()
+        try:
+            _, cleaned_base_url, cleaned_model, cleaned_env_var = resolve_llm_form_values(
+                preset_slug,
+                base_url,
+                model,
+                api_key_env_var,
+            )
+        except ValueError as exc:
+            set_flash(request, "error", str(exc))
+            return RedirectResponse(url=with_profile_id(next_url, connection.profile_id), status_code=303)
         if not cleaned_name:
             set_flash(request, "error", "Connection name is required.")
             return RedirectResponse(url=with_profile_id(next_url, connection.profile_id), status_code=303)
@@ -2604,14 +2785,228 @@ def create_app() -> FastAPI:
 
         api_key = resolve_llm_api_key(connection)
         settings = build_llm_settings_from_connection(connection, api_key)
-        client = OpenAICompatibleLLMClient(settings)
-        try:
-            await client.test_connection()
+        ok, detail = await test_llm_settings_connectivity(settings)
+        if ok:
             set_flash(request, "success", f"LLM connection '{connection.name}' is reachable.")
-        except LLMClientError as exc:
-            set_flash(request, "error", f"LLM connection test failed: {exc}")
+        else:
+            set_flash(request, "error", f"LLM connection test failed: {detail}")
 
         return RedirectResponse(url=with_profile_id(next_url, connection.profile_id), status_code=303)
+
+    @app.get("/api/llm/presets")
+    async def llm_presets_api() -> JSONResponse:
+        presets = [preset.as_public_dict() for preset in get_llm_presets()]
+        return JSONResponse({"presets": presets})
+
+    @app.post("/api/llm/models")
+    async def llm_models_api(
+        request: Request,
+        csrf_token: str = Form(...),
+        preset_slug: str = Form(default="manual"),
+        base_url: str = Form(default=""),
+        api_key_env_var: str = Form(default=""),
+    ) -> JSONResponse:
+        verify_csrf(request, csrf_token)
+
+        try:
+            preset, cleaned_base_url, cleaned_model, cleaned_env_var = resolve_llm_form_values(
+                preset_slug,
+                base_url,
+                "",
+                api_key_env_var,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "models": [],
+                    "default_model": "",
+                    "known_features_by_model": {},
+                    "required_fields": [],
+                    "api_key_env_var_status": llm_api_key_env_var_status(api_key_env_var),
+                    "source": "none",
+                    "warnings": [str(exc)],
+                },
+                status_code=400,
+            )
+
+        warnings: list[str] = []
+        models: list[str] = list(preset.fallback_models)
+        source = "fallback"
+        default_model = cleaned_model or (models[0] if models else "")
+        api_key, api_key_status = resolve_api_key_input(cleaned_env_var)
+
+        if cleaned_base_url:
+            is_local = is_probably_local_base_url(cleaned_base_url)
+            can_discover_models = True
+            if not is_local:
+                if api_key_status["mode"] == "none":
+                    warnings.append("API key or env var name is required for non-local providers.")
+                    can_discover_models = False
+                elif api_key_status["mode"] == "env_var" and not api_key_status["is_set"]:
+                    warnings.append(
+                        f"Environment variable '{cleaned_env_var}' is not set; showing fallback models."
+                    )
+                    can_discover_models = False
+
+            if can_discover_models:
+                probe_model = default_model or "model-discovery"
+                settings = LLMSettings(
+                    enabled=True,
+                    base_url=cleaned_base_url,
+                    api_key=api_key,
+                    model=probe_model,
+                    timeout_seconds=20,
+                    max_concurrency=1,
+                    allow_missing_api_key=True,
+                    temperature=0.2,
+                    max_output_tokens=256,
+                    extra_headers=None,
+                )
+                discovery_client = OpenAICompatibleLLMClient(settings)
+                try:
+                    discovered_models = await discovery_client.list_models()
+                    if discovered_models:
+                        models = discovered_models
+                        source = "provider"
+                    else:
+                        warnings.append("Provider returned no models; showing fallback models.")
+                except LLMClientError as exc:
+                    warnings.append(f"Model discovery failed: {exc}. Showing fallback models.")
+        else:
+            warnings.append("Base URL is required to fetch provider model list.")
+
+        if default_model and default_model not in models:
+            models = [default_model] + [item for item in models if item != default_model]
+        elif not default_model and models:
+            default_model = models[0]
+
+        response_payload = {
+            "ok": True,
+            "preset_slug": preset.slug,
+            "resolved_base_url": cleaned_base_url,
+            "resolved_api_key_env_var": str(api_key_status.get("env_var", "")),
+            "models": models,
+            "default_model": default_model,
+            "known_features_by_model": build_known_features_for_models(preset, models),
+            "required_fields": list(preset.required_fields),
+            "api_key_env_var_status": api_key_status,
+            "source": source,
+            "warnings": warnings,
+        }
+        return JSONResponse(response_payload)
+
+    @app.post("/api/llm/test-draft")
+    async def test_llm_draft(
+        request: Request,
+        csrf_token: str = Form(...),
+        preset_slug: str = Form(default="manual"),
+        base_url: str = Form(default=""),
+        model: str = Form(default=""),
+        api_key_env_var: str = Form(default=""),
+        timeout_seconds: int = Form(default=20),
+        temperature: float = Form(default=0.2),
+        max_output_tokens: int = Form(default=900),
+        extra_headers_json: str = Form(default=""),
+    ) -> JSONResponse:
+        verify_csrf(request, csrf_token)
+
+        try:
+            preset, cleaned_base_url, cleaned_model, cleaned_env_var = resolve_llm_form_values(
+                preset_slug,
+                base_url,
+                model,
+                api_key_env_var,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "Invalid LLM preset.",
+                    "errors": [str(exc)],
+                    "warnings": [],
+                    "required_fields": [],
+                    "api_key_env_var_status": llm_api_key_env_var_status(api_key_env_var),
+                },
+                status_code=400,
+            )
+
+        errors: list[str] = []
+        warnings: list[str] = []
+        if not cleaned_base_url.startswith("http://") and not cleaned_base_url.startswith("https://"):
+            errors.append("LLM base URL must start with http:// or https://.")
+        if not cleaned_model:
+            errors.append("LLM model is required.")
+
+        try:
+            parsed_headers = parse_extra_headers_json(extra_headers_json)
+        except ValueError as exc:
+            errors.append(str(exc))
+            parsed_headers = {}
+
+        api_key, api_key_status = resolve_api_key_input(cleaned_env_var)
+        is_local = is_probably_local_base_url(cleaned_base_url)
+        if api_key_status["mode"] == "none" and not is_local:
+            errors.append("API key or env var name is required for non-local providers.")
+        elif api_key_status["mode"] == "env_var" and not api_key_status["is_set"] and not is_local:
+            errors.append(f"Environment variable '{cleaned_env_var}' is not set.")
+
+        if errors:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "LLM connection test failed.",
+                    "errors": errors,
+                    "warnings": warnings,
+                    "required_fields": list(preset.required_fields),
+                    "api_key_env_var_status": api_key_status,
+                    "debug": {},
+                }
+            )
+
+        normalized_timeout = max(1, min(timeout_seconds, 300))
+        normalized_temperature = max(0.0, min(float(temperature), 2.0))
+        normalized_max_tokens = max(1, min(max_output_tokens, 8192))
+        settings = LLMSettings(
+            enabled=True,
+            base_url=cleaned_base_url,
+            api_key=api_key,
+            model=cleaned_model,
+            timeout_seconds=normalized_timeout,
+            max_concurrency=1,
+            allow_missing_api_key=True,
+            temperature=normalized_temperature,
+            max_output_tokens=normalized_max_tokens,
+            extra_headers=parsed_headers if parsed_headers else None,
+        )
+
+        secrets_to_redact = [api_key] if api_key else []
+        ok, detail, debug_payload = await test_llm_settings_connectivity_verbose(settings, secrets_to_redact)
+        if ok:
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "message": f"LLM endpoint is reachable for model '{cleaned_model}'.",
+                    "errors": [],
+                    "warnings": warnings,
+                    "required_fields": list(preset.required_fields),
+                    "api_key_env_var_status": api_key_status,
+                    "debug": debug_payload,
+                }
+            )
+
+        errors.append(detail)
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "LLM connection test failed.",
+                "errors": errors,
+                "warnings": warnings,
+                "required_fields": list(preset.required_fields),
+                "api_key_env_var_status": api_key_status,
+                "debug": debug_payload,
+            }
+        )
 
     @app.post("/llm-connections/{connection_id}/delete")
     async def delete_llm_connection(
