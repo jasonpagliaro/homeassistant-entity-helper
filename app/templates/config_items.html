@@ -77,9 +77,31 @@
           <input type="hidden" name="next_url" value="{{ next_url }}" />
           <button type="submit">Sync Config Items</button>
         </form>
+        {% if active_llm_connection and active_config_sync_run %}
+          <form
+            method="post"
+            action="/profiles/{{ active_profile.id }}/suggestions/runs"
+            data-sync-modal="true"
+            data-sync-modal-label="Queueing automation suggestions..."
+          >
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=active_profile.id) }}" />
+            <input type="hidden" name="llm_connection_id" value="{{ active_llm_connection.id }}" />
+            <input type="hidden" name="config_sync_run_id" value="{{ active_config_sync_run.id }}" />
+            <input type="hidden" name="q" value="{{ q }}" />
+            <input type="hidden" name="max_targets" value="25" />
+            <button type="submit">Suggest Automation Updates</button>
+          </form>
+        {% endif %}
+        <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id) }}">View Automation Suggestions</a>
+        <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}">View Entity Suggestions</a>
       </div>
     {% endif %}
   </div>
+
+  {% if active_profile and not active_llm_connection %}
+    <p>No enabled LLM connection for this profile. Configure one on the <a href="/settings?{{ build_query(profile_id=active_profile.id) }}">Profiles page</a>.</p>
+  {% endif %}
 
   {% if active_profile and active_config_sync_run %}
     <p>{{ total }} config items match filters.</p>
@@ -109,6 +131,21 @@
             <td>{{ item.pulled_at }}</td>
             <td>
               <a href="/config-items/{{ item.id }}?{{ build_query(profile_id=active_profile.id, config_sync_run_id=active_config_sync_run.id) }}">Details</a>
+              {% if active_llm_connection and item.kind == "automation" and item.fetch_status == "success" %}
+                <form
+                  method="post"
+                  action="/profiles/{{ active_profile.id }}/suggestions/runs"
+                  class="inline-form"
+                  data-sync-modal="true"
+                  data-sync-modal-label="Queueing automation suggestion..."
+                >
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=active_profile.id) }}" />
+                  <input type="hidden" name="llm_connection_id" value="{{ active_llm_connection.id }}" />
+                  <input type="hidden" name="snapshot_id" value="{{ item.id }}" />
+                  <button type="submit">Suggest</button>
+                </form>
+              {% endif %}
             </td>
           </tr>
           {% endfor %}

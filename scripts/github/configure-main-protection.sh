@@ -5,7 +5,7 @@ REPO_SLUG="${REPO_SLUG:-}"
 APPROVAL_COUNT="${APPROVAL_COUNT:-1}"
 DRY_RUN="false"
 
-STATUS_CHECKS=("lint" "typecheck" "tests" "lxc-assets")
+STATUS_CHECKS=("build")
 
 log() {
   local level="$1"
@@ -21,7 +21,7 @@ die() {
 }
 
 usage() {
-  cat <<EOF
+  cat <<EOF_USAGE
 Usage: $(basename "$0") [options]
 
 Configure GitHub branch protection for main and enforce squash-only merges.
@@ -32,7 +32,7 @@ Options:
   --approvals N           Required PR approvals on main (default: ${APPROVAL_COUNT})
   --dry-run               Print API payloads without applying
   -h, --help              Show this help message
-EOF
+EOF_USAGE
 }
 
 require_command() {
@@ -128,7 +128,7 @@ JSON
 )"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
-  cat <<EOF
+  cat <<EOF_DRY_RUN
 Repo: ${REPO_SLUG}
 
 Branch protection payload:
@@ -138,7 +138,7 @@ Repository merge settings:
 allow_squash_merge=true
 allow_merge_commit=false
 allow_rebase_merge=false
-EOF
+EOF_DRY_RUN
   exit 0
 fi
 
@@ -156,10 +156,10 @@ gh api \
   -f allow_merge_commit=false \
   -f allow_rebase_merge=false >/dev/null
 
-cat <<EOF
+cat <<EOF_DONE
 GitHub main protection configured for ${REPO_SLUG}.
 - PR required on main
 - Required checks: $(IFS=,; echo "${STATUS_CHECKS[*]}")
 - Squash merge enabled
 - Merge commit and rebase merge disabled
-EOF
+EOF_DONE

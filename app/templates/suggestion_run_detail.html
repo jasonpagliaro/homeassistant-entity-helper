@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Automation Suggestion Run #{{ run.id }}</h2>
+  <div class="row gap-sm wrap">
+    <a class="button" href="{{ back_url }}">Back to Runs</a>
+    {% if active_profile %}
+      <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id, config_sync_run_id=run.config_sync_run_id) }}">Config Items</a>
+    {% endif %}
+  </div>
+
+  <div class="detail-grid">
+    <div><strong>Status</strong></div><div><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></div>
+    <div><strong>LLM Connection</strong></div><div>{{ connection.name if connection else '' }}</div>
+    <div><strong>Targets</strong></div><div>{{ run.target_count }}</div>
+    <div><strong>Processed</strong></div><div>{{ run.processed_count }}</div>
+    <div><strong>Proposed</strong></div><div>{{ run.success_count }}</div>
+    <div><strong>Invalid</strong></div><div>{{ run.invalid_count }}</div>
+    <div><strong>Errors</strong></div><div>{{ run.error_count }}</div>
+    <div><strong>Error</strong></div><div>{{ run.error or '' }}</div>
+    <div><strong>Created At</strong></div><div>{{ run.created_at }}</div>
+    <div><strong>Started At</strong></div><div>{{ run.started_at or '' }}</div>
+    <div><strong>Finished At</strong></div><div>{{ run.finished_at or '' }}</div>
+  </div>
+
+  <h3>Summary</h3>
+  <pre>{{ summary_pretty }}</pre>
+
+  <form method="get" action="/suggestions/{{ run.id }}" class="grid-form compact">
+    <input type="hidden" name="profile_id" value="{{ active_profile.id if active_profile else '' }}" />
+    <label>
+      Proposal Status
+      <select name="proposal_status">
+        <option value="">All</option>
+        {% for choice in status_choices %}
+          <option value="{{ choice }}" {% if proposal_status == choice %}selected{% endif %}>{{ choice }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Apply</button>
+    <a class="button" href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+  </form>
+
+  {% if proposals %}
+    <p>{{ proposals|length }} proposals.</p>
+    {% for proposal in proposals %}
+      <article class="panel panel-inner">
+        <div class="row between wrap gap-sm">
+          <div>
+            <strong>{{ proposal.target_entity_id }}</strong>
+            {% if proposal.summary %}
+              <div>{{ proposal.summary }}</div>
+            {% endif %}
+          </div>
+          <span class="status-chip status-{{ proposal.status }}">{{ proposal.status }}</span>
+        </div>
+        <div class="detail-grid">
+          <div><strong>Confidence</strong></div><div>{{ proposal.confidence if proposal.confidence is not none else '' }}</div>
+          <div><strong>Risk</strong></div><div>{{ proposal.risk_level or '' }}</div>
+          <div><strong>Validation Error</strong></div><div>{{ proposal.validation_error or '' }}</div>
+          <div><strong>Created At</strong></div><div>{{ proposal.created_at }}</div>
+        </div>
+        {% if proposal.proposed_patch_json %}
+          <h4>Proposed Patch</h4>
+          <pre>{{ proposal.proposed_patch_json }}</pre>
+        {% endif %}
+        {% if proposal.verification_steps_json %}
+          <h4>Verification Steps</h4>
+          <pre>{{ proposal.verification_steps_json }}</pre>
+        {% endif %}
+        {% if proposal.raw_response_json %}
+          <h4>Sanitized Provider Response</h4>
+          <pre>{{ proposal.raw_response_json }}</pre>
+        {% endif %}
+
+        {% if proposal.status == "proposed" %}
+          <div class="row gap-sm wrap">
+            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/status">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="status" value="accepted" />
+              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, proposal_status=proposal_status) }}" />
+              <button type="submit">Accept</button>
+            </form>
+            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/status">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="status" value="rejected" />
+              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, proposal_status=proposal_status) }}" />
+              <button type="submit" class="danger">Reject</button>
+            </form>
+          </div>
+        {% endif %}
+      </article>
+    {% endfor %}
+  {% else %}
+    <p>No proposals for this run.</p>
+  {% endif %}
+</section>
+{% endblock %}

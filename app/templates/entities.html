@@ -85,7 +85,18 @@
         <input type="hidden" name="next_url" value="/config-items?{{ build_query(profile_id=active_profile.id) }}" />
         <button type="submit">Sync Config Items</button>
       </form>
+      <form
+        method="post"
+        action="/profiles/{{ active_profile.id }}/run-entity-suggestions"
+        data-sync-modal="true"
+        data-sync-modal-label="Running entity suggestions..."
+      >
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}" />
+        <button type="submit">Run Suggestions Check</button>
+      </form>
       <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id) }}">View Config Items</a>
+      <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}">View Suggestions</a>
 
       {% if active_sync_run %}
         <a class="button" href="/export/json?{{ build_query(profile_id=active_profile.id, sync_run_id=active_sync_run.id, q=q, domain=domain, state=state_value, changed_within=changed_within) }}">Export JSON</a>

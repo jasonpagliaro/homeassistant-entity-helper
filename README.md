@@ -1,11 +1,14 @@
 # HA Entity Vault
 
-HA Entity Vault is a self-hosted single-container app for pulling Home Assistant entities on demand, browsing/filtering them, and exporting filtered views as JSON/CSV.
+HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entities on demand, browsing/filtering them, and exporting filtered views as JSON/CSV.
 
 - Stack: Python 3.12, FastAPI, SQLModel + SQLite, Jinja2, httpx, Alembic.
-- Container runtime target: Linux Containers (LXC).
-- Data persistence: host-mounted `/data` volume inside the LXC container.
+- Build/task runner: npm (Node 20+).
+- Runtime: Python/FastAPI.
+- Data persistence: local `./data` by default (configurable via `HEV_DATA_DIR`).
 - UI name is configurable via `APP_NAME`, so repo/product naming is easy to change later.
+
+Containerization is intentionally deferred. This repository currently targets standalone execution.
 
 ## MVP Features
 - Multiple Home Assistant profiles.
@@ -41,202 +44,83 @@ MVP uses immutable snapshot runs:
 
 Each sync creates one `sync_runs` row and N `entity_snapshots` rows linked by `sync_run_id`, preserving point-in-time views for future diffing/history features.
 
-## LXC Quick Start (Recommended)
-These commands create an LXC container through LXD (Ubuntu 24.04), bind-mount this repo into `/srv/ha-entity-vault`, mount host data into `/data`, then install and start the systemd service.
+## Standalone Quick Start (npm)
+Prerequisites:
+- Node.js 20+
+- npm 10+
+- Python 3.12+
 
-From this repo root:
-
-```bash
-./lxc/create-lxc-container.sh ha-entity-vault "$(pwd)" "$HOME/ha-entity-vault-data" 18000
-```
-
-The script:
-- launches/updates container `ha-entity-vault`
-- mounts repo and data with shifted id mapping
-- installs app dependencies inside container
-- enables `ha-entity-vault.service`
-- exposes app on host port `18000` via LXD proxy device
-
-Open:
-
-- App UI: `http://<host-ip>:18000`
-- OpenAPI docs: `http://<host-ip>:18000/docs`
-
-### macOS note
-LXC containers require a Linux kernel. On macOS, use a Linux host/VM and run the same `lxc/create-lxc-container.sh` there.
-
-## LXC Layout
-- App code mount: `/srv/ha-entity-vault`
-- Persistent data mount: `/data`
-- Virtualenv: `/opt/ha-entity-vault/.venv`
-- Service unit: `/etc/systemd/system/ha-entity-vault.service`
-- Service env file: `/etc/default/ha-entity-vault`
-
-## LXC Update Workflow
-The project includes a host-orchestrated app updater with three automation levels:
-
-- `check_only`: only check for updates and log findings.
-- `detect_approve` (default): detect updates, write pending metadata, wait for explicit manual apply.
-- `auto_apply`: apply updates automatically unless blocked by safety gates.
-
-Update scripts:
-- Host orchestrator: `lxc/update-host.sh`
-- In-container helper: `lxc/update-in-container.sh`
-- Update config example: `lxc/ha-entity-vault-update.env.example`
-- Timer/service templates:
-  - `lxc/ha-entity-vault-update-check.service`
-  - `lxc/ha-entity-vault-update-check.timer`
-- Workflow helpers:
-  - `lxc/bootstrap-host-workflow.sh`
-  - `lxc/staging-apply-branch.sh`
-  - `lxc/configure-prod-auto-apply.sh`
-  - `lxc/configure-github-main-protection.sh`
-
-### Command interface
-From repo root on the host:
+From repo root:
 
 ```bash
-./lxc/update-host.sh check   # exit 10 when updates are available
-./lxc/update-host.sh status  # show mode + local/remote SHA + pending state
-./lxc/update-host.sh apply   # apply update with smoke checks + rollback
-./lxc/update-host.sh run     # execute configured mode (for timers)
-```
-
-### Safety behavior
-- `apply` requires a clean git worktree. If dirty, update is skipped.
-- High-risk diffs are flagged when changes include:
-  - `requirements.txt`
-  - `migrations/`
-  - `lxc/ha-entity-vault.service`
-- In `detect_approve`, updates are written to `${HEV_UPDATE_STATE_DIR}/pending-update.json`.
-- In `auto_apply`, high-risk updates are blocked unless `HEV_UPDATE_ALLOW_HIGH_RISK_AUTO=true`.
-- Before applying, the updater creates a SQLite backup and prunes older backups by retention count.
-- After apply, the updater runs smoke checks:
-  - `systemctl is-active ha-entity-vault.service`
-  - `GET /healthz` payload includes `"status":"ok"`
-  - `/entities` returns `200`
-  - `/` returns `303`
-  - service remains active after 10s stabilization
-- If smoke checks fail after apply, updater auto-rolls back code/dependencies + DB backup and re-checks health.
-
-### Install timer automation (host systemd)
-1. Copy/update configuration:
-```bash
-sudo cp lxc/ha-entity-vault-update.env.example /etc/default/ha-entity-vault-updater
-sudo chmod 600 /etc/default/ha-entity-vault-updater
-```
-2. Edit `/etc/default/ha-entity-vault-updater` and set at least:
-   - `HEV_UPDATE_REPO_PATH`
-   - `HEV_UPDATE_MODE`
-3. Install unit files:
-```bash
-sudo cp lxc/ha-entity-vault-update-check.service /etc/systemd/system/
-sudo cp lxc/ha-entity-vault-update-check.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ha-entity-vault-update-check.timer
-```
-4. Run once immediately (optional):
-```bash
-sudo systemctl start ha-entity-vault-update-check.service
-```
-
-Default schedule in timer template: `Sun 03:00` (local host timezone), with `Persistent=true`.
-
-### Manual approval/apply path
-For `detect_approve`, approve by running:
-
-```bash
-sudo /Users/jason/Projects/homeassistant-entity-helper/lxc/update-host.sh apply
-```
-
-All updater output is written to stdout/stderr for journald capture.
-
-### Branch -> Staging -> Main -> Production Auto-Deploy
-This workflow keeps branch validation isolated from production:
-
-1. Run one-time Ubuntu host bootstrap:
-```bash
-./lxc/bootstrap-host-workflow.sh
-```
-This creates/validates:
-- `/srv/ha-entity-vault-prod`
-- `/srv/ha-entity-vault-staging`
-- staging container `ha-entity-vault-staging` on `:18001`
-
-2. Configure production updater mode + timer:
-```bash
-sudo /srv/ha-entity-vault-prod/lxc/configure-prod-auto-apply.sh \
-  --prod-path /srv/ha-entity-vault-prod \
-  --container ha-entity-vault \
-  --mode auto_apply \
-  --branch main \
-  --allow-high-risk-auto false
-```
-
-3. Configure GitHub merge gates (repo admin):
-```bash
-/srv/ha-entity-vault-prod/lxc/configure-github-main-protection.sh
-```
-This script sets required checks (`lint`, `typecheck`, `tests`, `lxc-assets`) on `main` and disables non-squash merge methods.
-
-4. For each feature branch, deploy branch to staging:
-```bash
-/srv/ha-entity-vault-staging/lxc/staging-apply-branch.sh \
-  --branch codex/<feature-name> \
-  --staging-path /srv/ha-entity-vault-staging \
-  --staging-container ha-entity-vault-staging
-```
-
-5. Validate on staging URL (`http://<host-ip>:18001`), open PR, wait for CI, then squash merge to `main`.
-
-6. Production applies on weekly timer (`Sun 03:00` local host time) or immediately by:
-```bash
-sudo systemctl start ha-entity-vault-update-check.service
-```
-
-High-risk updates (`requirements.txt`, `migrations/`, `lxc/ha-entity-vault.service`) are blocked in `auto_apply` mode unless `HEV_UPDATE_ALLOW_HIGH_RISK_AUTO=true`.
-
-## Manual LXC Setup (if not using helper script)
-1. Initialize LXD and launch container:
-```bash
-lxd init --auto
-lxc launch ubuntu:24.04 ha-entity-vault
-```
-2. Add bind mounts:
-```bash
-lxc config device add ha-entity-vault app-src disk source=/abs/path/to/repo path=/srv/ha-entity-vault shift=true
-lxc config device add ha-entity-vault app-data disk source=/abs/path/to/data path=/data shift=true
-```
-3. Optional host port proxy:
-```bash
-lxc config device add ha-entity-vault web proxy listen=tcp:0.0.0.0:18000 connect=tcp:127.0.0.1:8000
-```
-4. Bootstrap inside container:
-```bash
-lxc exec ha-entity-vault -- bash /srv/ha-entity-vault/lxc/setup-in-container.sh
-```
-
-## Local Development (No Container)
-```bash
-make dev-install
-make run
+npm ci
+npm run db:migrate
+npm run run
 ```
 
 Then open `http://localhost:8000`.
 
+If your default `python3` is not 3.12+, set `PYTHON` explicitly:
+
+```bash
+PYTHON=python3.12 npm run build
+PYTHON=python3.12 npm run run
+```
+
+## Build and Quality Commands
+```bash
+npm run bootstrap      # create/update .venv and install requirements-dev.txt
+npm run build          # full quality gate: lint + typecheck + tests
+npm run lint
+npm run typecheck
+npm run test
+npm run format
+npm run db:migrate
+npm run run
+npm run clean
+```
+
+## Make Compatibility Targets
+`make` targets are still available and delegate to npm scripts:
+
+```bash
+make install
+make dev-install
+make build
+make lint
+make typecheck
+make test
+make format
+make run
+make alembic-upgrade
+make clean
+```
+
 ## Configuration
-Environment variables (see `.env.example` and `lxc/ha-entity-vault.env.example`):
+Environment variables (see `.env.example`):
 
 - `APP_NAME`: UI/application display name.
 - `SESSION_SECRET`: session signing key for CSRF/session cookies.
-- `HEV_DATA_DIR`: data directory used for SQLite file (default `./data`, `/data` in LXC runtime).
+- `HEV_DATA_DIR`: data directory used for SQLite file (default `./data`).
 - `DATABASE_URL`: optional explicit SQLAlchemy URL.
 - `HA_TOKEN`: optional global token override fallback.
+- `HEV_LLM_ENABLED`: enable LLM-assisted suggestions/drafts when true and fully configured.
+- `HEV_LLM_BASE_URL`: OpenAI-compatible provider base URL.
+- `HEV_LLM_API_KEY`: provider API key.
+- `HEV_LLM_MODEL`: model ID for suggestion/draft generation.
+- `HEV_LLM_TIMEOUT_SECONDS`: outbound LLM request timeout.
+- `HEV_LLM_MAX_CONCURRENCY`: max in-flight LLM requests per run.
+- `HEV_AUTOMATION_DRAFT_MAX_ITEMS`: cap candidates processed in one draft generation run.
+- `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / custom vars: examples of env vars referenced by profile-scoped LLM connections.
 
 Profile token resolution order:
 1. Environment variable defined in `profile.token_env_var` (if present and set).
 2. Token stored in DB for that profile.
 3. `HA_TOKEN` fallback.
+
+LLM API key resolution for profile-scoped automation suggestions:
+1. Environment variable defined in `llm_connections.api_key_env_var` (if present and set).
+2. No plaintext API key fallback in DB (suggestion run fails if key is required and missing).
 
 ## Security Notes
 - Home Assistant tokens can be stored in SQLite for convenience.
@@ -244,7 +128,6 @@ Profile token resolution order:
 - Prefer environment variable overrides (`token_env_var`) where practical.
 - Tokens are never logged by the app.
 - CSRF protection is enabled for state-changing form POSTs via session-bound token.
-- LXC setup runs service as non-root user `haev`.
 - Rate limiting is not implemented in MVP (tracked in roadmap).
 
 ## HA API Integration (MVP)
@@ -266,26 +149,44 @@ Profile token resolution order:
 - `POST /profiles/{profile_id}/delete` - delete profile + associated sync data.
 - `POST /profiles/{profile_id}/test` - test Home Assistant connection.
 - `POST /profiles/{profile_id}/sync` - sync entities on demand.
+- `POST /profiles/{profile_id}/run-entity-suggestions` - run readiness suggestion checks.
+- `POST /profiles/{profile_id}/generate-automation-drafts` - generate automation drafts from suggestions.
+- `POST /profiles/{profile_id}/llm-connections` - create profile-scoped LLM connection.
+- `POST /llm-connections/{id}/update` - update LLM connection.
+- `POST /llm-connections/{id}/test` - test LLM connection.
+- `POST /llm-connections/{id}/delete` - delete LLM connection.
+- `POST /profiles/{profile_id}/suggestions/runs` - queue automation suggestion run (suggest-only; no auto-apply).
 - `GET /entities` - entity table with filter/pagination query params.
 - `GET /entities/{entity_id}` - entity detail view.
+- `GET /suggestions` - automation suggestion run list.
+- `GET /suggestions/{run_id}` - automation suggestion run detail and proposal review.
+- `POST /suggestions/proposals/{proposal_id}/status` - mark proposal accepted/rejected.
+- `GET /entity-suggestions` - readiness suggestion list.
+- `GET /entity-suggestions/{suggestion_id}` - readiness suggestion detail.
+- `GET /automation-drafts` - automation draft list.
+- `GET /automation-drafts/{draft_id}` - automation draft detail.
+- `POST /automation-drafts/{draft_id}/accept` - mark draft accepted.
+- `POST /automation-drafts/{draft_id}/reject` - mark draft rejected.
 - `GET /export/json` - export filtered entities as JSON.
 - `GET /export/csv` - export filtered entities as CSV.
+- `GET /api/entity-suggestions` - suggestions API (list + filter/pagination).
+- `GET /api/entity-suggestions/{suggestion_id}` - suggestion API detail.
+- `GET /api/suggestions/runs/{run_id}` - automation suggestion run status API.
+- `GET /api/automation-drafts` - draft API (list + filter/pagination).
+- `GET /api/automation-drafts/{draft_id}` - draft API detail.
 
 ## Quality and CI
-GitHub Actions pipeline (`.github/workflows/ci.yml`) runs:
-- Ruff lint
-- Mypy typecheck
-- Pytest
-- LXC asset checks (shell syntax for scripts)
+GitHub Actions pipeline (`.github/workflows/ci.yml`) runs one authoritative quality gate:
+- `npm run build` (lint, typecheck, tests)
+
+Optional helper for GitHub main branch protection:
+- `scripts/github/configure-main-protection.sh`
+- Configures required check: `build` (plus squash-only merge policy)
 
 ## Testing
 ```bash
-make test
+npm run test
 ```
-
-Includes:
-- HA client unit tests with mocked httpx transport.
-- API integration tests for settings + connection test + sync + browse + export flow.
 
 ## Project Structure
 - `app/main.py` - FastAPI app, routes, middleware, CSRF/session, exports.
@@ -296,7 +197,8 @@ Includes:
 - `app/static/` - CSS.
 - `migrations/` - Alembic env + versions.
 - `tests/` - unit and API tests.
-- `lxc/` - LXC deployment/update scripts and systemd units.
+- `scripts/npm/` - npm-to-Python bootstrap and execution helpers.
+- `scripts/github/` - repository administration helpers.
 
 ## Roadmap / TODO
 

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Automation Suggestions</h2>
+
+  {% if active_profile and active_connection %}
+    <form
+      method="post"
+      action="/profiles/{{ active_profile.id }}/suggestions/runs"
+      class="grid-form compact"
+      data-sync-modal="true"
+      data-sync-modal-label="Queueing automation suggestions..."
+    >
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=active_profile.id) }}" />
+      <input type="hidden" name="llm_connection_id" value="{{ active_connection.id }}" />
+      <label>
+        Search (optional)
+        <input type="text" name="q" placeholder="entity/name/summary..." />
+      </label>
+      <label>
+        Max Targets
+        <input type="number" name="max_targets" min="1" max="25" value="25" />
+      </label>
+      <button type="submit">Queue Suggestion Run</button>
+    </form>
+  {% elif active_profile %}
+    <p>No enabled LLM connection for this profile. Configure one on the <a href="/settings?{{ build_query(profile_id=active_profile.id) }}">Profiles page</a>.</p>
+  {% endif %}
+
+  <form method="get" action="/suggestions" class="grid-form compact">
+    {% if active_profile %}
+      <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    {% endif %}
+    <label>
+      Run Status
+      <select name="status">
+        <option value="">All</option>
+        <option value="queued" {% if status == "queued" %}selected{% endif %}>queued</option>
+        <option value="running" {% if status == "running" %}selected{% endif %}>running</option>
+        <option value="succeeded" {% if status == "succeeded" %}selected{% endif %}>succeeded</option>
+        <option value="failed" {% if status == "failed" %}selected{% endif %}>failed</option>
+      </select>
+    </label>
+    <button type="submit">Apply</button>
+    <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+  </form>
+
+  {% if active_profile and runs %}
+    <p>{{ runs|length }} runs.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Results</th>
+            <th>Created</th>
+            <th>Finished</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+          <tr>
+            <td>#{{ run.id }}</td>
+            <td><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></td>
+            <td>{{ run.processed_count }} / {{ run.target_count }}</td>
+            <td>{{ run.success_count }} proposed, {{ run.invalid_count }} invalid, {{ run.error_count }} errors</td>
+            <td>{{ run.created_at }}</td>
+            <td>{{ run.finished_at or '' }}</td>
+            <td>
+              <a href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id) }}">Details</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% elif active_profile %}
+    <p>No suggestion runs yet for this profile.</p>
+  {% elif profile_count > 0 %}
+    <p>No enabled profiles are available. Enable a profile on the <a href="/settings">Profiles page</a>.</p>
+  {% else %}
+    <p>No profiles are configured yet. Add one on the <a href="/settings">Profiles page</a>.</p>
+  {% endif %}
+</section>
+{% endblock %}

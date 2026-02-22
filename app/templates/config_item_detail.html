@@ -2,7 +2,26 @@
 {% block content %}
 <section class="panel">
   <h2>Config Item Detail</h2>
-  <p><a href="{{ back_url }}">Back to config items</a></p>
+  <div class="row gap-sm wrap">
+    <a class="button" href="{{ back_url }}">Back to config items</a>
+    <a class="button" href="/suggestions?{{ build_query(profile_id=profile.id) }}">View Automation Suggestions</a>
+    {% if active_llm_connection and snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
+      <form
+        method="post"
+        action="/profiles/{{ profile.id }}/suggestions/runs"
+        data-sync-modal="true"
+        data-sync-modal-label="Queueing automation suggestion..."
+      >
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=profile.id) }}" />
+        <input type="hidden" name="llm_connection_id" value="{{ active_llm_connection.id }}" />
+        <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}" />
+        <button type="submit">Suggest Automation Update</button>
+      </form>
+    {% elif snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
+      <span>No enabled LLM connection configured for this profile.</span>
+    {% endif %}
+  </div>
 
   <div class="detail-grid">
     <div><strong>Profile</strong></div><div>{{ profile.name }}</div>

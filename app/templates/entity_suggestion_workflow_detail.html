@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Resolve Missing Details</h2>
+
+  <div class="row gap-sm wrap">
+    <a class="button" href="{{ back_url }}">Back to Workflow Queue</a>
+    {% if next_unresolved_id %}
+      <a class="button" href="/entity-suggestions/{{ next_unresolved_id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}">Next Unresolved</a>
+    {% endif %}
+    <a class="button" href="/entity-suggestions/{{ suggestion.id }}?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}">Suggestion Detail</a>
+  </div>
+
+  <div class="detail-grid">
+    <div><strong>Run</strong></div><div>#{{ run.id }} ({{ run.status }})</div>
+    <div><strong>Entity</strong></div><div><code>{{ suggestion.entity_id }}</code></div>
+    <div><strong>Domain</strong></div><div>{{ suggestion.domain }}</div>
+    <div><strong>Readiness</strong></div><div><span class="status-chip status-{{ suggestion.readiness_status }}">{{ suggestion.readiness_status }}</span></div>
+    <div><strong>Workflow</strong></div><div><span class="status-chip status-{{ suggestion.workflow_status }}">{{ suggestion.workflow_status }}</span></div>
+    <div><strong>Current Friendly Name</strong></div><div>{{ snapshot.friendly_name if snapshot else "" }}</div>
+    <div><strong>Current Area</strong></div><div>{{ snapshot.area_name or snapshot.area_id if snapshot else "" }}</div>
+    <div><strong>Current Device Class</strong></div><div>{{ current_device_class }}</div>
+    <div><strong>Current Labels</strong></div>
+    <div>
+      {% if current_label_ids %}
+        {{ current_label_ids|join(", ") }}
+      {% else %}
+        (none)
+      {% endif %}
+    </div>
+  </div>
+
+  <h3>Fixable Issues</h3>
+  {% if fixable_issues %}
+    <ul>
+      {% for issue in fixable_issues %}
+        <li><code>{{ issue.code or "unknown" }}</code>: {{ issue.message or "" }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No workflow-editable issues on this item.</p>
+  {% endif %}
+
+  <h3>Manual Review Issues</h3>
+  {% if manual_issues %}
+    <ul>
+      {% for issue in manual_issues %}
+        <li>
+          <code>{{ issue.code or "unknown" }}</code>: {{ issue.message or "" }}
+          <div class="muted-text">Guidance: {{ issue.guidance }}</div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No manual-only issues.</p>
+  {% endif %}
+
+  <h3>Apply Changes</h3>
+  <p class="muted-text">Only fields linked to fixable issues are editable in this workflow.</p>
+  {% if allow_area %}
+    <p class="muted-text">
+      Area options source: {% if area_options_source == "home_assistant" %}Home Assistant registry{% else %}current suggestion run snapshot{% endif %}.
+      {% if area_options_error %}Unable to refresh from Home Assistant: {{ area_options_error }}.{% endif %}
+    </p>
+  {% endif %}
+  <form method="post" action="/entity-suggestions/{{ suggestion.id }}/workflow/apply" class="grid-form compact">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    <input
+      type="hidden"
+      name="next_url"
+      value="{% if next_unresolved_id %}/entity-suggestions/{{ next_unresolved_id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}{% else %}{{ back_url }}{% endif %}"
+    />
+
+    <label>
+      Friendly Name
+      <input
+        type="text"
+        name="friendly_name"
+        value="{{ snapshot.friendly_name if snapshot else '' }}"
+        {% if not allow_friendly_name %}disabled{% endif %}
+      />
+    </label>
+
+    <label>
+      Area
+      <select id="area-selection" name="area_id" {% if not allow_area %}disabled{% endif %}>
+        <option value="">(no change)</option>
+        <option value="{{ area_create_option_value }}">Create New Area...</option>
+        {% for item in area_options %}
+          <option value="{{ item.area_id }}">{{ item.area_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      New Area Name
+      <input
+        id="new-area-name"
+        type="text"
+        name="new_area_name"
+        placeholder="Required when Create New Area is selected"
+        {% if not allow_area %}disabled{% else %}disabled{% endif %}
+      />
+    </label>
+
+    <label>
+      Device Class
+      <input
+        type="text"
+        name="device_class"
+        value="{{ current_device_class }}"
+        {% if not allow_device_class %}disabled{% endif %}
+      />
+    </label>
+
+    <label>
+      Labels (comma-separated label IDs)
+      <input
+        type="text"
+        name="labels_csv"
+        value="{{ current_label_ids_csv }}"
+        {% if not allow_labels %}disabled{% endif %}
+      />
+      {% if current_label_names %}
+        <span class="muted-text">Current label names: {{ current_label_names|join(", ") }}</span>
+      {% endif %}
+    </label>
+
+    <div class="row gap-sm align-end">
+      <button type="submit">Apply to Home Assistant</button>
+    </div>
+  </form>
+
+  {% if label_options %}
+    <h4>Available Labels</h4>
+    <p class="muted-text">
+      {% for label in label_options %}
+        <code>{{ label.label_id }}</code> ({{ label.label_name }}){% if not loop.last %}, {% endif %}
+      {% endfor %}
+    </p>
+  {% endif %}
+
+  <form method="post" action="/entity-suggestions/{{ suggestion.id }}/workflow/skip" class="grid-form compact">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    <input
+      type="hidden"
+      name="next_url"
+      value="{% if next_unresolved_id %}/entity-suggestions/{{ next_unresolved_id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}{% else %}{{ back_url }}{% endif %}"
+    />
+    <label>
+      Skip Reason (optional)
+      <input type="text" name="reason" value="" />
+    </label>
+    <div class="row gap-sm align-end">
+      <button type="submit" class="button-secondary">Skip for Now</button>
+    </div>
+  </form>
+</section>
+<script>
+  (function () {
+    const selectEl = document.getElementById("area-selection");
+    const newAreaInput = document.getElementById("new-area-name");
+    if (!selectEl || !newAreaInput) {
+      return;
+    }
+    const createValue = "{{ area_create_option_value }}";
+    function syncState() {
+      const createSelected = selectEl.value === createValue;
+      if (createSelected) {
+        newAreaInput.disabled = false;
+        return;
+      }
+      newAreaInput.disabled = true;
+      newAreaInput.value = "";
+    }
+    selectEl.addEventListener("change", syncState);
+    syncState();
+  })();
+</script>
+{% endblock %}

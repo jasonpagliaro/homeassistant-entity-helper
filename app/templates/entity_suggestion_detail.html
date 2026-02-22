@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Entity Suggestion Detail</h2>
+  <p>
+    <a href="{{ back_url }}">Back to suggestions</a>
+    <span> | </span>
+    <a href="/entity-suggestions/{{ suggestion.id }}/workflow?{{ build_query(profile_id=suggestion.profile_id, suggestion_run_id=suggestion.suggestion_run_id) }}">Open in Workflow</a>
+  </p>
+
+  <div class="detail-grid">
+    <div><strong>Run</strong></div><div>#{{ run.id }} ({{ run.status }})</div>
+    <div><strong>Entity ID</strong></div><div><code>{{ suggestion.entity_id }}</code></div>
+    <div><strong>Domain</strong></div><div>{{ suggestion.domain }}</div>
+    <div><strong>Readiness</strong></div><div><span class="status-chip status-{{ suggestion.readiness_status }}">{{ suggestion.readiness_status }}</span></div>
+    <div><strong>Workflow</strong></div><div><span class="status-chip status-{{ suggestion.workflow_status }}">{{ suggestion.workflow_status }}</span></div>
+    <div><strong>Workflow Updated</strong></div><div>{{ suggestion.workflow_updated_at or '' }}</div>
+    <div><strong>Workflow Error</strong></div><div>{{ suggestion.workflow_error or '' }}</div>
+    <div><strong>Pulled At</strong></div><div>{{ suggestion.pulled_at }}</div>
+    {% if snapshot %}
+      <div><strong>Current Friendly Name</strong></div><div>{{ snapshot.friendly_name or '' }}</div>
+      <div><strong>Current Area</strong></div><div>{{ snapshot.area_name or snapshot.area_id or '' }}</div>
+      <div><strong>Current Device</strong></div><div>{{ snapshot.device_name or snapshot.device_id or '' }}</div>
+    {% endif %}
+  </div>
+
+  <h3>Missing Fields</h3>
+  <pre>{{ missing_fields_pretty }}</pre>
+
+  <h3>Issues</h3>
+  <pre>{{ issues_pretty }}</pre>
+
+  <h3>Semantic Type</h3>
+  <pre>{{ semantic_type_pretty }}</pre>
+
+  <h3>LLM Suggestions</h3>
+  <pre>{{ llm_suggestions_pretty }}</pre>
+
+  <h3>Source Metadata</h3>
+  <pre>{{ source_metadata_pretty }}</pre>
+</section>
+{% endblock %}

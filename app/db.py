@@ -7,6 +7,7 @@ from typing import Generator
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from sqlmodel import Session, create_engine
 
 _engine: Engine | None = None
@@ -30,8 +31,16 @@ def get_database_url() -> str:
 
 
 def ensure_data_dir() -> None:
-    if get_database_url().startswith("sqlite"):
-        get_data_dir().mkdir(parents=True, exist_ok=True)
+    database_url = get_database_url()
+    parsed = make_url(database_url)
+    if parsed.get_backend_name() != "sqlite":
+        return
+
+    database = parsed.database or ""
+    if database in {"", ":memory:"}:
+        return
+
+    Path(database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
 def get_engine() -> Engine:

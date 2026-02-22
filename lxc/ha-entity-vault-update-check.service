@@ -1,9 +1,0 @@
-[Unit]
-Description=HA Entity Vault update workflow runner
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-EnvironmentFile=-/etc/default/ha-entity-vault-updater
-ExecStart=/usr/bin/env bash -lc '${HEV_UPDATE_REPO_PATH:-/srv/ha-entity-vault}/lxc/update-host.sh run'

@@ -1,28 +1,33 @@
-PYTHON ?= python3
-PIP ?= $(PYTHON) -m pip
+NPM ?= npm
 
-.PHONY: install dev-install run lint typecheck test format alembic-upgrade
+.PHONY: install dev-install build run lint typecheck test format alembic-upgrade clean
 
 install:
-	$(PIP) install -r requirements.txt
+	$(NPM) run bootstrap
 
 dev-install:
-	$(PIP) install -r requirements-dev.txt
+	$(NPM) run bootstrap
+
+build:
+	$(NPM) run build
 
 run:
-	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	$(NPM) run run
 
 lint:
-	$(PYTHON) -m ruff check app tests
+	$(NPM) run lint
 
 typecheck:
-	$(PYTHON) -m mypy app tests
+	$(NPM) run typecheck
 
 test:
-	$(PYTHON) -m pytest -q
+	$(NPM) run test
 
 format:
-	$(PYTHON) -m ruff check --fix app tests
+	$(NPM) run format
 
 alembic-upgrade:
-	$(PYTHON) -m alembic upgrade head
+	$(NPM) run db:migrate
+
+clean:
+	$(NPM) run clean
