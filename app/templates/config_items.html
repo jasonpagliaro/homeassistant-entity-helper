@@ -71,11 +71,16 @@
           method="post"
           action="/profiles/{{ active_profile.id }}/sync-config"
           data-sync-modal="true"
-          data-sync-modal-label="Syncing config items..."
-        >
+        data-sync-modal-label="Syncing config items..."
+      >
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <input type="hidden" name="next_url" value="{{ next_url }}" />
-          <button type="submit">Sync Config Items</button>
+          <button
+            type="submit"
+            data-tooltip="Pull the latest config item snapshots for this profile."
+          >
+            Sync Config Items
+          </button>
         </form>
         {% if active_llm_connection and active_config_sync_run %}
           <form
@@ -90,7 +95,12 @@
             <input type="hidden" name="config_sync_run_id" value="{{ active_config_sync_run.id }}" />
             <input type="hidden" name="q" value="{{ q }}" />
             <input type="hidden" name="max_targets" value="25" />
-            <button type="submit">Suggest Automation Updates</button>
+            <button
+              type="submit"
+              data-tooltip="Queue automation update suggestions for current filtered items."
+            >
+              Suggest Automation Updates
+            </button>
           </form>
         {% endif %}
         <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id) }}">View Automation Suggestions</a>
@@ -143,7 +153,12 @@
                   <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=active_profile.id) }}" />
                   <input type="hidden" name="llm_connection_id" value="{{ active_llm_connection.id }}" />
                   <input type="hidden" name="snapshot_id" value="{{ item.id }}" />
-                  <button type="submit">Suggest</button>
+                  <button
+                    type="submit"
+                    data-tooltip="Queue an automation update suggestion for this config item."
+                  >
+                    Suggest
+                  </button>
                 </form>
               {% endif %}
             </td>

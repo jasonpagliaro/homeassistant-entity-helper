@@ -71,15 +71,31 @@
             >
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <input type="hidden" name="next_url" value="/entity-suggestions?{{ build_query(profile_id=profile.id) }}" />
-              <button type="submit">Run Suggestions Check</button>
+              <button
+                type="submit"
+                data-tooltip="Run entity suggestion checks for this profile and refresh suggestion results."
+              >
+                Run Suggestions Check
+              </button>
             </form>
             <form method="post" action="/profiles/{{ profile.id }}/disable">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <button type="submit">Disable Profile</button>
+              <button
+                type="submit"
+                data-tooltip="Disable this profile so it is not available in the active profile switcher."
+              >
+                Disable Profile
+              </button>
             </form>
             <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <button type="submit" class="danger">Delete Profile</button>
+              <button
+                type="submit"
+                class="danger"
+                data-tooltip="Delete this profile and all synced data linked to it."
+              >
+                Delete Profile
+              </button>
             </form>
           </div>
 
@@ -202,7 +218,13 @@
                     <form method="post" action="/llm-connections/{{ connection.id }}/delete" onsubmit="return confirm('Delete LLM connection {{ connection.name }}?');">
                       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                       <input type="hidden" name="next_url" value="/settings?{{ build_query(profile_id=profile.id) }}" />
-                      <button type="submit" class="danger">Delete LLM</button>
+                      <button
+                        type="submit"
+                        class="danger"
+                        data-tooltip="Delete this LLM connection from the selected profile."
+                      >
+                        Delete LLM
+                      </button>
                     </form>
                   </div>
                 </article>
@@ -260,11 +282,22 @@
           <div class="row gap-sm wrap">
             <form method="post" action="/profiles/{{ profile.id }}/enable">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <button type="submit">Enable Profile</button>
+              <button
+                type="submit"
+                data-tooltip="Enable this profile and make it available in the active profile switcher."
+              >
+                Enable Profile
+              </button>
             </form>
             <form method="post" action="/profiles/{{ profile.id }}/delete" onsubmit="return confirm('Delete profile {{ profile.name }} and all synced data?');">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <button type="submit" class="danger">Delete Profile</button>
+              <button
+                type="submit"
+                class="danger"
+                data-tooltip="Delete this profile and all synced data linked to it."
+              >
+                Delete Profile
+              </button>
             </form>
           </div>
         </article>

@@ -90,7 +90,12 @@
         >
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <input type="hidden" name="next_url" value="{{ next_url }}" />
-          <button type="submit">Recheck Now</button>
+          <button
+            type="submit"
+            data-tooltip="Run sync and suggestion recheck to refresh workflow statuses."
+          >
+            Recheck Now
+          </button>
         </form>
         <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id, suggestion_run_id=active_suggestion_run.id) }}">Back to Suggestions</a>
       </div>

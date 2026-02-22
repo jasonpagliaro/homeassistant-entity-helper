@@ -25,7 +25,7 @@
         Accept Note
         <input type="text" name="review_note" placeholder="Optional note" />
       </label>
-      <button type="submit">Accept Draft</button>
+      <button type="submit" data-tooltip="Mark this automation draft as accepted.">Accept Draft</button>
     </form>
 
     <form method="post" action="/automation-drafts/{{ draft.id }}/reject">
@@ -36,7 +36,7 @@
         Reject Note
         <input type="text" name="review_note" placeholder="Optional note" />
       </label>
-      <button type="submit" class="danger">Reject Draft</button>
+      <button type="submit" class="danger" data-tooltip="Mark this automation draft as rejected.">Reject Draft</button>
     </form>
   </div>
 

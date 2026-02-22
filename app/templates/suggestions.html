@@ -22,7 +22,12 @@
         Max Targets
         <input type="number" name="max_targets" min="1" max="25" value="25" />
       </label>
-      <button type="submit">Queue Suggestion Run</button>
+      <button
+        type="submit"
+        data-tooltip="Queue a new automation suggestion run with the selected limits."
+      >
+        Queue Suggestion Run
+      </button>
     </form>
   {% elif active_profile %}
     <p>No enabled LLM connection for this profile. Configure one on the <a href="/settings?{{ build_query(profile_id=active_profile.id) }}">Profiles page</a>.</p>

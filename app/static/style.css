@@ -235,6 +235,62 @@ button,
   justify-content: center;
 }
 
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after,
+[data-tooltip]::before {
+  position: absolute;
+  left: 50%;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(0.25rem);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
+  z-index: 2600;
+}
+
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  bottom: calc(100% + 0.55rem);
+  width: max-content;
+  max-width: min(34ch, 70vw);
+  border-radius: 8px;
+  padding: 0.42rem 0.55rem;
+  background: #102335;
+  color: #f8fafc;
+  box-shadow: 0 8px 18px rgba(8, 18, 31, 0.26);
+  font-size: 0.8rem;
+  line-height: 1.25;
+  text-align: left;
+  white-space: normal;
+}
+
+[data-tooltip]::before {
+  content: "";
+  bottom: calc(100% + 0.22rem);
+  border-width: 0.34rem 0.34rem 0;
+  border-style: solid;
+  border-color: #102335 transparent transparent;
+}
+
+[data-tooltip]:focus-visible::after,
+[data-tooltip]:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  [data-tooltip]:hover::after,
+  [data-tooltip]:hover::before {
+    opacity: 1;
+    visibility: visible;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
 .button-secondary {
   border: 1px solid #6b7280;
   border-radius: 8px;

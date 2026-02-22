@@ -79,13 +79,13 @@
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <input type="hidden" name="status" value="accepted" />
               <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, proposal_status=proposal_status) }}" />
-              <button type="submit">Accept</button>
+              <button type="submit" data-tooltip="Mark this proposal as accepted.">Accept</button>
             </form>
             <form method="post" action="/suggestions/proposals/{{ proposal.id }}/status">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <input type="hidden" name="status" value="rejected" />
               <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, proposal_status=proposal_status) }}" />
-              <button type="submit" class="danger">Reject</button>
+              <button type="submit" class="danger" data-tooltip="Mark this proposal as rejected.">Reject</button>
             </form>
           </div>
         {% endif %}
