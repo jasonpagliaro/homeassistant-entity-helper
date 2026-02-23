@@ -95,6 +95,18 @@ SUGGESTION_MAX_PATCH_OPS = 12
 SUGGESTION_WORKER: SuggestionWorker | None = None
 API_KEY_ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LIKELY_API_KEY_PREFIXES = ("sk-", "sk_proj_", "sk-svcacct-", "gsk_", "AIza", "xai-", "ak-")
+WORKFLOW_REGISTRY_CACHE_TTL_SECONDS = 45.0
+WORKFLOW_REGISTRY_CACHE_MAX_ENTRIES = 64
+
+
+class WorkflowRegistryCacheEntry(TypedDict):
+    fetched_at_monotonic: float
+    entity_registry_entries: list[dict[str, Any]]
+    device_registry_entries: list[dict[str, Any]]
+
+
+WorkflowRegistryCacheKey = tuple[int, str, bool, str]
+WORKFLOW_REGISTRY_CACHE: dict[WorkflowRegistryCacheKey, WorkflowRegistryCacheEntry] = {}
 
 
 class PrimaryNavLink(TypedDict):
@@ -1255,6 +1267,72 @@ def issue_codes_for_suggestion(suggestion: EntitySuggestion) -> set[str]:
     return codes
 
 
+def workflow_registry_cache_key(profile: Profile, token: str) -> WorkflowRegistryCacheKey:
+    profile_id = int(profile.id) if profile.id is not None else 0
+    token_fingerprint = hashlib.sha1(token.encode("utf-8")).hexdigest()[:12]
+    return (profile_id, profile.base_url, bool(profile.verify_tls), token_fingerprint)
+
+
+def prune_workflow_registry_cache(now_monotonic: float) -> None:
+    if WORKFLOW_REGISTRY_CACHE_TTL_SECONDS <= 0:
+        WORKFLOW_REGISTRY_CACHE.clear()
+        return
+
+    stale_cutoff = now_monotonic - WORKFLOW_REGISTRY_CACHE_TTL_SECONDS
+    stale_keys = [
+        key
+        for key, entry in WORKFLOW_REGISTRY_CACHE.items()
+        if entry["fetched_at_monotonic"] < stale_cutoff
+    ]
+    for key in stale_keys:
+        WORKFLOW_REGISTRY_CACHE.pop(key, None)
+
+    max_entries = max(1, WORKFLOW_REGISTRY_CACHE_MAX_ENTRIES)
+    if len(WORKFLOW_REGISTRY_CACHE) <= max_entries:
+        return
+
+    keys_by_oldest = sorted(
+        WORKFLOW_REGISTRY_CACHE,
+        key=lambda key: WORKFLOW_REGISTRY_CACHE[key]["fetched_at_monotonic"],
+    )
+    drop_count = len(WORKFLOW_REGISTRY_CACHE) - max_entries
+    for key in keys_by_oldest[:drop_count]:
+        WORKFLOW_REGISTRY_CACHE.pop(key, None)
+
+
+def get_cached_workflow_registry_entries(
+    cache_key: WorkflowRegistryCacheKey,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    now_monotonic = perf_counter()
+    prune_workflow_registry_cache(now_monotonic)
+    entry = WORKFLOW_REGISTRY_CACHE.get(cache_key)
+    if entry is None:
+        return None
+    return entry["entity_registry_entries"], entry["device_registry_entries"]
+
+
+def set_cached_workflow_registry_entries(
+    cache_key: WorkflowRegistryCacheKey,
+    entity_registry_entries: list[dict[str, Any]],
+    device_registry_entries: list[dict[str, Any]],
+) -> None:
+    if WORKFLOW_REGISTRY_CACHE_TTL_SECONDS <= 0:
+        WORKFLOW_REGISTRY_CACHE.clear()
+        return
+
+    now_monotonic = perf_counter()
+    WORKFLOW_REGISTRY_CACHE[cache_key] = {
+        "fetched_at_monotonic": now_monotonic,
+        "entity_registry_entries": list(entity_registry_entries),
+        "device_registry_entries": list(device_registry_entries),
+    }
+    prune_workflow_registry_cache(now_monotonic)
+
+
+def clear_workflow_registry_cache() -> None:
+    WORKFLOW_REGISTRY_CACHE.clear()
+
+
 def workflow_required_flags_from_fixable_codes(fixable_codes: set[str]) -> dict[str, bool]:
     return {
         "friendly_name": bool({"missing_friendly_name", "generic_friendly_name"} & fixable_codes),
@@ -1370,9 +1448,9 @@ def parent_device_context_for_entity(
     entity_registry_entries: list[dict[str, Any]],
     device_registry_entries: list[dict[str, Any]],
     area_options_by_id: dict[str, dict[str, str]],
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     if entity_id is None:
-        return None, None
+        return None, None, None
 
     entity_entry: dict[str, Any] | None = None
     for candidate in entity_registry_entries:
@@ -1381,7 +1459,7 @@ def parent_device_context_for_entity(
             entity_entry = candidate
             break
     if entity_entry is None:
-        return None, None
+        return None, None, None
 
     devices_by_id: dict[str, dict[str, Any]] = {}
     for device in device_registry_entries:
@@ -1405,7 +1483,7 @@ def parent_device_context_for_entity(
         if parent_area_name is None:
             parent_area_name = area_id
 
-    return parent_device_name, parent_area_name
+    return parent_device_name, area_id, parent_area_name
 
 
 def format_area_option_label(area_name: str, parent_device_names: list[str]) -> str:
@@ -2377,6 +2455,7 @@ async def lifespan(_: FastAPI):
 
 
 def create_app() -> FastAPI:
+    clear_workflow_registry_cache()
     app = FastAPI(title=app_name(), lifespan=lifespan)
 
     app.add_middleware(
@@ -4695,6 +4774,7 @@ def create_app() -> FastAPI:
         area_options_source = "snapshot"
         area_options_error: str | None = None
         client: HAClient | None = None
+        registry_cache_key: WorkflowRegistryCacheKey | None = None
         entity_registry_entries: list[dict[str, Any]] = []
         device_registry_entries: list[dict[str, Any]] = []
 
@@ -4736,6 +4816,7 @@ def create_app() -> FastAPI:
                 verify_tls=active_profile.verify_tls,
                 timeout_seconds=active_profile.timeout_seconds,
             )
+            registry_cache_key = workflow_registry_cache_key(active_profile, token)
             try:
                 area_entries = await client.fetch_area_registry_entries()
                 area_options_by_id = {}
@@ -4756,12 +4837,26 @@ def create_app() -> FastAPI:
             except HAClientError as exc:
                 area_options_error = str(exc)
                 area_options_source = "snapshot"
-            try:
-                entity_registry_entries = await client.fetch_entity_registry_entries()
-                device_registry_entries = await client.fetch_device_registry_entries()
-            except HAClientError:
-                entity_registry_entries = []
-                device_registry_entries = []
+            cached_registry_entries = (
+                get_cached_workflow_registry_entries(registry_cache_key)
+                if registry_cache_key is not None
+                else None
+            )
+            if cached_registry_entries is not None:
+                entity_registry_entries, device_registry_entries = cached_registry_entries
+            else:
+                try:
+                    entity_registry_entries = await client.fetch_entity_registry_entries()
+                    device_registry_entries = await client.fetch_device_registry_entries()
+                    if registry_cache_key is not None:
+                        set_cached_workflow_registry_entries(
+                            registry_cache_key,
+                            entity_registry_entries,
+                            device_registry_entries,
+                        )
+                except HAClientError:
+                    entity_registry_entries = []
+                    device_registry_entries = []
         else:
             area_options_error = "No token configured in profile or environment."
             area_options_source = "snapshot"
@@ -4786,10 +4881,15 @@ def create_app() -> FastAPI:
             )
 
         parent_device_name = as_clean_string(snapshot.device_name if snapshot else None)
+        parent_device_area_id = as_clean_string(snapshot.area_id if snapshot else None)
         parent_device_area_name = as_clean_string(snapshot.area_name if snapshot else None) or as_clean_string(
             snapshot.area_id if snapshot else None
         )
-        registry_parent_device_name, registry_parent_area_name = parent_device_context_for_entity(
+        (
+            registry_parent_device_name,
+            registry_parent_area_id,
+            registry_parent_area_name,
+        ) = parent_device_context_for_entity(
             as_clean_string(snapshot.entity_id if snapshot else None),
             entity_registry_entries,
             device_registry_entries,
@@ -4797,11 +4897,32 @@ def create_app() -> FastAPI:
         )
         if registry_parent_device_name is not None:
             parent_device_name = registry_parent_device_name
+        if registry_parent_area_id is not None:
+            parent_device_area_id = registry_parent_area_id
         if registry_parent_area_name is not None:
             parent_device_area_name = registry_parent_area_name
 
+        parent_area_id_for_sort = as_clean_string(parent_device_area_id)
+        parent_area_name_for_sort = as_clean_string(parent_device_area_name)
+
+        def area_option_sort_key(item: dict[str, str]) -> tuple[int, str]:
+            area_id_value = item["area_id"]
+            area_name_value = item["area_name"]
+            is_parent_area = False
+            if (
+                parent_area_id_for_sort is not None
+                and area_id_value.casefold() == parent_area_id_for_sort.casefold()
+            ):
+                is_parent_area = True
+            elif (
+                parent_area_name_for_sort is not None
+                and area_name_value.casefold() == parent_area_name_for_sort.casefold()
+            ):
+                is_parent_area = True
+            return (0 if is_parent_area else 1, area_name_value.lower())
+
         area_options: list[dict[str, str]] = []
-        for item in sorted(area_options_by_id.values(), key=lambda row: row["area_name"].lower()):
+        for item in sorted(area_options_by_id.values(), key=area_option_sort_key):
             area_id_value = item["area_id"]
             area_name_value = item["area_name"]
             parent_device_names = area_name_device_hints.get(area_id_value) or area_name_device_hints.get(
