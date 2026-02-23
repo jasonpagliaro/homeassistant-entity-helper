@@ -11,6 +11,148 @@
     <a class="button" href="/entity-suggestions/{{ suggestion.id }}?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}">Suggestion Detail</a>
   </div>
 
+  <div class="workflow-fix-panel">
+    <h3>Apply Changes</h3>
+    <p class="muted-text">
+      Update any supported field below. Fields marked <span class="workflow-required-label">(Required to resolve)</span>
+      are directly tied to this suggestion's fixable issues.
+    </p>
+    {% if parent_device_name or parent_device_area_name %}
+      <div class="workflow-parent-summary">
+        <div class="workflow-parent-summary__line">
+          Parent Device:
+          <span>{{ parent_device_name or "(unknown)" }}</span>
+        </div>
+        <div class="workflow-parent-summary__line">
+          Assigned Area:
+          <span>{{ parent_device_area_name or "(unassigned)" }}</span>
+        </div>
+      </div>
+    {% endif %}
+    <form method="post" action="/entity-suggestions/{{ suggestion.id }}/workflow/apply" class="grid-form compact workflow-fix-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+      <input
+        type="hidden"
+        name="next_url"
+        value="{% if next_unresolved_id %}/entity-suggestions/{{ next_unresolved_id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}{% else %}{{ back_url }}{% endif %}"
+      />
+
+      <label class="workflow-field">
+        <span>
+          Friendly Name
+          {% if required_friendly_name %}
+            <span class="workflow-required-label">(Required to resolve)</span>
+          {% endif %}
+        </span>
+        <input
+          type="text"
+          name="friendly_name"
+          value="{{ snapshot.friendly_name if snapshot else '' }}"
+          {% if required_friendly_name %}class="workflow-required-input"{% endif %}
+          {% if required_friendly_name %}placeholder="Required to resolve naming issue"{% endif %}
+        />
+        {% if required_friendly_name %}
+          <span class="workflow-helper-text">Set a descriptive friendly name to resolve this issue.</span>
+        {% endif %}
+      </label>
+
+      <label class="workflow-field">
+        <span>
+          Area
+          {% if required_area %}
+            <span class="workflow-required-label">(Required to resolve)</span>
+          {% endif %}
+        </span>
+        <select id="area-selection" name="area_id" {% if required_area %}class="workflow-required-input"{% endif %}>
+          <option value="">(no change)</option>
+          <option value="{{ area_create_option_value }}">Create New Area...</option>
+          {% for item in area_options %}
+            <option value="{{ item.area_id }}">{{ item.option_label }}</option>
+          {% endfor %}
+        </select>
+        {% if required_area %}
+          <span class="workflow-helper-text">Choose an existing area or create a new one to resolve area mapping.</span>
+        {% endif %}
+        <span class="workflow-helper-text">
+          Area options source: {% if area_options_source == "home_assistant" %}Home Assistant registry{% else %}current suggestion run snapshot{% endif %}.
+          {% if area_options_error %}Unable to refresh from Home Assistant: {{ area_options_error }}.{% endif %}
+        </span>
+      </label>
+
+      <label class="workflow-field">
+        <span>
+          New Area Name
+          {% if required_area %}
+            <span class="workflow-required-label">(Required to resolve)</span>
+          {% endif %}
+        </span>
+        <input
+          id="new-area-name"
+          type="text"
+          name="new_area_name"
+          placeholder="Required when Create New Area is selected"
+          {% if required_area %}class="workflow-required-input"{% endif %}
+          disabled
+        />
+        {% if required_area %}
+          <span class="workflow-helper-text">Required when Create New Area is selected to resolve area mapping.</span>
+        {% endif %}
+      </label>
+
+      <label class="workflow-field">
+        <span>
+          Device Class
+          {% if required_device_class %}
+            <span class="workflow-required-label">(Required to resolve)</span>
+          {% endif %}
+        </span>
+        <input
+          type="text"
+          name="device_class"
+          value="{{ current_device_class }}"
+          {% if required_device_class %}class="workflow-required-input"{% endif %}
+          {% if required_device_class %}placeholder="Required to resolve device class issue"{% endif %}
+        />
+        {% if required_device_class %}
+          <span class="workflow-helper-text">Provide a valid device class for this entity type.</span>
+        {% endif %}
+      </label>
+
+      <label class="workflow-field">
+        <span>
+          Labels (comma-separated label IDs)
+          {% if required_labels %}
+            <span class="workflow-required-label">(Required to resolve)</span>
+          {% endif %}
+        </span>
+        <input
+          type="text"
+          name="labels_csv"
+          value="{{ current_label_ids_csv }}"
+          {% if required_labels %}class="workflow-required-input"{% endif %}
+          {% if required_labels %}placeholder="Required to resolve label coverage issue"{% endif %}
+        />
+        {% if required_labels %}
+          <span class="workflow-helper-text">Add one or more label IDs separated by commas.</span>
+        {% endif %}
+        {% if current_label_names %}
+          <span class="workflow-helper-text">Current label names: {{ current_label_names|join(", ") }}</span>
+        {% endif %}
+      </label>
+
+      <div class="row gap-sm align-end">
+        <button
+          type="submit"
+          data-tooltip="Apply these updates to Home Assistant for this entity."
+        >
+          Apply to Home Assistant
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <h3>Entity Context</h3>
   <div class="detail-grid">
     <div><strong>Run</strong></div><div>#{{ run.id }} ({{ run.status }})</div>
     <div><strong>Entity</strong></div><div><code>{{ suggestion.entity_id }}</code></div>
@@ -54,88 +196,6 @@
   {% else %}
     <p>No manual-only issues.</p>
   {% endif %}
-
-  <h3>Apply Changes</h3>
-  <p class="muted-text">Only fields linked to fixable issues are editable in this workflow.</p>
-  {% if allow_area %}
-    <p class="muted-text">
-      Area options source: {% if area_options_source == "home_assistant" %}Home Assistant registry{% else %}current suggestion run snapshot{% endif %}.
-      {% if area_options_error %}Unable to refresh from Home Assistant: {{ area_options_error }}.{% endif %}
-    </p>
-  {% endif %}
-  <form method="post" action="/entity-suggestions/{{ suggestion.id }}/workflow/apply" class="grid-form compact">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-    <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
-    <input
-      type="hidden"
-      name="next_url"
-      value="{% if next_unresolved_id %}/entity-suggestions/{{ next_unresolved_id }}/workflow?{{ build_query(profile_id=active_profile.id, suggestion_run_id=run.id) }}{% else %}{{ back_url }}{% endif %}"
-    />
-
-    <label>
-      Friendly Name
-      <input
-        type="text"
-        name="friendly_name"
-        value="{{ snapshot.friendly_name if snapshot else '' }}"
-        {% if not allow_friendly_name %}disabled{% endif %}
-      />
-    </label>
-
-    <label>
-      Area
-      <select id="area-selection" name="area_id" {% if not allow_area %}disabled{% endif %}>
-        <option value="">(no change)</option>
-        <option value="{{ area_create_option_value }}">Create New Area...</option>
-        {% for item in area_options %}
-          <option value="{{ item.area_id }}">{{ item.area_name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-
-    <label>
-      New Area Name
-      <input
-        id="new-area-name"
-        type="text"
-        name="new_area_name"
-        placeholder="Required when Create New Area is selected"
-        {% if not allow_area %}disabled{% else %}disabled{% endif %}
-      />
-    </label>
-
-    <label>
-      Device Class
-      <input
-        type="text"
-        name="device_class"
-        value="{{ current_device_class }}"
-        {% if not allow_device_class %}disabled{% endif %}
-      />
-    </label>
-
-    <label>
-      Labels (comma-separated label IDs)
-      <input
-        type="text"
-        name="labels_csv"
-        value="{{ current_label_ids_csv }}"
-        {% if not allow_labels %}disabled{% endif %}
-      />
-      {% if current_label_names %}
-        <span class="muted-text">Current label names: {{ current_label_names|join(", ") }}</span>
-      {% endif %}
-    </label>
-
-    <div class="row gap-sm align-end">
-      <button
-        type="submit"
-        data-tooltip="Apply these updates to Home Assistant for this entity."
-      >
-        Apply to Home Assistant
-      </button>
-    </div>
-  </form>
 
   {% if label_options %}
     <h4>Available Labels</h4>

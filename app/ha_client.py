@@ -33,12 +33,14 @@ class HAClient:
         verify_tls: bool = True,
         timeout_seconds: int = 10,
         transport: httpx.AsyncBaseTransport | None = None,
+        max_ws_message_size: int = 8_000_000,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.verify_tls = verify_tls
         self.timeout_seconds = timeout_seconds
         self.transport = transport
+        self.max_ws_message_size = max_ws_message_size
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -138,7 +140,7 @@ class HAClient:
                 open_timeout=self.timeout_seconds,
                 close_timeout=self.timeout_seconds,
                 ssl=ssl_context,
-                max_size=2_000_000,
+                max_size=self.max_ws_message_size,
             ) as websocket:
                 hello = await asyncio.wait_for(
                     self._ws_recv_json(websocket),
@@ -285,6 +287,26 @@ class HAClient:
 
         if not isinstance(payload, list):
             raise HAClientError("Unexpected response format from config/area_registry/list.")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def fetch_device_registry_entries(self) -> list[dict[str, Any]]:
+        try:
+            payload = await self._ws_request("config/device_registry/list")
+        except HAClientError as exc:
+            raise HAClientError(f"Unable to fetch device registry entries: {exc}") from exc
+
+        if not isinstance(payload, list):
+            raise HAClientError("Unexpected response format from config/device_registry/list.")
+        return [item for item in payload if isinstance(item, dict)]
+
+    async def fetch_entity_registry_entries(self) -> list[dict[str, Any]]:
+        try:
+            payload = await self._ws_request("config/entity_registry/list")
+        except HAClientError as exc:
+            raise HAClientError(f"Unable to fetch entity registry entries: {exc}") from exc
+
+        if not isinstance(payload, list):
+            raise HAClientError("Unexpected response format from config/entity_registry/list.")
         return [item for item in payload if isinstance(item, dict)]
 
     @staticmethod
