@@ -54,6 +54,37 @@
     </header>
 
     <main class="container">
+      {% if update_banner %}
+      <div class="flash flash-warning update-banner" role="status" aria-live="polite">
+        <div class="row between wrap gap-sm">
+          <div>{{ update_banner.message }}</div>
+          <div class="row gap-sm wrap">
+            <a
+              class="button-secondary"
+              href="/config?{{ build_query(profile_id=nav_active_profile.id if nav_active_profile else None) }}"
+            >
+              View Updates
+            </a>
+            {% if update_banner.latest_commit_url %}
+            <a class="button-secondary" href="{{ update_banner.latest_commit_url }}" target="_blank" rel="noreferrer">
+              Open Commit
+            </a>
+            {% endif %}
+            <form method="post" action="/config/update-banner/dismiss" class="inline-form inline-form-reset">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="next_url" value="{{ current_url }}" />
+              <button
+                type="submit"
+                class="button-secondary"
+                data-tooltip="Hide this update banner until a newer update is detected."
+              >
+                Dismiss
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+      {% endif %}
       {% if flash %}
       <div class="flash flash-{{ flash.level }}">{{ flash.message }}</div>
       {% endif %}

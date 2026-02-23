@@ -11,14 +11,16 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, TypedDict
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+import httpx
 import yaml  # type: ignore[import-untyped]
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -48,6 +50,7 @@ from app.llm_client import (
 )
 from app.llm_presets import LLMPreset, get_llm_preset, get_llm_presets, infer_preset_slug
 from app.models import (
+    AppConfig,
     AutomationDraft,
     AutomationDraftRun,
     ConfigSnapshot,
@@ -178,8 +181,13 @@ PRIMARY_NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("Automation Suggestions", "/suggestions"),
     ("Entity Suggestions", "/entity-suggestions"),
     ("Automation Drafts", "/automation-drafts"),
+    ("Config", "/config"),
     ("Profiles", "/settings"),
 )
+
+UPDATE_REPO_PART_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+UPDATE_BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9._/-]+$")
+COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
 def app_name() -> str:
@@ -621,6 +629,219 @@ def choose_active_profile(
     if first_enabled is not None:
         set_active_profile_id(request, first_enabled.id)
     return first_enabled
+
+
+def get_or_create_app_config(session: Session) -> AppConfig:
+    app_config = session.exec(select(AppConfig).order_by(AppConfig.id.asc())).first()
+    if app_config is not None:
+        return app_config
+
+    created = AppConfig(
+        updates_enabled=True,
+        update_repo_owner="jasonpagliaro",
+        update_repo_name="homeassistant-entity-helper",
+        update_repo_branch="main",
+        update_check_interval_minutes=720,
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    session.add(created)
+    session.commit()
+    session.refresh(created)
+    return created
+
+
+def resolve_installed_commit_sha() -> str | None:
+    configured_sha = os.getenv("HEV_BUILD_COMMIT_SHA", "").strip()
+    if configured_sha and COMMIT_SHA_PATTERN.fullmatch(configured_sha):
+        return configured_sha.lower()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+    resolved_sha = result.stdout.strip()
+    if COMMIT_SHA_PATTERN.fullmatch(resolved_sha):
+        return resolved_sha.lower()
+    return None
+
+
+async def fetch_latest_commit(
+    owner: str,
+    repo: str,
+    branch: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    normalized_owner = owner.strip()
+    normalized_repo = repo.strip()
+    normalized_branch = branch.strip()
+    if not normalized_owner or not normalized_repo or not normalized_branch:
+        return None, "Repository owner, name, and branch are required."
+
+    url = (
+        "https://api.github.com/repos/"
+        f"{quote(normalized_owner, safe='')}/{quote(normalized_repo, safe='')}/commits/{quote(normalized_branch, safe='')}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "ha-entity-vault-update-checker",
+                },
+            )
+    except httpx.HTTPError as exc:
+        return None, f"GitHub request failed: {exc}"
+
+    if response.status_code >= 400:
+        return None, f"GitHub API returned status {response.status_code}."
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return None, "GitHub response was not valid JSON."
+    if not isinstance(payload, dict):
+        return None, "GitHub response payload format was invalid."
+
+    sha = as_clean_string(payload.get("sha"))
+    if not sha or not COMMIT_SHA_PATTERN.fullmatch(sha):
+        return None, "GitHub response did not include a valid commit SHA."
+
+    html_url = as_clean_string(payload.get("html_url"))
+    if not html_url:
+        html_url = f"https://github.com/{normalized_owner}/{normalized_repo}/commit/{sha}"
+
+    commit_payload = payload.get("commit")
+    if not isinstance(commit_payload, dict):
+        commit_payload = {}
+    committer_payload = commit_payload.get("committer")
+    if not isinstance(committer_payload, dict):
+        committer_payload = {}
+    author_payload = commit_payload.get("author")
+    if not isinstance(author_payload, dict):
+        author_payload = {}
+
+    published_at = parse_ha_datetime(committer_payload.get("date")) or parse_ha_datetime(
+        author_payload.get("date")
+    )
+
+    return {
+        "sha": sha.lower(),
+        "url": html_url,
+        "published_at": published_at,
+    }, None
+
+
+async def run_update_check(
+    session: Session,
+    app_config: AppConfig,
+    *,
+    force: bool,
+) -> str:
+    if not app_config.updates_enabled:
+        return app_config.last_check_state
+
+    now = utcnow()
+    if not force and app_config.last_checked_at is not None:
+        previous_check = app_config.last_checked_at
+        if previous_check.tzinfo is None:
+            previous_check = previous_check.replace(tzinfo=timezone.utc)
+        else:
+            previous_check = previous_check.astimezone(timezone.utc)
+        elapsed = now - previous_check
+        interval_seconds = max(15, app_config.update_check_interval_minutes) * 60
+        if elapsed.total_seconds() < interval_seconds:
+            return app_config.last_check_state
+
+    installed_commit_sha = resolve_installed_commit_sha()
+    app_config.last_checked_at = now
+    app_config.last_check_error = None
+    app_config.installed_commit_sha = installed_commit_sha
+
+    latest_commit, fetch_error = await fetch_latest_commit(
+        app_config.update_repo_owner,
+        app_config.update_repo_name,
+        app_config.update_repo_branch,
+    )
+    if fetch_error or latest_commit is None:
+        app_config.last_check_state = "error"
+        app_config.last_check_error = fetch_error or "Unknown update check error."
+        app_config.updated_at = now
+        session.add(app_config)
+        session.commit()
+        return app_config.last_check_state
+
+    latest_commit_sha = as_clean_string(latest_commit.get("sha"))
+    if not latest_commit_sha:
+        app_config.last_check_state = "error"
+        app_config.last_check_error = "Latest commit SHA was missing."
+        app_config.updated_at = now
+        session.add(app_config)
+        session.commit()
+        return app_config.last_check_state
+
+    app_config.latest_commit_sha = latest_commit_sha.lower()
+    app_config.latest_commit_url = as_clean_string(latest_commit.get("url"))
+
+    latest_commit_published_at = latest_commit.get("published_at")
+    if isinstance(latest_commit_published_at, datetime):
+        app_config.latest_commit_published_at = latest_commit_published_at
+    else:
+        app_config.latest_commit_published_at = None
+
+    if not installed_commit_sha:
+        app_config.last_check_state = "unknown_local_sha"
+    elif installed_commit_sha == app_config.latest_commit_sha:
+        app_config.last_check_state = "ok"
+    else:
+        app_config.last_check_state = "update_available"
+
+    app_config.last_check_error = None
+    app_config.updated_at = now
+    session.add(app_config)
+    session.commit()
+    return app_config.last_check_state
+
+
+def build_update_banner_context(app_config: AppConfig) -> dict[str, Any] | None:
+    if not app_config.updates_enabled:
+        return None
+    if app_config.last_check_state != "update_available":
+        return None
+
+    latest_commit_sha = as_clean_string(app_config.latest_commit_sha)
+    if not latest_commit_sha:
+        return None
+
+    dismissed_commit_sha = as_clean_string(app_config.dismissed_commit_sha)
+    if dismissed_commit_sha == latest_commit_sha:
+        return None
+
+    installed_commit_sha = as_clean_string(app_config.installed_commit_sha)
+    latest_commit_short = latest_commit_sha[:8]
+    installed_commit_short = installed_commit_sha[:8] if installed_commit_sha else None
+    if installed_commit_short:
+        message = f"Update available: {installed_commit_short} -> {latest_commit_short}."
+    else:
+        message = f"Update available: latest commit {latest_commit_short} is available."
+
+    return {
+        "message": message,
+        "latest_commit_sha": latest_commit_sha,
+        "latest_commit_short": latest_commit_short,
+        "latest_commit_url": app_config.latest_commit_url,
+        "installed_commit_sha": installed_commit_sha,
+        "installed_commit_short": installed_commit_short,
+    }
 
 
 def require_enabled_profile(profile: Profile, request: Request) -> bool:
@@ -3359,10 +3580,12 @@ def create_app() -> FastAPI:
         context: dict[str, Any],
         active_profile: Profile | None,
     ) -> dict[str, Any]:
+        app_config = get_or_create_app_config(session)
         context["nav_profiles"] = get_enabled_profiles(session)
         context["nav_active_profile"] = active_profile
         context["nav_primary_links"] = build_primary_nav_links(request.url.path)
         context["current_url"] = get_current_url(request)
+        context["update_banner"] = build_update_banner_context(app_config)
         return context
 
     @app.middleware("http")
@@ -3453,6 +3676,183 @@ def create_app() -> FastAPI:
                 },
                 active_profile,
             ),
+        )
+
+    @app.get("/config", response_class=HTMLResponse)
+    async def config_page(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        app_config = get_or_create_app_config(session)
+        await run_update_check(session, app_config, force=False)
+        session.refresh(app_config)
+
+        return render_template(
+            request,
+            "config.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "app_config": app_config,
+                },
+                active_profile,
+            ),
+        )
+
+    @app.post("/config/update-settings")
+    async def update_config_settings(
+        request: Request,
+        updates_enabled: bool = Form(default=False),
+        update_repo_owner: str = Form(default=""),
+        update_repo_name: str = Form(default=""),
+        update_repo_branch: str = Form(default=""),
+        update_check_interval_minutes: int = Form(default=720),
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/config"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        app_config = get_or_create_app_config(session)
+        normalized_updates_enabled = bool(updates_enabled)
+        normalized_owner = update_repo_owner.strip()
+        normalized_repo = update_repo_name.strip()
+        normalized_branch = update_repo_branch.strip()
+
+        if normalized_updates_enabled:
+            if not normalized_owner or not normalized_repo or not normalized_branch:
+                set_flash(request, "error", "Repository owner, name, and branch are required.")
+                return RedirectResponse(
+                    url=with_profile_id(next_url, get_active_profile_id(request)),
+                    status_code=303,
+                )
+            if not UPDATE_REPO_PART_PATTERN.fullmatch(normalized_owner):
+                set_flash(request, "error", "Repository owner contains unsupported characters.")
+                return RedirectResponse(
+                    url=with_profile_id(next_url, get_active_profile_id(request)),
+                    status_code=303,
+                )
+            if not UPDATE_REPO_PART_PATTERN.fullmatch(normalized_repo):
+                set_flash(request, "error", "Repository name contains unsupported characters.")
+                return RedirectResponse(
+                    url=with_profile_id(next_url, get_active_profile_id(request)),
+                    status_code=303,
+                )
+            if not UPDATE_BRANCH_PATTERN.fullmatch(normalized_branch):
+                set_flash(request, "error", "Repository branch contains unsupported characters.")
+                return RedirectResponse(
+                    url=with_profile_id(next_url, get_active_profile_id(request)),
+                    status_code=303,
+                )
+
+        if normalized_owner:
+            app_config.update_repo_owner = normalized_owner
+        if normalized_repo:
+            app_config.update_repo_name = normalized_repo
+        if normalized_branch:
+            app_config.update_repo_branch = normalized_branch
+
+        app_config.updates_enabled = normalized_updates_enabled
+        app_config.update_check_interval_minutes = max(15, min(update_check_interval_minutes, 10080))
+        app_config.updated_at = utcnow()
+        session.add(app_config)
+        session.commit()
+
+        set_flash(request, "success", "Update settings saved.")
+        return RedirectResponse(
+            url=with_profile_id(next_url, get_active_profile_id(request)),
+            status_code=303,
+        )
+
+    @app.post("/config/check-updates")
+    async def check_updates_now(
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/config"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        app_config = get_or_create_app_config(session)
+        if not app_config.updates_enabled:
+            set_flash(request, "warning", "Update checker is disabled.")
+            return RedirectResponse(
+                url=with_profile_id(next_url, get_active_profile_id(request)),
+                status_code=303,
+            )
+
+        state = await run_update_check(session, app_config, force=True)
+        session.refresh(app_config)
+        if state == "ok":
+            set_flash(request, "success", "No update available. You are up to date.")
+        elif state == "update_available":
+            latest = app_config.latest_commit_sha[:8] if app_config.latest_commit_sha else "unknown"
+            set_flash(request, "warning", f"Update available: latest commit {latest}.")
+        elif state == "unknown_local_sha":
+            set_flash(
+                request,
+                "warning",
+                "Latest commit fetched, but local build commit is unknown. Set HEV_BUILD_COMMIT_SHA if needed.",
+            )
+        else:
+            detail = app_config.last_check_error or "Unknown update check error."
+            set_flash(request, "error", f"Update check failed: {detail}")
+
+        return RedirectResponse(
+            url=with_profile_id(next_url, get_active_profile_id(request)),
+            status_code=303,
+        )
+
+    @app.post("/config/update-banner/dismiss")
+    async def dismiss_update_banner(
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/config"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        app_config = get_or_create_app_config(session)
+        latest_commit_sha = as_clean_string(app_config.latest_commit_sha)
+        if latest_commit_sha:
+            app_config.dismissed_commit_sha = latest_commit_sha
+            app_config.dismissed_at = utcnow()
+            app_config.updated_at = utcnow()
+            session.add(app_config)
+            session.commit()
+            set_flash(request, "success", "Update banner dismissed.")
+        else:
+            set_flash(request, "warning", "No update banner is currently available to dismiss.")
+
+        return RedirectResponse(
+            url=with_profile_id(next_url, get_active_profile_id(request)),
+            status_code=303,
+        )
+
+    @app.post("/config/update-banner/reset")
+    async def reset_update_banner_dismissal(
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/config"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        app_config = get_or_create_app_config(session)
+        app_config.dismissed_commit_sha = None
+        app_config.dismissed_at = None
+        app_config.updated_at = utcnow()
+        session.add(app_config)
+        session.commit()
+
+        set_flash(request, "success", "Update banner dismissal reset.")
+        return RedirectResponse(
+            url=with_profile_id(next_url, get_active_profile_id(request)),
+            status_code=303,
         )
 
     @app.post("/profiles/select")

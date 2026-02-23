@@ -149,6 +149,17 @@ docker rm ha-entity-vault
 | `HEV_LLM_BASE_URL` | No | empty | OpenAI-compatible endpoint base URL. |
 | `HEV_LLM_API_KEY` | No | empty | Provider API key (or profile-scoped env var references). |
 | `HEV_LLM_MODEL` | No | empty | Model ID for suggestion/draft generation. |
+| `HEV_BUILD_COMMIT_SHA` | No | empty | Optional local build SHA used by `/config` update checker when `.git` is unavailable in container runtime. |
+
+To provide deterministic update-checker local version info in containers:
+
+```bash
+docker build \
+  --build-arg HEV_BUILD_COMMIT_SHA="$(git rev-parse HEAD)" \
+  -t ha-entity-vault:local .
+```
+
+Or set `HEV_BUILD_COMMIT_SHA` in `.env` for Compose/runtime injection.
 
 ## Persistence, Backup, and Restore
 

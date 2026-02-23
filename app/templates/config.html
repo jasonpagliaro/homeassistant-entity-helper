@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Update Status</h2>
+  <p class="muted-text">
+    Deployment-scoped update checks compare your configured GitHub repository branch head to this running build.
+  </p>
+  <div class="detail-grid">
+    <div><strong>Checker Enabled</strong></div>
+    <div>{{ "Yes" if app_config.updates_enabled else "No" }}</div>
+
+    <div><strong>Last Check</strong></div>
+    <div>{{ app_config.last_checked_at or "" }}</div>
+
+    <div><strong>Last Check State</strong></div>
+    <div><span class="status-chip status-{{ app_config.last_check_state }}">{{ app_config.last_check_state }}</span></div>
+
+    <div><strong>Installed Commit</strong></div>
+    <div><code>{{ app_config.installed_commit_sha or "" }}</code></div>
+
+    <div><strong>Latest Commit</strong></div>
+    <div><code>{{ app_config.latest_commit_sha or "" }}</code></div>
+
+    <div><strong>Latest Commit URL</strong></div>
+    <div>
+      {% if app_config.latest_commit_url %}
+      <a href="{{ app_config.latest_commit_url }}" target="_blank" rel="noreferrer">{{ app_config.latest_commit_url }}</a>
+      {% else %}
+      <span class="muted-text">Not available</span>
+      {% endif %}
+    </div>
+
+    <div><strong>Latest Commit Published</strong></div>
+    <div>{{ app_config.latest_commit_published_at or "" }}</div>
+
+    <div><strong>Dismissed Commit</strong></div>
+    <div><code>{{ app_config.dismissed_commit_sha or "" }}</code></div>
+
+    <div><strong>Dismissed At</strong></div>
+    <div>{{ app_config.dismissed_at or "" }}</div>
+
+    <div><strong>Last Error</strong></div>
+    <div>{{ app_config.last_check_error or "" }}</div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Update Settings</h2>
+  <form method="post" action="/config/update-settings" class="grid-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="next_url" value="{{ current_url }}" />
+    <label class="checkbox-row">
+      <input type="checkbox" name="updates_enabled" {% if app_config.updates_enabled %}checked{% endif %} />
+      Enable Update Checker
+    </label>
+    <label>
+      Repository Owner
+      <input type="text" name="update_repo_owner" value="{{ app_config.update_repo_owner }}" required />
+    </label>
+    <label>
+      Repository Name
+      <input type="text" name="update_repo_name" value="{{ app_config.update_repo_name }}" required />
+    </label>
+    <label>
+      Branch
+      <input type="text" name="update_repo_branch" value="{{ app_config.update_repo_branch }}" required />
+    </label>
+    <label>
+      Check Interval (Minutes)
+      <input
+        type="number"
+        min="15"
+        max="10080"
+        name="update_check_interval_minutes"
+        value="{{ app_config.update_check_interval_minutes }}"
+        required
+      />
+    </label>
+    <button type="submit">Save Update Settings</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Actions</h2>
+  <div class="row gap-sm wrap">
+    <form method="post" action="/config/check-updates">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="{{ current_url }}" />
+      <button
+        type="submit"
+        data-tooltip="Fetch the latest commit from GitHub immediately and update persisted status."
+      >
+        Check Now
+      </button>
+    </form>
+    <form method="post" action="/config/update-banner/reset">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="{{ current_url }}" />
+      <button
+        type="submit"
+        class="button-secondary"
+        data-tooltip="Clear dismissed banner state so the current update banner can be shown again."
+      >
+        Reset Banner Dismissal
+      </button>
+    </form>
+  </div>
+</section>
+{% endblock %}

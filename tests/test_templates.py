@@ -68,6 +68,10 @@ TEMPLATE_TABLE_LABELS: dict[str, tuple[str, ...]] = {
 }
 
 HIGH_IMPACT_BUTTON_TOOLTIP_LABELS: dict[str, dict[str, int]] = {
+    "config.html": {
+        "Check Now": 1,
+        "Reset Banner Dismissal": 1,
+    },
     "settings.html": {
         "Run Suggestions Check": 1,
         "Disable Profile": 1,
@@ -181,3 +185,15 @@ def test_settings_llm_preset_form_contract() -> None:
     assert 'id="llm-temperature-suggestions"' in template
     assert "/api/llm/models" in template
     assert "/api/llm/test-draft" in template
+
+
+def test_config_page_form_contract() -> None:
+    template = _read_template("config.html")
+    assert 'action="/config/update-settings"' in template
+    assert 'action="/config/check-updates"' in template
+    assert 'action="/config/update-banner/reset"' in template
+    assert 'name="updates_enabled"' in template
+    assert 'name="update_repo_owner"' in template
+    assert 'name="update_repo_name"' in template
+    assert 'name="update_repo_branch"' in template
+    assert 'name="update_check_interval_minutes"' in template

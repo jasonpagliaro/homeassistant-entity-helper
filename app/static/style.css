@@ -491,6 +491,18 @@ button.danger {
   border: 1px solid #f0cc7a;
 }
 
+.update-banner {
+  margin-bottom: 1rem;
+}
+
+.update-banner .button-secondary {
+  text-decoration: none;
+}
+
+.inline-form-reset {
+  margin-left: 0;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -572,6 +584,22 @@ button.danger {
 }
 
 .status-skipped {
+  background: #eef2f6;
+  border-color: #cbd5e1;
+}
+
+.status-ok {
+  background: #ddf7e9;
+  border-color: #8ad0ac;
+}
+
+.status-update_available,
+.status-unknown_local_sha {
+  background: #fff4d6;
+  border-color: #f0cc7a;
+}
+
+.status-never {
   background: #eef2f6;
   border-color: #cbd5e1;
 }

@@ -33,6 +33,43 @@ class Profile(SQLModel, table=True):
     )
 
 
+class AppConfig(SQLModel, table=True):
+    __tablename__ = "app_config"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    updates_enabled: bool = Field(default=True)
+    update_repo_owner: str = Field(default="jasonpagliaro", max_length=128)
+    update_repo_name: str = Field(default="homeassistant-entity-helper", max_length=128)
+    update_repo_branch: str = Field(default="main", max_length=128)
+    update_check_interval_minutes: int = Field(default=720, ge=15, le=10080)
+    last_checked_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_check_state: str = Field(default="never", max_length=32, index=True)
+    last_check_error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    installed_commit_sha: Optional[str] = Field(default=None, max_length=64)
+    latest_commit_sha: Optional[str] = Field(default=None, max_length=64, index=True)
+    latest_commit_url: Optional[str] = Field(default=None, max_length=512)
+    latest_commit_published_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    dismissed_commit_sha: Optional[str] = Field(default=None, max_length=64, index=True)
+    dismissed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class SyncRun(SQLModel, table=True):
     __tablename__ = "sync_runs"
 

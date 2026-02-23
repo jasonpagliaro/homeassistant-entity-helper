@@ -15,6 +15,7 @@ from app.ha_client import HAClientError
 from app.llm_client import LLMClientError
 from app.main import create_app
 from app.models import (
+    AppConfig,
     ConfigSnapshot,
     ConfigSyncRun,
     EntitySuggestion,
@@ -68,6 +69,13 @@ def get_profile_id_by_name(name: str) -> int:
         assert profile is not None
         assert profile.id is not None
         return profile.id
+
+
+def get_app_config() -> AppConfig:
+    with Session(db.get_engine()) as session:
+        app_config = session.exec(select(AppConfig).order_by(AppConfig.id.asc())).first()
+        assert app_config is not None
+        return app_config
 
 
 def create_profile(
@@ -516,6 +524,7 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
         ("/suggestions", "/suggestions", "Automation Suggestions"),
         ("/entity-suggestions", "/entity-suggestions", "Entity Suggestions"),
         ("/automation-drafts", "/automation-drafts", "Automation Drafts"),
+        ("/config", "/config", "Config"),
         ("/settings", "/settings", "Profiles"),
     ],
 )
@@ -524,11 +533,190 @@ def test_primary_navigation_active_state_on_top_level_pages(
     path: str,
     active_href: str,
     active_label: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def fake_fetch_latest_commit(_: str, __: str, ___: str) -> tuple[dict[str, Any], None]:
+        return {
+            "sha": "a" * 40,
+            "url": "https://github.com/example/repo/commit/" + ("a" * 40),
+            "published_at": utcnow(),
+        }, None
+
+    monkeypatch.setattr("app.main.fetch_latest_commit", fake_fetch_latest_commit)
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
     response = client.get(path)
     assert response.status_code == 200
     assert_primary_nav_active_link(response.text, active_href=active_href, active_label=active_label)
     assert_docs_link_in_footer_not_primary_nav(response.text)
+
+
+def test_config_page_and_update_settings_persist(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_latest_commit(_: str, __: str, ___: str) -> tuple[dict[str, Any], None]:
+        return {
+            "sha": "b" * 40,
+            "url": "https://github.com/example/repo/commit/" + ("b" * 40),
+            "published_at": utcnow(),
+        }, None
+
+    monkeypatch.setattr("app.main.fetch_latest_commit", fake_fetch_latest_commit)
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    config_response = client.get("/config")
+    assert config_response.status_code == 200
+    assert "Update Settings" in config_response.text
+    assert_primary_nav_active_link(config_response.text, active_href="/config", active_label="Config")
+
+    csrf_token = extract_csrf(config_response.text)
+    update_response = client.post(
+        "/config/update-settings",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": "/config",
+            "updates_enabled": "on",
+            "update_repo_owner": "custom-owner",
+            "update_repo_name": "custom-repo",
+            "update_repo_branch": "release/stable",
+            "update_check_interval_minutes": "20000",
+        },
+        follow_redirects=False,
+    )
+    assert update_response.status_code == 303
+
+    app_config = get_app_config()
+    assert app_config.updates_enabled is True
+    assert app_config.update_repo_owner == "custom-owner"
+    assert app_config.update_repo_name == "custom-repo"
+    assert app_config.update_repo_branch == "release/stable"
+    assert app_config.update_check_interval_minutes == 10080
+
+
+def test_config_update_settings_validation_preserves_existing_values(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_latest_commit(_: str, __: str, ___: str) -> tuple[dict[str, Any], None]:
+        return {
+            "sha": "b" * 40,
+            "url": "https://github.com/example/repo/commit/" + ("b" * 40),
+            "published_at": utcnow(),
+        }, None
+
+    monkeypatch.setattr("app.main.fetch_latest_commit", fake_fetch_latest_commit)
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    config_response = client.get("/config")
+    assert config_response.status_code == 200
+    csrf_token = extract_csrf(config_response.text)
+
+    update_response = client.post(
+        "/config/update-settings",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": "/config",
+            "updates_enabled": "on",
+            "update_repo_owner": "bad owner",
+            "update_repo_name": "custom-repo",
+            "update_repo_branch": "main",
+            "update_check_interval_minutes": "60",
+        },
+        follow_redirects=False,
+    )
+    assert update_response.status_code == 303
+
+    app_config = get_app_config()
+    assert app_config.update_repo_owner == "jasonpagliaro"
+    assert app_config.update_repo_name == "homeassistant-entity-helper"
+    assert app_config.update_repo_branch == "main"
+
+
+def test_update_banner_dismiss_and_reappears_on_new_commit(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    latest_sha: dict[str, str] = {"value": "b" * 40}
+
+    async def fake_fetch_latest_commit(_: str, __: str, ___: str) -> tuple[dict[str, Any], None]:
+        return {
+            "sha": latest_sha["value"],
+            "url": "https://github.com/example/repo/commit/" + latest_sha["value"],
+            "published_at": utcnow(),
+        }, None
+
+    monkeypatch.setattr("app.main.fetch_latest_commit", fake_fetch_latest_commit)
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    config_response = client.get("/config")
+    assert config_response.status_code == 200
+
+    app_config = get_app_config()
+    assert app_config.last_check_state == "update_available"
+    assert app_config.latest_commit_sha == "b" * 40
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    assert 'action="/config/update-banner/dismiss"' in entities_response.text
+    assert "Update available" in entities_response.text
+
+    csrf_token = extract_csrf(entities_response.text)
+    dismiss_response = client.post(
+        "/config/update-banner/dismiss",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": "/entities",
+        },
+        follow_redirects=False,
+    )
+    assert dismiss_response.status_code == 303
+
+    entities_after_dismiss = client.get("/entities")
+    assert entities_after_dismiss.status_code == 200
+    assert 'action="/config/update-banner/dismiss"' not in entities_after_dismiss.text
+
+    latest_sha["value"] = "c" * 40
+    config_after = client.get("/config")
+    assert config_after.status_code == 200
+    csrf_token_after = extract_csrf(config_after.text)
+
+    check_response = client.post(
+        "/config/check-updates",
+        data={
+            "csrf_token": csrf_token_after,
+            "next_url": "/config",
+        },
+        follow_redirects=False,
+    )
+    assert check_response.status_code == 303
+
+    entities_after_new_update = client.get("/entities")
+    assert entities_after_new_update.status_code == 200
+    assert 'action="/config/update-banner/dismiss"' in entities_after_new_update.text
+    assert "cccccccc" in entities_after_new_update.text
+
+
+def test_config_update_check_failure_state_does_not_show_banner(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_latest_commit(_: str, __: str, ___: str) -> tuple[None, str]:
+        return None, "GitHub timeout"
+
+    monkeypatch.setattr("app.main.fetch_latest_commit", fake_fetch_latest_commit)
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    config_response = client.get("/config")
+    assert config_response.status_code == 200
+
+    app_config = get_app_config()
+    assert app_config.last_check_state == "error"
+    assert app_config.last_check_error == "GitHub timeout"
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    assert 'action="/config/update-banner/dismiss"' not in entities_response.text
 
 
 def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -172,6 +172,7 @@ Environment variables (see `.env.example`):
 - `HEV_LLM_TIMEOUT_SECONDS`: outbound LLM request timeout.
 - `HEV_LLM_MAX_CONCURRENCY`: max in-flight LLM requests per run.
 - `HEV_AUTOMATION_DRAFT_MAX_ITEMS`: cap candidates processed in one draft generation run.
+- `HEV_BUILD_COMMIT_SHA`: optional build commit SHA override used by the update checker when `.git` metadata is unavailable.
 - `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / custom vars: examples of env vars referenced by profile-scoped LLM connections.
 
 Profile token resolution order:
@@ -182,6 +183,14 @@ Profile token resolution order:
 LLM API key resolution for profile-scoped automation suggestions:
 1. Environment variable defined in `llm_connections.api_key_env_var` (if present and set).
 2. No plaintext API key fallback in DB (suggestion run fails if key is required and missing).
+
+## Update Checker
+- App-level update settings and status live on `GET /config`.
+- Source of truth is GitHub commit head for configured `{owner}/{repo}@{branch}`.
+- Auto-check runs only when `/config` loads and the configured interval has elapsed.
+- Manual checks run via `POST /config/check-updates`.
+- Update banner dismissal is deployment-scoped (DB-backed) and reappears automatically when a newer commit is detected.
+- If local SHA cannot be resolved, status becomes `unknown_local_sha`. Set `HEV_BUILD_COMMIT_SHA` for deterministic deployment version tracking.
 
 ## Security Notes
 - Home Assistant tokens can be stored in SQLite for convenience.
@@ -213,6 +222,11 @@ LLM API key resolution for profile-scoped automation suggestions:
 
 ## App Endpoint Reference (Manual)
 - `GET /healthz` - health check.
+- `GET /config` - app-level update checker status and settings page.
+- `POST /config/update-settings` - persist update checker settings.
+- `POST /config/check-updates` - run update check now.
+- `POST /config/update-banner/dismiss` - dismiss current update banner globally.
+- `POST /config/update-banner/reset` - clear banner dismissal state.
 - `GET /settings` - profile settings page.
 - `POST /profiles/select` - set active profile for current session and redirect.
 - `POST /profiles` - create profile.

@@ -30,15 +30,32 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
             text("PRAGMA table_info(entity_suggestions)")
         ).fetchall()
         entity_suggestion_column_names = {str(row[1]) for row in entity_suggestion_columns}
+        app_config_columns = connection.execute(text("PRAGMA table_info(app_config)")).fetchall()
+        app_config_column_names = {str(row[1]) for row in app_config_columns}
 
     assert "llm_connections" in table_names
     assert "suggestion_runs" in table_names
     assert "suggestion_proposals" in table_names
     assert "suggestion_audit_events" in table_names
+    assert "app_config" in table_names
     assert "workflow_status" in entity_suggestion_column_names
     assert "workflow_error" in entity_suggestion_column_names
     assert "workflow_payload_json" in entity_suggestion_column_names
     assert "workflow_result_json" in entity_suggestion_column_names
     assert "workflow_updated_at" in entity_suggestion_column_names
+    assert "updates_enabled" in app_config_column_names
+    assert "update_repo_owner" in app_config_column_names
+    assert "update_repo_name" in app_config_column_names
+    assert "update_repo_branch" in app_config_column_names
+    assert "update_check_interval_minutes" in app_config_column_names
+    assert "last_checked_at" in app_config_column_names
+    assert "last_check_state" in app_config_column_names
+    assert "last_check_error" in app_config_column_names
+    assert "installed_commit_sha" in app_config_column_names
+    assert "latest_commit_sha" in app_config_column_names
+    assert "latest_commit_url" in app_config_column_names
+    assert "latest_commit_published_at" in app_config_column_names
+    assert "dismissed_commit_sha" in app_config_column_names
+    assert "dismissed_at" in app_config_column_names
 
     db.reset_engine_for_tests()
