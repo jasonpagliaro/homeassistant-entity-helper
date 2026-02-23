@@ -175,5 +175,8 @@ def test_settings_llm_preset_form_contract() -> None:
     assert "data-llm-feature-select" in template
     assert "data-llm-required-fields" in template
     assert "data-llm-test-draft" in template
+    assert "data-llm-temperature-help" in template
+    assert "data-llm-temperature-guidance" not in template
+    assert 'id="llm-temperature-suggestions"' in template
     assert "/api/llm/models" in template
     assert "/api/llm/test-draft" in template
