@@ -5947,6 +5947,7 @@ def create_app() -> FastAPI:
         run_id: int,
         request: Request,
         profile_id: int | None = Query(default=None),
+        include_proposals: bool = Query(default=True),
         session: Session = Depends(get_session),
     ) -> JSONResponse:
         active_profile = choose_active_profile(session, request, profile_id)
@@ -5957,22 +5958,43 @@ def create_app() -> FastAPI:
         if run is None or run.profile_id != active_profile.id:
             raise HTTPException(status_code=404, detail="Suggestion run not found")
 
-        proposals = list(
-            session.exec(
-                select(SuggestionProposal).where(
-                    SuggestionProposal.suggestion_run_id == run.id,
-                    or_(
-                        SuggestionProposal.concept_payload_json.is_not(None),
-                        SuggestionProposal.target_entity_id == INVALID_CONCEPT_RESPONSE_ENTITY_ID,
-                    ),
-                )
-            ).all()
+        proposal_filters = (
+            SuggestionProposal.suggestion_run_id == run.id,
+            or_(
+                SuggestionProposal.concept_payload_json.is_not(None),
+                SuggestionProposal.target_entity_id == INVALID_CONCEPT_RESPONSE_ENTITY_ID,
+            ),
         )
+        proposals: list[SuggestionProposal] = []
         proposal_counts: dict[str, int] = {}
         queue_counts: dict[str, int] = {}
-        for item in proposals:
-            proposal_counts[item.status] = proposal_counts.get(item.status, 0) + 1
-            queue_counts[item.queue_stage] = queue_counts.get(item.queue_stage, 0) + 1
+        if include_proposals:
+            proposals = list(
+                session.exec(select(SuggestionProposal).where(*proposal_filters)).all()
+            )
+            for item in proposals:
+                proposal_counts[item.status] = proposal_counts.get(item.status, 0) + 1
+                queue_counts[item.queue_stage] = queue_counts.get(item.queue_stage, 0) + 1
+        else:
+            proposal_count_rows = list(
+                session.exec(
+                    select(SuggestionProposal.status, func.count())
+                    .where(*proposal_filters)
+                    .group_by(SuggestionProposal.status)
+                ).all()
+            )
+            for status_value, count_value in proposal_count_rows:
+                proposal_counts[str(status_value)] = int(count_value)
+
+            queue_count_rows = list(
+                session.exec(
+                    select(SuggestionProposal.queue_stage, func.count())
+                    .where(*proposal_filters)
+                    .group_by(SuggestionProposal.queue_stage)
+                ).all()
+            )
+            for queue_stage_value, count_value in queue_count_rows:
+                queue_counts[str(queue_stage_value)] = int(count_value)
 
         summary_payload = safe_json_load(run.result_summary_json, {})
         if not isinstance(summary_payload, dict):
@@ -6008,30 +6030,34 @@ def create_app() -> FastAPI:
             },
             "proposal_counts": proposal_counts,
             "queue_counts": queue_counts,
-            "proposals": [
-                {
-                    "id": item.id,
-                    "config_snapshot_id": item.config_snapshot_id,
-                    "target_entity_id": item.target_entity_id,
-                    "status": item.status,
-                    "queue_stage": item.queue_stage,
-                    "title": str(safe_json_load(item.concept_payload_json, {}).get("title", "")),
-                    "concept_type": item.concept_type,
-                    "summary": item.summary,
-                    "confidence": item.confidence,
-                    "risk_level": item.risk_level,
-                    "impact_score": item.impact_score,
-                    "feasibility_score": item.feasibility_score,
-                    "novelty_score": item.novelty_score,
-                    "ranking_score": item.ranking_score,
-                    "ranking_breakdown": safe_json_load(item.ranking_breakdown_json, {}),
-                    "concept_payload": safe_json_load(item.concept_payload_json, {}),
-                    "validation_error": item.validation_error,
-                    "created_at": item.created_at.isoformat(),
-                    "updated_at": item.updated_at.isoformat(),
-                }
-                for item in proposals
-            ],
+            "proposals": (
+                [
+                    {
+                        "id": item.id,
+                        "config_snapshot_id": item.config_snapshot_id,
+                        "target_entity_id": item.target_entity_id,
+                        "status": item.status,
+                        "queue_stage": item.queue_stage,
+                        "title": str(safe_json_load(item.concept_payload_json, {}).get("title", "")),
+                        "concept_type": item.concept_type,
+                        "summary": item.summary,
+                        "confidence": item.confidence,
+                        "risk_level": item.risk_level,
+                        "impact_score": item.impact_score,
+                        "feasibility_score": item.feasibility_score,
+                        "novelty_score": item.novelty_score,
+                        "ranking_score": item.ranking_score,
+                        "ranking_breakdown": safe_json_load(item.ranking_breakdown_json, {}),
+                        "concept_payload": safe_json_load(item.concept_payload_json, {}),
+                        "validation_error": item.validation_error,
+                        "created_at": item.created_at.isoformat(),
+                        "updated_at": item.updated_at.isoformat(),
+                    }
+                    for item in proposals
+                ]
+                if include_proposals
+                else []
+            ),
         }
         return JSONResponse(payload)
 

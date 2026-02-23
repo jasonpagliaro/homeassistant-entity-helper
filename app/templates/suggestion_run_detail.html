@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="panel">
+<section
+  class="panel"
+  data-suggestion-refresh="detail"
+  data-profile-id="{{ active_profile.id if active_profile else '' }}"
+  data-run-id="{{ run.id }}"
+>
   <h2>Automation Suggestion Run #{{ run.id }}</h2>
   <div class="row gap-sm wrap">
     <a class="button" href="{{ back_url }}">Back to Runs</a>
@@ -17,20 +22,20 @@
   </div>
 
   <div class="detail-grid">
-    <div><strong>Status</strong></div><div><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></div>
+    <div><strong>Status</strong></div><div><span id="suggestion-run-status-chip" class="status-chip status-{{ run.status }}" data-run-status>{{ run.status }}</span></div>
     <div><strong>LLM Connection</strong></div><div>{{ connection.name if connection else '' }}</div>
     <div><strong>Type</strong></div><div>{{ run.idea_type }}</div>
     <div><strong>Mode</strong></div><div>{{ run.mode }}</div>
     <div><strong>Top K</strong></div><div>{{ run.top_k }}</div>
-    <div><strong>Targets</strong></div><div>{{ run.target_count }}</div>
-    <div><strong>Processed</strong></div><div>{{ run.processed_count }}</div>
-    <div><strong>Ranked</strong></div><div>{{ run.success_count }}</div>
-    <div><strong>Invalid</strong></div><div>{{ run.invalid_count }}</div>
-    <div><strong>Errors</strong></div><div>{{ run.error_count }}</div>
-    <div><strong>Error</strong></div><div>{{ run.error or '' }}</div>
+    <div><strong>Targets</strong></div><div id="suggestion-run-target-count" data-run-target>{{ run.target_count }}</div>
+    <div><strong>Processed</strong></div><div id="suggestion-run-processed-count" data-run-processed>{{ run.processed_count }}</div>
+    <div><strong>Ranked</strong></div><div id="suggestion-run-success-count" data-run-success>{{ run.success_count }}</div>
+    <div><strong>Invalid</strong></div><div id="suggestion-run-invalid-count" data-run-invalid>{{ run.invalid_count }}</div>
+    <div><strong>Errors</strong></div><div id="suggestion-run-error-count" data-run-error-count>{{ run.error_count }}</div>
+    <div><strong>Error</strong></div><div id="suggestion-run-error" data-run-error>{{ run.error or '' }}</div>
     <div><strong>Created At</strong></div><div>{{ run.created_at }}</div>
-    <div><strong>Started At</strong></div><div>{{ run.started_at or '' }}</div>
-    <div><strong>Finished At</strong></div><div>{{ run.finished_at or '' }}</div>
+    <div><strong>Started At</strong></div><div id="suggestion-run-started-at" data-run-started-at>{{ run.started_at or '' }}</div>
+    <div><strong>Finished At</strong></div><div id="suggestion-run-finished-at" data-run-finished-at>{{ run.finished_at or '' }}</div>
   </div>
 
   <h3>Summary</h3>
@@ -80,9 +85,9 @@
     <textarea id="debug-report-text" hidden>{{ debug_report_text }}</textarea>
   {% endif %}
 
-  <div class="detail-grid">
+  <div class="detail-grid" data-run-stage-counts>
     {% for stage_name, count in stage_counts.items() %}
-      <div><strong>{{ stage_name }}</strong></div><div>{{ count }}</div>
+      <div><strong>{{ stage_name }}</strong></div><div data-stage-count="{{ stage_name }}">{{ count }}</div>
     {% endfor %}
   </div>
 
