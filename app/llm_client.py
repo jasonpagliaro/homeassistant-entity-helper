@@ -178,6 +178,88 @@ def _retry_body_for_compat(
     return None
 
 
+def _requested_output_tokens(request_body: dict[str, Any]) -> int:
+    if isinstance(request_body.get("max_completion_tokens"), (int, float)):
+        return int(request_body["max_completion_tokens"])
+    if isinstance(request_body.get("max_tokens"), (int, float)):
+        return int(request_body["max_tokens"])
+    return 0
+
+
+def _retry_body_with_higher_output_tokens(request_body: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    current_limit = _requested_output_tokens(request_body)
+    if current_limit < 1:
+        return None
+
+    increased_limit = min(max(current_limit * 2, current_limit + 600), 4096)
+    if increased_limit <= current_limit:
+        return None
+
+    retry_body = dict(request_body)
+    if "max_completion_tokens" in retry_body and "max_tokens" not in retry_body:
+        retry_body["max_completion_tokens"] = increased_limit
+    else:
+        retry_body["max_tokens"] = increased_limit
+    return retry_body, "increase_output_tokens_for_empty_or_truncated_response"
+
+
+def _extract_message_content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text_value = item.get("text")
+                if isinstance(text_value, str):
+                    parts.append(text_value)
+                    continue
+                nested_text = item.get("content")
+                if isinstance(nested_text, str):
+                    parts.append(nested_text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return ""
+
+
+def _finish_reason_is_length(choice: dict[str, Any]) -> bool:
+    finish_reason = choice.get("finish_reason")
+    return isinstance(finish_reason, str) and finish_reason.strip().lower() == "length"
+
+
+def _completion_tokens(payload: dict[str, Any]) -> int:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    completion_tokens = usage.get("completion_tokens")
+    if isinstance(completion_tokens, (int, float)):
+        return int(completion_tokens)
+    return 0
+
+
+def _should_retry_for_empty_or_truncated_content(
+    *,
+    request_body: dict[str, Any],
+    payload: dict[str, Any],
+    first_choice: dict[str, Any],
+    content_text: str,
+) -> bool:
+    if _finish_reason_is_length(first_choice):
+        return True
+
+    requested_tokens = _requested_output_tokens(request_body)
+    if requested_tokens > 0 and _completion_tokens(payload) >= requested_tokens:
+        return True
+
+    stripped = content_text.strip()
+    if not stripped:
+        return False
+    if not stripped.endswith("}"):
+        return True
+    return False
+
+
 def _extract_model_id(item: Any) -> str | None:
     if isinstance(item, str):
         candidate = item.strip()
@@ -213,6 +295,25 @@ def _response_body_for_debug(response: httpx.Response) -> Any:
     return parsed
 
 
+def _format_request_error(exc: httpx.RequestError) -> str:
+    exc_name = exc.__class__.__name__
+    detail = str(exc).strip()
+    request_url = ""
+    request = getattr(exc, "request", None)
+    if isinstance(request, httpx.Request):
+        request_url = str(request.url)
+
+    if not detail:
+        if isinstance(exc, httpx.TimeoutException):
+            detail = "request timed out"
+        else:
+            detail = "request failed"
+
+    if request_url:
+        return f"{exc_name}: {detail} ({request_url})"
+    return f"{exc_name}: {detail}"
+
+
 class OpenAICompatibleLLMClient:
     def __init__(self, settings: LLMSettings) -> None:
         self.settings = settings
@@ -229,8 +330,14 @@ class OpenAICompatibleLLMClient:
                     headers[cleaned_key] = cleaned_value
         return headers
 
-    async def chat_json(self, system_prompt: str, user_payload: dict[str, Any]) -> dict[str, Any]:
-        return await self._complete_json(system_prompt, user_payload)
+    async def chat_json(
+        self,
+        system_prompt: str,
+        user_payload: dict[str, Any],
+        *,
+        debug_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._complete_json(system_prompt, user_payload, debug_context=debug_context)
 
     async def test_connection(self) -> dict[str, Any]:
         payload = await self._complete_json(
@@ -365,42 +472,72 @@ class OpenAICompatibleLLMClient:
                         if isinstance(attempts, list) and attempts:
                             attempts[-1]["response_status"] = response.status_code
                             attempts[-1]["response_body"] = _response_body_for_debug(response)
-                    break
+
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise LLMClientError("Unexpected response format from LLM provider.")
+
+                    choices = payload.get("choices")
+                    if not isinstance(choices, list) or not choices:
+                        raise LLMClientError("LLM provider response missing choices.")
+                    first_choice = choices[0]
+                    if not isinstance(first_choice, dict):
+                        raise LLMClientError("Unexpected choice format from LLM provider.")
+                    message = first_choice.get("message")
+                    if not isinstance(message, dict):
+                        raise LLMClientError("LLM response choice missing message.")
+                    content = message.get("content")
+                    content_text = _extract_message_content_text(content)
+                    if not content_text.strip():
+                        retry_data = _retry_body_with_higher_output_tokens(request_body)
+                        should_retry = _should_retry_for_empty_or_truncated_content(
+                            request_body=request_body,
+                            payload=payload,
+                            first_choice=first_choice,
+                            content_text=content_text,
+                        )
+                        if should_retry and retry_data is not None and attempt_number < max_attempts:
+                            request_body, retry_reason = retry_data
+                            continue
+                        raise LLMClientError("LLM message content is empty.")
+
+                    try:
+                        decoded = json.loads(content_text)
+                    except json.JSONDecodeError as exc:
+                        retry_data = _retry_body_with_higher_output_tokens(request_body)
+                        should_retry = _should_retry_for_empty_or_truncated_content(
+                            request_body=request_body,
+                            payload=payload,
+                            first_choice=first_choice,
+                            content_text=content_text,
+                        )
+                        if should_retry and retry_data is not None and attempt_number < max_attempts:
+                            request_body, retry_reason = retry_data
+                            continue
+                        raise LLMClientError("LLM returned invalid JSON content.") from exc
+
+                    if not isinstance(decoded, dict):
+                        raise LLMClientError("LLM JSON response must be an object.")
+                    return decoded
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             raise LLMClientError(f"LLM provider returned HTTP {status}.") from exc
         except httpx.RequestError as exc:
+            request_error_detail = _format_request_error(exc)
             if debug_context is not None:
                 attempts = debug_context.setdefault("attempts", [])
-                if isinstance(attempts, list):
-                    attempts.append({"network_error": str(exc)})
-            raise LLMClientError(f"Unable to reach LLM provider: {exc}") from exc
-
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise LLMClientError("Unexpected response format from LLM provider.")
-
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise LLMClientError("LLM provider response missing choices.")
-        first_choice = choices[0]
-        if not isinstance(first_choice, dict):
-            raise LLMClientError("Unexpected choice format from LLM provider.")
-        message = first_choice.get("message")
-        if not isinstance(message, dict):
-            raise LLMClientError("LLM response choice missing message.")
-        content = message.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise LLMClientError("LLM message content is empty.")
-
-        try:
-            decoded = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise LLMClientError("LLM returned invalid JSON content.") from exc
-
-        if not isinstance(decoded, dict):
-            raise LLMClientError("LLM JSON response must be an object.")
-        return decoded
+                if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict):
+                    attempts[-1]["network_error"] = request_error_detail
+                    attempts[-1]["network_error_type"] = exc.__class__.__name__
+                elif isinstance(attempts, list):
+                    attempts.append(
+                        {
+                            "network_error": request_error_detail,
+                            "network_error_type": exc.__class__.__name__,
+                        }
+                    )
+            raise LLMClientError(f"Unable to reach LLM provider: {request_error_detail}") from exc
+        raise LLMClientError("Unexpected completion flow termination.")
 
     async def suggest_entity_metadata(self, payload: dict[str, Any]) -> dict[str, Any]:
         system_prompt = (

@@ -274,6 +274,13 @@ class SuggestionRun(SQLModel, table=True):
     profile_id: int = Field(foreign_key="profiles.id", index=True)
     llm_connection_id: int = Field(foreign_key="llm_connections.id", index=True)
     config_sync_run_id: Optional[int] = Field(default=None, foreign_key="config_sync_runs.id", index=True)
+    run_kind: str = Field(default="concept_v2", max_length=32, index=True)
+    idea_type: str = Field(default="general", max_length=64)
+    custom_intent: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    mode: str = Field(default="standard", max_length=32)
+    top_k: int = Field(default=10, ge=1, le=25)
+    include_existing: bool = Field(default=True)
+    include_new: bool = Field(default=True)
     status: str = Field(default="queued", max_length=32, index=True)
     target_count: int = Field(default=0, ge=0)
     processed_count: int = Field(default=0, ge=0)
@@ -315,6 +322,20 @@ class SuggestionProposal(SQLModel, table=True):
     summary: Optional[str] = Field(default=None, max_length=512)
     confidence: Optional[float] = Field(default=None)
     risk_level: Optional[str] = Field(default=None, max_length=32)
+    concept_payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    concept_type: Optional[str] = Field(default=None, max_length=64)
+    impact_score: Optional[float] = Field(default=None)
+    feasibility_score: Optional[float] = Field(default=None)
+    novelty_score: Optional[float] = Field(default=None)
+    ranking_score: Optional[float] = Field(default=None, index=True)
+    ranking_breakdown_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    duplicate_fingerprint: Optional[str] = Field(default=None, max_length=128, index=True)
+    queue_stage: str = Field(default="suggested", max_length=32, index=True)
+    queue_note: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    queue_updated_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     proposed_patch_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     verification_steps_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     raw_response_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
@@ -339,6 +360,72 @@ class SuggestionAuditEvent(SQLModel, table=True):
     event_type: str = Field(index=True, max_length=64)
     actor: str = Field(default="system", max_length=64)
     payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class SuggestionGeneration(SQLModel, table=True):
+    __tablename__ = "suggestion_generations"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    proposal_id: int = Field(foreign_key="suggestion_proposals.id", index=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    llm_connection_id: int = Field(foreign_key="llm_connections.id", index=True)
+    mode: str = Field(default="auto", max_length=32, index=True)
+    status: str = Field(default="running", max_length=32, index=True)
+    optional_instruction: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    current_step: int = Field(default=0, ge=0)
+    pending_question_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    planning_answers_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    final_yaml_text: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    final_structured_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    finished_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class SuggestionGenerationRevision(SQLModel, table=True):
+    __tablename__ = "suggestion_generation_revisions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    generation_id: int = Field(foreign_key="suggestion_generations.id", index=True)
+    revision_index: int = Field(default=0, ge=0, index=True)
+    source: str = Field(default="initial", max_length=32, index=True)
+    prompt_text: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    yaml_text: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    structured_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    change_summary: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class SuggestionSubmissionEvent(SQLModel, table=True):
+    __tablename__ = "suggestion_submission_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    generation_id: int = Field(foreign_key="suggestion_generations.id", index=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    config_key: str = Field(max_length=255, index=True)
+    operation: str = Field(max_length=32, index=True)
+    previous_config_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    request_payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    response_payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    status: str = Field(default="failed", max_length=32, index=True)
+    error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     created_at: datetime = Field(
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=False),

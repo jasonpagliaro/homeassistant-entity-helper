@@ -486,6 +486,11 @@ button.danger {
   border: 1px solid #f6b5b5;
 }
 
+.flash-warning {
+  background: #fff4d6;
+  border: 1px solid #f0cc7a;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -646,6 +651,92 @@ pre {
   padding: 1rem;
   border-radius: 8px;
   overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.pretty-block {
+  background: #f7fbff;
+  color: var(--ink);
+  border: 1px solid #c8d7e8;
+}
+
+.clean-list {
+  margin: 0.25rem 0 0.85rem;
+  padding-left: 1.1rem;
+}
+
+.clean-list li {
+  margin: 0.35rem 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.clean-list code {
+  background: #eef2f6;
+  border: 1px solid #d6dde5;
+  border-radius: 6px;
+  color: #1f2d3a;
+  padding: 0.08rem 0.35rem;
+}
+
+.suggestion-action-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.8rem;
+  margin-top: 0.75rem;
+}
+
+.metric-disclosure {
+  margin: 0.55rem 0 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0.55rem 0.75rem;
+}
+
+.metric-disclosure > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink);
+  user-select: none;
+}
+
+.metric-disclosure > summary:hover {
+  color: #0b5d57;
+}
+
+.metric-disclosure .metric-grid {
+  margin-top: 0.65rem;
+  margin-bottom: 0.45rem;
+}
+
+.metric-disclosure h5 {
+  margin: 0.35rem 0 0.35rem;
+}
+
+.suggestion-action-group {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 0.8rem;
+}
+
+.suggestion-action-group h5 {
+  margin: 0 0 0.65rem;
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.suggestion-action-group form {
+  margin-bottom: 0;
+}
+
+.button-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .detail-grid {

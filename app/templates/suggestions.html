@@ -9,28 +9,64 @@
       action="/profiles/{{ active_profile.id }}/suggestions/runs"
       class="grid-form compact"
       data-sync-modal="true"
-      data-sync-modal-label="Queueing automation suggestions..."
+      data-sync-modal-label="Queueing concept suggestions..."
     >
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=active_profile.id) }}" />
-      <input type="hidden" name="llm_connection_id" value="{{ active_connection.id }}" />
+
       <label>
-        Search (optional)
-        <input type="text" name="q" placeholder="entity/name/summary..." />
+        Automation Type
+        <select name="idea_type">
+          <option value="general">General</option>
+          <option value="comfort">Comfort</option>
+          <option value="energy">Energy</option>
+          <option value="security">Security</option>
+          <option value="safety">Safety</option>
+          <option value="maintenance">Maintenance</option>
+          <option value="surprise_me">Surprise Me</option>
+          <option value="obscure_automations">Obscure Automations</option>
+        </select>
       </label>
+
       <label>
-        Max Targets
-        <input type="number" name="max_targets" min="1" max="25" value="25" />
+        Custom Intent (optional)
+        <input type="text" name="custom_intent" placeholder="Example: reduce nighttime nuisance alerts" />
       </label>
+
+      <label>
+        Ranking Mode
+        <select name="mode">
+          <option value="standard">Value + Feasibility</option>
+          <option value="surprise">Surprise</option>
+          <option value="obscure">Obscure</option>
+        </select>
+      </label>
+
+      <label>
+        Top Suggestions
+        <input type="number" name="top_k" min="1" max="25" value="{{ default_top_k }}" />
+      </label>
+
+      <label>
+        <input type="checkbox" name="include_existing" value="on" checked />
+        Include improvements to existing automations
+      </label>
+
+      <label>
+        <input type="checkbox" name="include_new" value="on" checked />
+        Include brand-new automation ideas
+      </label>
+
       <button
         type="submit"
-        data-tooltip="Queue a new automation suggestion run with the selected limits."
+        data-tooltip="Generate ranked concept suggestions without YAML."
       >
-        Queue Suggestion Run
+        Generate Concept Suggestions
       </button>
     </form>
+    <p><a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id) }}">Open Concept Queue</a></p>
   {% elif active_profile %}
-    <p>No enabled LLM connection for this profile. Configure one on the <a href="/settings?{{ build_query(profile_id=active_profile.id) }}">Profiles page</a>.</p>
+    <p>No enabled default LLM connection for this profile. Configure one on the <a href="/settings?{{ build_query(profile_id=active_profile.id) }}">Profiles page</a>.</p>
   {% endif %}
 
   <form method="get" action="/suggestions" class="grid-form compact">
@@ -52,17 +88,18 @@
   </form>
 
   {% if active_profile and runs %}
-    <p>{{ runs|length }} runs.</p>
+    <p>Showing {{ runs|length }} of {{ total_runs }} runs.</p>
     <div class="table-wrap">
       <table class="data-table">
         <thead>
           <tr>
             <th>Run</th>
             <th>Status</th>
+            <th>Type</th>
+            <th>Mode</th>
             <th>Progress</th>
             <th>Results</th>
             <th>Created</th>
-            <th>Finished</th>
             <th>Actions</th>
           </tr>
         </thead>
@@ -71,10 +108,11 @@
           <tr>
             <td data-label="Run">#{{ run.id }}</td>
             <td data-label="Status"><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></td>
+            <td data-label="Type">{{ run.idea_type }}</td>
+            <td data-label="Mode">{{ run.mode }}</td>
             <td data-label="Progress">{{ run.processed_count }} / {{ run.target_count }}</td>
-            <td data-label="Results">{{ run.success_count }} proposed, {{ run.invalid_count }} invalid, {{ run.error_count }} errors</td>
+            <td data-label="Results">{{ run.success_count }} ranked, {{ run.invalid_count }} invalid</td>
             <td data-label="Created">{{ run.created_at }}</td>
-            <td data-label="Finished">{{ run.finished_at or '' }}</td>
             <td data-label="Actions">
               <a href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id) }}">Details</a>
             </td>
@@ -82,6 +120,17 @@
           {% endfor %}
         </tbody>
       </table>
+    </div>
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }} ({{ page_size }} per page)</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id, status=status, page=page-1) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id, status=status, page=page+1) }}">Next</a>
+        {% endif %}
+      </div>
     </div>
   {% elif active_profile %}
     <p>No suggestion runs yet for this profile.</p>

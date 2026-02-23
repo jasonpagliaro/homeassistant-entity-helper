@@ -21,6 +21,7 @@ from app.models import (
     LLMConnection,
     Profile,
     SuggestionProposal,
+    SuggestionRun,
     utcnow,
 )
 
@@ -916,21 +917,25 @@ def test_llm_connection_and_automation_suggestion_run_flow(
         return {
             "suggestions": [
                 {
+                    "title": "Evening mode safety guard",
+                    "summary": "Improve evening mode by adding occupancy and quiet-hour safeguards.",
+                    "concept_type": "safety",
+                    "target_kind": "existing_automation",
                     "target_entity_id": "automation.evening_mode",
-                    "summary": "Add a guard condition before turning on lights.",
+                    "involved_entities": ["person.jason", "light.kitchen"],
+                    "impact_score": 0.82,
+                    "feasibility_score": 0.88,
+                    "novelty_score": 0.41,
                     "confidence": 0.81,
                     "risk_level": "low",
-                    "proposed_patch": [
-                        {
-                            "op": "replace",
-                            "path": "/description",
-                            "value": "Updated by suggestion engine",
-                        }
+                    "prerequisites": [
+                        "Evening mode automation is enabled.",
                     ],
-                    "verification_steps": [
+                    "verification_outline": [
                         "Run the automation manually in Home Assistant.",
                         "Confirm light.kitchen state changes as expected.",
                     ],
+                    "rationale": "This reduces accidental triggers at night.",
                 }
             ],
             "provider_debug": "token=key-123",
@@ -1086,6 +1091,229 @@ def test_missing_llm_key_and_disabled_connection_are_blocked(
     )
     assert queue_response.status_code == 200
     assert "No enabled LLM connection configured for this profile." in queue_response.text
+
+
+def test_suggestion_run_failure_exposes_debug_diagnostics(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="debuglab")
+
+    create_connection = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Debug LLM",
+            "base_url": "http://localhost:11434/v1",
+            "model": "llama3.1",
+            "api_key_env_var": "TEST_LLM_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_connection.status_code == 303
+    monkeypatch.setenv("TEST_LLM_KEY", "key-123")
+    seed_config_snapshot(profile_id)
+
+    async def fake_chat_json(_: Any, __: str, ___: dict[str, Any]) -> dict[str, Any]:
+        raise LLMClientError("LLM message content is empty.")
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.chat_json", fake_chat_json)
+
+    queue_response = client.post(
+        f"/profiles/{profile_id}/suggestions/runs",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/suggestions?profile_id={profile_id}",
+            "idea_type": "obscure_automations",
+            "mode": "obscure",
+            "top_k": "2",
+            "include_existing": "on",
+            "include_new": "on",
+        },
+        follow_redirects=False,
+    )
+    assert queue_response.status_code == 303
+    location = queue_response.headers.get("location", "")
+    run_match = re.search(r"/suggestions/(\d+)\?", location)
+    assert run_match is not None
+    run_id = int(run_match.group(1))
+
+    run_payload = wait_for_suggestion_run(client, profile_id, run_id)
+    assert run_payload["run"]["status"] == "failed"
+    debug_payload = run_payload["run"]["debug"]
+    assert debug_payload["error"]["kind"] == "llm_empty_message"
+    assert debug_payload["error"]["provider_message"] == "LLM message content is empty."
+    assert "recommended_steps" in debug_payload["error"]
+    assert debug_payload["llm_connection"]["model"] == "llama3.1"
+
+    detail_response = client.get(f"/suggestions/{run_id}?profile_id={profile_id}")
+    assert detail_response.status_code == 200
+    assert "Debug Diagnostics" in detail_response.text
+    assert "Recommended Next Steps" in detail_response.text
+    assert "Run Audit Events" in detail_response.text
+    assert "Copy Debug JSON" in detail_response.text
+    assert "Copy Full Debug Report" in detail_response.text
+    assert "Download Debug Report" in detail_response.text
+
+    debug_report_response = client.get(f"/suggestions/{run_id}/debug.txt?profile_id={profile_id}")
+    assert debug_report_response.status_code == 200
+    assert debug_report_response.headers["content-type"].startswith("text/plain")
+    report_text = debug_report_response.text
+    assert "HA Entity Vault Suggestion Run Debug Report" in report_text
+    assert "Debug JSON" in report_text
+    assert "llm_empty_message" in report_text
+
+
+def test_suggestion_run_failure_classifies_timeout(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="timeoutlab")
+
+    create_connection = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Timeout LLM",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-5.2",
+            "api_key_env_var": "TEST_LLM_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_connection.status_code == 303
+    monkeypatch.setenv("TEST_LLM_KEY", "key-123")
+    seed_config_snapshot(profile_id)
+
+    async def fake_chat_json(_: Any, __: str, ___: dict[str, Any]) -> dict[str, Any]:
+        raise LLMClientError(
+            "Unable to reach LLM provider: ReadTimeout: request timed out (https://api.openai.com/v1/chat/completions)"
+        )
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.chat_json", fake_chat_json)
+
+    queue_response = client.post(
+        f"/profiles/{profile_id}/suggestions/runs",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/suggestions?profile_id={profile_id}",
+            "idea_type": "obscure_automations",
+            "mode": "obscure",
+            "top_k": "2",
+            "include_existing": "on",
+            "include_new": "on",
+        },
+        follow_redirects=False,
+    )
+    assert queue_response.status_code == 303
+    location = queue_response.headers.get("location", "")
+    run_match = re.search(r"/suggestions/(\d+)\?", location)
+    assert run_match is not None
+    run_id = int(run_match.group(1))
+
+    run_payload = wait_for_suggestion_run(client, profile_id, run_id)
+    assert run_payload["run"]["status"] == "failed"
+    debug_payload = run_payload["run"]["debug"]
+    assert debug_payload["error"]["kind"] == "llm_timeout"
+    assert "Increase timeout seconds" in " ".join(debug_payload["error"]["recommended_steps"])
+
+
+def test_suggestions_page_includes_failed_runs_and_paginates(
+    client: TestClient,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="pagerlab")
+
+    create_connection = client.post(
+        f"/profiles/{profile_id}/llm-connections",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/settings?profile_id={profile_id}",
+            "name": "Pager LLM",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-5.2",
+            "api_key_env_var": "TEST_LLM_KEY",
+            "timeout_seconds": "20",
+            "temperature": "0.2",
+            "max_output_tokens": "900",
+            "extra_headers_json": "",
+            "is_enabled": "on",
+            "is_default": "on",
+        },
+        follow_redirects=False,
+    )
+    assert create_connection.status_code == 303
+    connection_id = get_llm_connection_id(profile_id, "Pager LLM")
+
+    with Session(db.get_engine()) as session:
+        for idx in range(12):
+            run = SuggestionRun(
+                profile_id=profile_id,
+                llm_connection_id=connection_id,
+                config_sync_run_id=None,
+                run_kind="concept_v2",
+                idea_type="general",
+                custom_intent=None,
+                mode="standard",
+                top_k=10,
+                include_existing=True,
+                include_new=True,
+                status="failed",
+                target_count=0,
+                processed_count=0,
+                success_count=0,
+                invalid_count=0,
+                error_count=1,
+                error=f"provider_error:run_{idx}",
+                context_hash=None,
+                filters_json=json.dumps({}),
+                result_summary_json=json.dumps({"error_count": 1}),
+                started_at=None,
+                finished_at=None,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            session.add(run)
+            session.flush()
+        session.commit()
+
+    first_page = client.get(f"/suggestions?profile_id={profile_id}")
+    assert first_page.status_code == 200
+    assert "Showing 10 of 12 runs." in first_page.text
+    assert "Page 1 of 2 (10 per page)" in first_page.text
+
+    first_page_run_ids = [int(item) for item in re.findall(r'<td data-label="Run">#(\d+)</td>', first_page.text)]
+    assert len(first_page_run_ids) == 10
+    assert first_page_run_ids == sorted(first_page_run_ids, reverse=True)
+    assert min(first_page_run_ids) > 2
+
+    second_page = client.get(f"/suggestions?profile_id={profile_id}&page=2")
+    assert second_page.status_code == 200
+    assert "Page 2 of 2 (10 per page)" in second_page.text
+    second_page_run_ids = [int(item) for item in re.findall(r'<td data-label="Run">#(\d+)</td>', second_page.text)]
+    assert len(second_page_run_ids) == 2
+    assert second_page_run_ids == sorted(second_page_run_ids, reverse=True)
+    assert max(second_page_run_ids) < min(first_page_run_ids)
 
 
 def test_llm_presets_api_returns_expected_catalog(client: TestClient) -> None:

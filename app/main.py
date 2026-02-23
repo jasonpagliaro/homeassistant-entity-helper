@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import difflib
 import hashlib
+import inspect
 import io
 import json
 import logging
@@ -17,6 +19,7 @@ from time import perf_counter
 from typing import Any, TypedDict
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+import yaml  # type: ignore[import-untyped]
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -55,13 +58,19 @@ from app.models import (
     LLMConnection,
     Profile,
     SuggestionAuditEvent,
+    SuggestionGeneration,
+    SuggestionGenerationRevision,
     SuggestionProposal,
     SuggestionRun,
+    SuggestionSubmissionEvent,
     SyncRun,
     utcnow,
 )
-from app.suggestion_context import build_automation_context, build_known_entity_ids
-from app.suggestion_schema import validate_suggestion_payload
+from app.suggestion_context import (
+    build_concept_suggestion_context,
+    build_known_entity_ids,
+)
+from app.suggestion_schema import rank_concept_suggestions, validate_concept_suggestion_payload
 from app.suggestion_worker import SuggestionWorker
 from app.suggestions import (
     ACTIONABLE_SUGGESTION_DOMAINS,
@@ -91,7 +100,55 @@ LLM_PROVIDER_KINDS = {"openai_compatible"}
 SUGGESTION_RUN_STATUSES = {"queued", "running", "succeeded", "failed"}
 SUGGESTION_PROPOSAL_STATUSES = {"proposed", "accepted", "rejected", "invalid"}
 SUGGESTION_MAX_TARGETS_PER_RUN = 25
+SUGGESTION_RUNS_PAGE_SIZE = 10
 SUGGESTION_MAX_PATCH_OPS = 12
+SUGGESTION_QUEUE_STAGES = {
+    "suggested",
+    "queued",
+    "specifying",
+    "ready_for_yaml",
+    "yaml_generated",
+    "submitted",
+    "archived",
+}
+SUGGESTION_GENERATION_MODES = {"auto", "advanced"}
+SUGGESTION_GENERATION_STATUSES = {
+    "running",
+    "awaiting_user",
+    "completed",
+    "submitted",
+    "failed",
+    "cancelled",
+}
+SUGGESTION_IDEA_TYPES = {
+    "general",
+    "comfort",
+    "energy",
+    "security",
+    "safety",
+    "maintenance",
+    "surprise_me",
+    "obscure_automations",
+}
+INVALID_CONCEPT_RESPONSE_ENTITY_ID = "automation.invalid_response"
+ADVANCED_GENERATION_STEPS: tuple[dict[str, str], ...] = (
+    {
+        "key": "goal",
+        "question": "What is the primary goal and expected outcome for this automation?",
+    },
+    {
+        "key": "constraints",
+        "question": "What constraints should be enforced (quiet hours, notification limits, entity exclusions)?",
+    },
+    {
+        "key": "edge_cases",
+        "question": "What edge cases should be handled to avoid unwanted triggers or loops?",
+    },
+    {
+        "key": "validation",
+        "question": "How should this be validated in Home Assistant before enabling it broadly?",
+    },
+)
 SUGGESTION_WORKER: SuggestionWorker | None = None
 API_KEY_ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LIKELY_API_KEY_PREFIXES = ("sk-", "sk_proj_", "sk-svcacct-", "gsk_", "AIza", "xai-", "ak-")
@@ -1080,6 +1137,648 @@ def sanitize_payload(payload: Any, secrets: list[str]) -> Any:
     return payload
 
 
+def normalize_idea_type(raw_value: str) -> str:
+    value = raw_value.strip().lower()
+    if value in SUGGESTION_IDEA_TYPES:
+        return value
+    return "general"
+
+
+def normalize_concept_mode(raw_value: str, *, idea_type: str) -> str:
+    value = raw_value.strip().lower()
+    if idea_type == "surprise_me":
+        return "surprise"
+    if idea_type == "obscure_automations":
+        return "obscure"
+    if value in {"standard", "surprise", "obscure"}:
+        return value
+    return "standard"
+
+
+def parse_checkbox_value(raw_value: str) -> bool:
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_queue_stage(raw_value: str) -> str:
+    value = raw_value.strip().lower()
+    if value in SUGGESTION_QUEUE_STAGES:
+        return value
+    return "suggested"
+
+
+def concept_payload_from_proposal(proposal: SuggestionProposal) -> dict[str, Any]:
+    payload = safe_json_load(proposal.concept_payload_json, {})
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def concept_display_title(proposal: SuggestionProposal) -> str:
+    payload = concept_payload_from_proposal(proposal)
+    title = str(payload.get("title", "")).strip()
+    if title:
+        return title
+    summary = str(proposal.summary or "").strip()
+    if summary:
+        return summary[:120]
+    return proposal.target_entity_id
+
+
+def proposal_has_concept_payload(proposal: SuggestionProposal) -> bool:
+    payload = concept_payload_from_proposal(proposal)
+    return bool(str(payload.get("title", "")).strip() and str(payload.get("summary", "")).strip())
+
+
+def clamp_score_01(raw_value: Any) -> float | None:
+    if isinstance(raw_value, (int, float)):
+        return max(0.0, min(1.0, float(raw_value)))
+    return None
+
+
+def format_score_out_of_ten(raw_value: Any) -> str:
+    normalized = clamp_score_01(raw_value)
+    if normalized is None:
+        return ""
+    return f"{normalized * 10.0:.1f} / 10.0"
+
+
+def concept_score_tooltips() -> dict[str, str]:
+    return {
+        "confidence": (
+            "Experimental metric. Model confidence in this concept being correct and actionable for your environment."
+        ),
+        "impact": (
+            "Experimental metric. Expected practical value if implemented (comfort, reliability, safety, time/energy savings)."
+        ),
+        "feasibility": (
+            "Experimental metric. How easy it should be to implement with available entities and typical Home Assistant features."
+        ),
+        "novelty": (
+            "Experimental metric. How different this idea is from common/standard automations in your current setup."
+        ),
+        "ranking": (
+            "Experimental metric. Weighted overall score used for ordering concepts after score sanity adjustment. "
+            "Standard mode weights: impact 45%, feasibility 35%, confidence 10%, novelty 10%. "
+            "Displayed scores are adjusted by confidence, risk level, and concept complexity/evidence."
+        ),
+    }
+
+
+def clip_debug_text(raw_value: Any, *, max_length: int = 280) -> str:
+    text = str(raw_value or "").strip()
+    if len(text) <= max_length:
+        return text
+    if max_length <= 3:
+        return text[:max_length]
+    return f"{text[: max_length - 3]}..."
+
+
+def summarize_concept_context_for_debug(context_payload: dict[str, Any]) -> dict[str, Any]:
+    latest_runs = context_payload.get("latest_runs")
+    if not isinstance(latest_runs, dict):
+        latest_runs = {}
+    entity_domain_counts = context_payload.get("entity_domain_counts")
+    existing_automations = context_payload.get("existing_automations")
+    scripts = context_payload.get("scripts")
+    scenes = context_payload.get("scenes")
+    recent_concepts = context_payload.get("recent_concepts")
+    recent_submissions = context_payload.get("recent_submissions")
+    entity_samples = context_payload.get("entity_samples")
+    return {
+        "entity_sync_run_id": latest_runs.get("entity_sync_run_id"),
+        "config_sync_run_id": latest_runs.get("config_sync_run_id"),
+        "entity_sample_count": len(entity_samples) if isinstance(entity_samples, list) else 0,
+        "entity_domain_count": len(entity_domain_counts) if isinstance(entity_domain_counts, dict) else 0,
+        "automation_count": len(existing_automations) if isinstance(existing_automations, list) else 0,
+        "script_count": len(scripts) if isinstance(scripts, list) else 0,
+        "scene_count": len(scenes) if isinstance(scenes, list) else 0,
+        "recent_concept_count": len(recent_concepts) if isinstance(recent_concepts, list) else 0,
+        "recent_submission_count": len(recent_submissions) if isinstance(recent_submissions, list) else 0,
+    }
+
+
+def summarize_llm_response_for_debug(response_payload: Any) -> dict[str, Any]:
+    if isinstance(response_payload, str):
+        return {"payload_preview": clip_debug_text(response_payload)}
+    if not isinstance(response_payload, dict):
+        return {}
+
+    summary: dict[str, Any] = {}
+    choices = response_payload.get("choices")
+    if isinstance(choices, list):
+        summary["choice_count"] = len(choices)
+        if choices and isinstance(choices[0], dict):
+            first_choice = choices[0]
+            finish_reason = as_clean_string(first_choice.get("finish_reason"))
+            if finish_reason:
+                summary["finish_reason"] = finish_reason
+            message = first_choice.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                summary["message_content_type"] = type(content).__name__
+                if isinstance(content, str):
+                    stripped = content.strip()
+                    summary["message_content_length"] = len(stripped)
+                    if stripped:
+                        summary["message_content_preview"] = clip_debug_text(stripped, max_length=220)
+                refusal = as_clean_string(message.get("refusal"))
+                if refusal:
+                    summary["refusal"] = clip_debug_text(refusal, max_length=220)
+
+    usage = response_payload.get("usage")
+    if isinstance(usage, dict):
+        usage_summary: dict[str, int] = {}
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(field)
+            if isinstance(value, (int, float)):
+                usage_summary[field] = int(value)
+        if usage_summary:
+            summary["usage"] = usage_summary
+
+    error = response_payload.get("error")
+    if isinstance(error, dict):
+        summary["provider_error"] = {
+            "type": as_clean_string(error.get("type")),
+            "code": as_clean_string(error.get("code")),
+            "message": clip_debug_text(error.get("message"), max_length=220),
+        }
+
+    if not summary:
+        summary["payload_preview"] = clip_debug_text(safe_json_dump(response_payload))
+    return summary
+
+
+def summarize_llm_debug_context(debug_payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(debug_payload, dict):
+        return {}
+
+    summary: dict[str, Any] = {}
+    endpoint = as_clean_string(debug_payload.get("endpoint"))
+    if endpoint:
+        summary["endpoint"] = endpoint
+
+    attempts = debug_payload.get("attempts")
+    if not isinstance(attempts, list):
+        return summary
+
+    summary["attempt_count"] = len(attempts)
+    retry_reasons: list[str] = []
+    latest_attempt: dict[str, Any] | None = None
+    for item in attempts:
+        if not isinstance(item, dict):
+            continue
+        latest_attempt = item
+        retry_reason = as_clean_string(item.get("retry_reason"))
+        if retry_reason:
+            retry_reasons.append(retry_reason)
+    if retry_reasons:
+        summary["retry_reasons"] = retry_reasons
+
+    if latest_attempt:
+        response_status = latest_attempt.get("response_status")
+        if isinstance(response_status, (int, float)):
+            summary["last_response_status"] = int(response_status)
+
+        network_error = as_clean_string(latest_attempt.get("network_error"))
+        if network_error:
+            summary["network_error"] = clip_debug_text(network_error, max_length=220)
+        network_error_type = as_clean_string(latest_attempt.get("network_error_type"))
+        if network_error_type:
+            summary["network_error_type"] = network_error_type
+
+        request_body = latest_attempt.get("request_body")
+        if isinstance(request_body, dict):
+            summary["request_model"] = as_clean_string(request_body.get("model"))
+            max_tokens = request_body.get("max_tokens")
+            if not isinstance(max_tokens, (int, float)):
+                max_tokens = request_body.get("max_completion_tokens")
+            if isinstance(max_tokens, (int, float)):
+                summary["request_max_tokens"] = int(max_tokens)
+            if request_body.get("response_format") is not None:
+                summary["request_response_format"] = request_body.get("response_format")
+
+        response_body = latest_attempt.get("response_body")
+        response_summary = summarize_llm_response_for_debug(response_body)
+        if response_summary:
+            summary["last_response"] = response_summary
+
+    return summary
+
+
+def classify_suggestion_run_error(error_text: str | None) -> dict[str, Any]:
+    raw_error = str(error_text or "").strip()
+    provider_message = raw_error
+    if raw_error.lower().startswith("provider_error:"):
+        provider_message = raw_error.split(":", 1)[1].strip()
+    lowered = provider_message.lower()
+
+    payload: dict[str, Any] = {
+        "kind": "unknown_error",
+        "title": "Suggestion generation failed",
+        "provider_message": provider_message or raw_error or "unknown_error",
+        "likely_causes": [],
+        "recommended_steps": [
+            "Open Profiles and run LLM connection test for this profile.",
+            "Retry this run after verifying model and API key settings.",
+        ],
+    }
+    likely_causes: list[str] = []
+    recommended_steps: list[str] = list(payload["recommended_steps"])
+
+    if "message content is empty" in lowered:
+        payload["kind"] = "llm_empty_message"
+        payload["title"] = "Provider returned empty message content"
+        likely_causes = [
+            "The selected model returned an empty assistant message.",
+            "Provider compatibility may not fully support JSON response format.",
+        ]
+        recommended_steps = [
+            "Use a model known to support JSON object responses.",
+            "Try reducing temperature and increasing max output tokens.",
+            "Retry and inspect provider debug details below for finish_reason/usage.",
+        ]
+    elif "invalid json" in lowered or "json response" in lowered:
+        payload["kind"] = "llm_invalid_json"
+        payload["title"] = "Provider returned non-JSON content"
+        likely_causes = [
+            "Model output did not follow strict JSON requirements.",
+            "Provider may ignore response_format for this model.",
+        ]
+        recommended_steps = [
+            "Switch to a model with reliable JSON output support.",
+            "Retry with lower temperature to reduce formatting drift.",
+            "Check provider debug response preview below for malformed content.",
+        ]
+    elif "missing choices" in lowered or "missing message" in lowered:
+        payload["kind"] = "llm_response_shape_error"
+        payload["title"] = "Provider response shape was unexpected"
+        likely_causes = [
+            "Provider returned a non-standard OpenAI-compatible response body.",
+            "Gateway/proxy may have transformed the response.",
+        ]
+        recommended_steps = [
+            "Verify the base URL points to a fully OpenAI-compatible endpoint.",
+            "Inspect provider debug payload below and compare with expected chat/completions format.",
+        ]
+    elif "unable to reach llm provider" in lowered:
+        if "timeout" in lowered or "timed out" in lowered or "readtimeout" in lowered:
+            payload["kind"] = "llm_timeout"
+            payload["title"] = "Provider request timed out"
+            likely_causes = [
+                "The model response exceeded the configured timeout.",
+                "Request payload or expected completion size may be too large for current timeout.",
+            ]
+            recommended_steps = [
+                "Increase timeout seconds on the profile LLM connection.",
+                "Reduce context size (e.g., fewer targets) or lower requested output tokens.",
+                "Retry after confirming provider latency is normal.",
+            ]
+        else:
+            payload["kind"] = "llm_network_error"
+            payload["title"] = "Could not reach provider"
+            likely_causes = [
+                "Network connectivity or DNS issue.",
+                "Provider endpoint may be unavailable from this host.",
+            ]
+            recommended_steps = [
+                "Check network route and DNS from the app host to the provider base URL.",
+                "Re-run connection test on the profile and confirm timeout settings.",
+            ]
+    else:
+        status_match = re.search(r"http\s+(\d{3})", lowered)
+        if status_match:
+            status_code = int(status_match.group(1))
+            payload["status_code"] = status_code
+            payload["kind"] = "llm_http_error"
+            payload["title"] = f"Provider returned HTTP {status_code}"
+            likely_causes = [
+                "Authentication, quota, or request-shape rejection by the provider.",
+            ]
+            recommended_steps = [
+                "Verify API key and permissions for the configured model.",
+                "Review request/response debug details for provider error payload.",
+            ]
+
+    payload["likely_causes"] = likely_causes
+    payload["recommended_steps"] = recommended_steps
+    return payload
+
+
+def build_suggestion_run_debug_report_text(
+    *,
+    run: SuggestionRun,
+    connection: LLMConnection | None,
+    summary_payload: dict[str, Any],
+    debug_diagnostics: dict[str, Any],
+    audit_rows: list[SuggestionAuditEvent],
+) -> str:
+    lines: list[str] = []
+    lines.append("HA Entity Vault Suggestion Run Debug Report")
+    lines.append("=" * 46)
+    lines.append(f"Generated At (UTC): {utcnow().isoformat()}")
+    lines.append("")
+    lines.append("Run")
+    lines.append("-" * 46)
+    lines.append(f"Run ID: {run.id}")
+    lines.append(f"Profile ID: {run.profile_id}")
+    lines.append(f"Status: {run.status}")
+    lines.append(f"Error: {run.error or ''}")
+    lines.append(f"Run Kind: {run.run_kind}")
+    lines.append(f"Idea Type: {run.idea_type}")
+    lines.append(f"Mode: {run.mode}")
+    lines.append(f"Top K: {run.top_k}")
+    lines.append(f"Include Existing: {run.include_existing}")
+    lines.append(f"Include New: {run.include_new}")
+    lines.append(f"Context Hash: {run.context_hash or ''}")
+    lines.append(f"Created At: {run.created_at.isoformat()}")
+    lines.append(f"Started At: {run.started_at.isoformat() if run.started_at else ''}")
+    lines.append(f"Finished At: {run.finished_at.isoformat() if run.finished_at else ''}")
+    lines.append(f"Processed/Target: {run.processed_count}/{run.target_count}")
+    lines.append(f"Success: {run.success_count}  Invalid: {run.invalid_count}  Errors: {run.error_count}")
+    lines.append("")
+    lines.append("LLM Connection")
+    lines.append("-" * 46)
+    if connection is None:
+        lines.append("No LLM connection record for this run.")
+    else:
+        lines.append(f"Connection ID: {connection.id}")
+        lines.append(f"Connection Name: {connection.name}")
+        lines.append(f"Provider Kind: {connection.provider_kind}")
+        lines.append(f"Base URL: {connection.base_url}")
+        lines.append(f"Model: {connection.model}")
+        lines.append(f"Temperature: {connection.temperature}")
+        lines.append(f"Max Output Tokens: {connection.max_output_tokens}")
+        lines.append(f"Timeout Seconds: {connection.timeout_seconds}")
+    lines.append("")
+    lines.append("Summary JSON")
+    lines.append("-" * 46)
+    lines.append(safe_pretty_json(safe_json_dump(summary_payload)))
+    lines.append("")
+    lines.append("Debug JSON")
+    lines.append("-" * 46)
+    lines.append(safe_pretty_json(safe_json_dump(debug_diagnostics)))
+    lines.append("")
+    lines.append("Audit Events")
+    lines.append("-" * 46)
+    if not audit_rows:
+        lines.append("(none)")
+    else:
+        for row in audit_rows:
+            lines.append(f"{row.created_at.isoformat()} | {row.actor} | {row.event_type}")
+            lines.append(safe_pretty_json(row.payload_json))
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def adjust_llm_timeout_for_payload(settings: LLMSettings, payload: dict[str, Any]) -> tuple[int, int]:
+    payload_size_bytes = len(safe_json_dump(payload).encode("utf-8"))
+    if payload_size_bytes >= 28_000:
+        minimum_timeout = 90
+    elif payload_size_bytes >= 14_000:
+        minimum_timeout = 60
+    else:
+        minimum_timeout = 35
+    settings.timeout_seconds = max(settings.timeout_seconds, minimum_timeout)
+    return payload_size_bytes, settings.timeout_seconds
+
+
+async def chat_json_with_optional_debug_context(
+    llm_client: OpenAICompatibleLLMClient,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    debug_context: dict[str, Any],
+) -> dict[str, Any]:
+    chat_json_callable = llm_client.chat_json
+    parameters: dict[str, inspect.Parameter]
+    try:
+        parameters = dict(inspect.signature(chat_json_callable).parameters)
+    except (TypeError, ValueError):
+        parameters = {}
+    if "debug_context" in parameters:
+        return await chat_json_callable(system_prompt, user_payload, debug_context=debug_context)
+    return await chat_json_callable(system_prompt, user_payload)
+
+
+def slugify_config_key(raw_value: str) -> str:
+    lowered = re.sub(r"[^a-z0-9_]+", "_", raw_value.strip().lower())
+    lowered = lowered.strip("_")
+    if not lowered:
+        return "automation_generated"
+    return lowered[:80]
+
+
+def concept_duplicate_fingerprint(payload: dict[str, Any]) -> str:
+    normalized = {
+        "title": str(payload.get("title", "")).strip().lower(),
+        "summary": str(payload.get("summary", "")).strip().lower(),
+        "concept_type": str(payload.get("concept_type", "")).strip().lower(),
+        "target_kind": str(payload.get("target_kind", "")).strip().lower(),
+        "target_entity_id": str(payload.get("target_entity_id", "")).strip().lower(),
+        "involved_entities": sorted(
+            str(item).strip().lower() for item in payload.get("involved_entities", []) if str(item).strip()
+        ),
+    }
+    fingerprint_source = safe_json_dump(normalized)
+    return hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+
+
+def proposal_target_entity_id(payload: dict[str, Any]) -> str:
+    target_entity_id = str(payload.get("target_entity_id", "")).strip().lower()
+    if target_entity_id.startswith("automation."):
+        return target_entity_id
+    slug = slugify_config_key(str(payload.get("title", "")))
+    return f"automation.generated_{slug[:40]}"
+
+
+def find_existing_config_snapshot_for_entity(
+    session: Session,
+    *,
+    profile_id: int,
+    entity_id: str,
+) -> ConfigSnapshot | None:
+    return session.exec(
+        select(ConfigSnapshot)
+        .where(
+            ConfigSnapshot.profile_id == profile_id,
+            ConfigSnapshot.kind == "automation",
+            ConfigSnapshot.entity_id == entity_id,
+            ConfigSnapshot.fetch_status == "success",
+        )
+        .order_by(ConfigSnapshot.pulled_at.desc(), ConfigSnapshot.id.desc())
+    ).first()
+
+
+def derive_unique_config_key(
+    session: Session,
+    *,
+    profile_id: int,
+    title: str,
+) -> str:
+    base = slugify_config_key(title)
+    key = base
+    suffix = 2
+    existing = set(
+        session.exec(
+            select(ConfigSnapshot.config_key).where(
+                ConfigSnapshot.profile_id == profile_id,
+                ConfigSnapshot.kind == "automation",
+                ConfigSnapshot.config_key.is_not(None),
+            )
+        ).all()
+    )
+    normalized_existing = {str(item).strip() for item in existing if str(item).strip()}
+    while key in normalized_existing:
+        key = f"{base}_{suffix}"
+        suffix += 1
+    return key
+
+
+def parse_generation_answers(generation: SuggestionGeneration) -> dict[str, str]:
+    payload = safe_json_load(generation.planning_answers_json, {})
+    if not isinstance(payload, dict):
+        return {}
+    answers: dict[str, str] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        cleaned = value.strip()
+        if cleaned:
+            answers[key] = cleaned
+    return answers
+
+
+def next_pending_question(step_index: int) -> dict[str, Any] | None:
+    if step_index < 0 or step_index >= len(ADVANCED_GENERATION_STEPS):
+        return None
+    step = ADVANCED_GENERATION_STEPS[step_index]
+    return {
+        "step_index": step_index,
+        "total_steps": len(ADVANCED_GENERATION_STEPS),
+        "key": step["key"],
+        "question": step["question"],
+    }
+
+
+def normalize_automation_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
+    alias = str(raw_payload.get("alias", "")).strip()
+    if not alias:
+        raise ValueError("Automation payload must include alias.")
+
+    description = raw_payload.get("description")
+    if description is None:
+        description = ""
+    if not isinstance(description, str):
+        raise ValueError("Automation description must be a string.")
+
+    trigger = raw_payload.get("trigger")
+    if trigger is None:
+        trigger = raw_payload.get("triggers")
+    if not isinstance(trigger, list) or not trigger:
+        raise ValueError("Automation payload must include at least one trigger.")
+
+    condition = raw_payload.get("condition")
+    if condition is None:
+        condition = raw_payload.get("conditions")
+    if condition is None:
+        condition = []
+    if not isinstance(condition, list):
+        raise ValueError("Automation condition must be a list.")
+
+    action = raw_payload.get("action")
+    if action is None:
+        action = raw_payload.get("actions")
+    if not isinstance(action, list) or not action:
+        raise ValueError("Automation payload must include at least one action.")
+
+    mode = raw_payload.get("mode")
+    if not isinstance(mode, str) or not mode.strip():
+        mode = "single"
+
+    return {
+        "alias": alias,
+        "description": description.strip(),
+        "trigger": trigger,
+        "condition": condition,
+        "action": action,
+        "mode": mode.strip(),
+    }
+
+
+def yaml_from_automation_payload(payload: dict[str, Any]) -> str:
+    yaml_text = yaml.safe_dump(
+        payload,
+        sort_keys=False,
+        allow_unicode=False,
+        default_flow_style=False,
+    )
+    return yaml_text.strip() + "\n"
+
+
+def parse_automation_yaml(yaml_text: str) -> dict[str, Any]:
+    try:
+        parsed = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("Automation YAML must decode to an object.")
+    return normalize_automation_payload(parsed)
+
+
+def next_revision_index(session: Session, generation_id: int) -> int:
+    last_revision = session.exec(
+        select(SuggestionGenerationRevision)
+        .where(SuggestionGenerationRevision.generation_id == generation_id)
+        .order_by(
+            SuggestionGenerationRevision.revision_index.desc(),
+            SuggestionGenerationRevision.id.desc(),
+        )
+    ).first()
+    if last_revision is None:
+        return 1
+    return int(last_revision.revision_index) + 1
+
+
+def create_generation_revision(
+    session: Session,
+    *,
+    generation_id: int,
+    source: str,
+    prompt_text: str | None,
+    yaml_text: str,
+    structured_payload: dict[str, Any],
+    change_summary: str | None,
+) -> SuggestionGenerationRevision:
+    revision = SuggestionGenerationRevision(
+        generation_id=generation_id,
+        revision_index=next_revision_index(session, generation_id),
+        source=source,
+        prompt_text=prompt_text.strip() if isinstance(prompt_text, str) and prompt_text.strip() else None,
+        yaml_text=yaml_text,
+        structured_json=safe_json_dump(structured_payload),
+        change_summary=change_summary.strip() if isinstance(change_summary, str) and change_summary.strip() else None,
+        created_at=utcnow(),
+    )
+    session.add(revision)
+    return revision
+
+
+def generation_revision_diff_text(revisions: list[SuggestionGenerationRevision]) -> str:
+    if len(revisions) < 2:
+        return ""
+    older = revisions[-2].yaml_text or ""
+    newer = revisions[-1].yaml_text or ""
+    if older == newer:
+        return "No YAML changes between latest revisions."
+    diff = difflib.unified_diff(
+        older.splitlines(),
+        newer.splitlines(),
+        fromfile=f"revision_{revisions[-2].revision_index}",
+        tofile=f"revision_{revisions[-1].revision_index}",
+        lineterm="",
+    )
+    return "\n".join(diff)
+
+
 def build_suggestion_targets_for_run(
     session: Session,
     run: SuggestionRun,
@@ -1165,6 +1864,74 @@ def create_suggestion_audit_event(
         created_at=utcnow(),
     )
     session.add(event)
+
+
+def concept_suggestion_system_prompt() -> str:
+    return (
+        "You are a Home Assistant automation strategist. "
+        "Return JSON only with top-level key 'suggestions' (array). "
+        "Each suggestion item must include: "
+        "title, summary, concept_type, target_kind (new_automation|existing_automation), "
+        "target_entity_id (required for existing_automation), involved_entities (array), "
+        "impact_score, feasibility_score, novelty_score, confidence, risk_level, "
+        "prerequisites (array), verification_outline (array), rationale."
+    )
+
+
+def automation_generation_system_prompt() -> str:
+    return (
+        "You are a Home Assistant automation YAML assistant. "
+        "Return JSON only with keys: alias, description, trigger, condition, action, mode. "
+        "trigger/condition/action must be arrays. "
+        "The result must be valid Home Assistant automation structure."
+    )
+
+
+async def generate_yaml_from_concept(
+    *,
+    session: Session,
+    profile: Profile,
+    connection: LLMConnection,
+    proposal: SuggestionProposal,
+    optional_instruction: str,
+    advanced_answers: dict[str, str] | None = None,
+    tweak_prompt: str | None = None,
+    existing_yaml: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    api_key = resolve_llm_api_key(connection)
+    llm_settings = build_llm_settings_from_connection(connection, api_key)
+
+    concept_payload = concept_payload_from_proposal(proposal)
+    run = session.get(SuggestionRun, proposal.suggestion_run_id)
+    idea_type = run.idea_type if run is not None else "general"
+    mode = run.mode if run is not None else "standard"
+    context_payload = build_concept_suggestion_context(
+        session,
+        profile,
+        idea_type=idea_type,
+        mode=mode,
+        custom_intent=run.custom_intent if run and run.custom_intent else "",
+        include_existing=run.include_existing if run is not None else True,
+        include_new=run.include_new if run is not None else True,
+    )
+
+    generation_payload: dict[str, Any] = {
+        "schema_version": "haev.automation.generation.request.v1",
+        "concept": concept_payload,
+        "optional_instruction": optional_instruction.strip() if optional_instruction.strip() else None,
+        "advanced_answers": advanced_answers or {},
+        "context": context_payload,
+    }
+    if tweak_prompt is not None:
+        generation_payload["tweak_prompt"] = tweak_prompt.strip()
+    if existing_yaml is not None:
+        generation_payload["existing_yaml"] = existing_yaml
+
+    adjust_llm_timeout_for_payload(llm_settings, generation_payload)
+    llm_client = OpenAICompatibleLLMClient(llm_settings)
+    llm_response = await llm_client.chat_json(automation_generation_system_prompt(), generation_payload)
+    normalized = normalize_automation_payload(llm_response)
+    return yaml_from_automation_payload(normalized), normalized
 
 
 def build_config_item_stmt(
@@ -2239,14 +3006,48 @@ async def process_suggestion_run_job(run_id: int) -> None:
 
         api_key = resolve_llm_api_key(connection)
         llm_settings = build_llm_settings_from_connection(connection, api_key)
-        llm_client = OpenAICompatibleLLMClient(llm_settings)
+        filters = safe_json_load(run.filters_json, {})
+        if not isinstance(filters, dict):
+            filters = {}
 
-        targets = build_suggestion_targets_for_run(session, run)
-        run.target_count = len(targets)
+        idea_type = normalize_idea_type(str(run.idea_type or filters.get("idea_type", "general")))
+        mode = normalize_concept_mode(str(run.mode or filters.get("mode", "standard")), idea_type=idea_type)
+        custom_intent = str(run.custom_intent or filters.get("custom_intent", "")).strip()
+        top_k = max(1, min(25, int(run.top_k or filters.get("top_k", 10) or 10)))
+
+        context_payload = build_concept_suggestion_context(
+            session,
+            profile,
+            idea_type=idea_type,
+            mode=mode,
+            custom_intent=custom_intent,
+            include_existing=bool(run.include_existing),
+            include_new=bool(run.include_new),
+        )
+        context_stats = summarize_concept_context_for_debug(context_payload)
+        known_entity_ids = build_known_entity_ids(session, run.profile_id, run.config_sync_run_id)
+
+        request_payload = {
+            "schema_version": "haev.automation.concept.request.v2",
+            "policy": {
+                "suggest_only": True,
+                "concept_only": True,
+                "top_k": top_k,
+                "include_existing": bool(run.include_existing),
+                "include_new": bool(run.include_new),
+                "ranking_mode": mode,
+            },
+            "context": context_payload,
+        }
+        request_payload_size_bytes, adjusted_timeout_seconds = adjust_llm_timeout_for_payload(
+            llm_settings,
+            request_payload,
+        )
+        llm_client = OpenAICompatibleLLMClient(llm_settings)
         context_hash_source = safe_json_dump(
             {
-                "filters": safe_json_load(run.filters_json, {}),
-                "targets": [item.entity_id for item in targets],
+                "request_payload": request_payload,
+                "filters": filters,
             }
         )
         run.context_hash = hashlib.sha256(context_hash_source.encode("utf-8")).hexdigest()
@@ -2254,11 +3055,78 @@ async def process_suggestion_run_job(run_id: int) -> None:
         session.add(run)
         session.commit()
 
-        if not targets:
+        secrets_to_redact = [api_key] if api_key else []
+        sanitized_response: Any = {}
+        validation_errors: list[str] = []
+        llm_debug_context: dict[str, Any] = {}
+
+        try:
+            llm_response = await chat_json_with_optional_debug_context(
+                llm_client,
+                concept_suggestion_system_prompt(),
+                request_payload,
+                llm_debug_context,
+            )
+            sanitized_response = sanitize_payload(llm_response, secrets_to_redact)
+            valid_items, validation_errors = validate_concept_suggestion_payload(
+                llm_response,
+                known_entity_ids=known_entity_ids,
+            )
+            ranked_items = rank_concept_suggestions(valid_items, mode=mode, top_k=top_k)
+        except LLMClientError as exc:
+            classified_error = classify_suggestion_run_error(str(exc))
+            sanitized_debug_context = sanitize_payload(llm_debug_context, secrets_to_redact)
+            provider_debug = summarize_llm_debug_context(
+                sanitized_debug_context if isinstance(sanitized_debug_context, dict) else {}
+            )
+            debug_summary = {
+                "error": classified_error,
+                "llm_connection": {
+                    "connection_id": connection.id,
+                    "connection_name": connection.name,
+                    "provider_kind": connection.provider_kind,
+                    "base_url": connection.base_url,
+                    "model": connection.model,
+                    "timeout_seconds": connection.timeout_seconds,
+                    "temperature": connection.temperature,
+                    "max_output_tokens": connection.max_output_tokens,
+                },
+                "request": {
+                    "idea_type": idea_type,
+                    "mode": mode,
+                    "top_k": top_k,
+                    "include_existing": bool(run.include_existing),
+                    "include_new": bool(run.include_new),
+                    "custom_intent": custom_intent,
+                    "context_hash": run.context_hash,
+                    "context_stats": context_stats,
+                    "request_payload_size_bytes": request_payload_size_bytes,
+                    "adjusted_timeout_seconds": adjusted_timeout_seconds,
+                },
+                "provider_debug": provider_debug,
+            }
             run.status = "failed"
-            run.error = "no_eligible_automation_targets"
+            run.error_count = 1
+            run.error = f"provider_error:{exc}"
             run.finished_at = utcnow()
             run.updated_at = utcnow()
+            run.result_summary_json = safe_json_dump(
+                {
+                    "run_kind": run.run_kind,
+                    "idea_type": idea_type,
+                    "mode": mode,
+                    "top_k": top_k,
+                    "target_count": 0,
+                    "processed_count": 0,
+                    "success_count": 0,
+                    "invalid_count": 0,
+                    "error_count": 1,
+                    "context_stats": context_stats,
+                    "request_payload_size_bytes": request_payload_size_bytes,
+                    "adjusted_timeout_seconds": adjusted_timeout_seconds,
+                    "debug": debug_summary,
+                }
+            )
             session.add(run)
             create_suggestion_audit_event(
                 session,
@@ -2266,138 +3134,116 @@ async def process_suggestion_run_job(run_id: int) -> None:
                 suggestion_run_id=run.id,
                 event_type="suggestion_run_failed",
                 actor="system",
-                payload={"reason": run.error},
+                payload={
+                    "reason": run.error,
+                    "error_kind": classified_error.get("kind"),
+                    "provider_message": classified_error.get("provider_message"),
+                    "provider_status": classified_error.get("status_code"),
+                    "provider_debug": provider_debug,
+                },
             )
             session.commit()
             return
 
-        known_entity_ids = build_known_entity_ids(session, run.profile_id, run.config_sync_run_id)
-        for target in targets:
-            known_entity_ids.add(target.entity_id.lower())
+        run.target_count = len(valid_items)
+        run.processed_count = len(valid_items)
+        run.success_count = len(ranked_items)
+        run.invalid_count = len(validation_errors)
+        run.error_count = 0
 
-        secrets_to_redact = [api_key] if api_key else []
-        system_prompt = (
-            "You are a Home Assistant automation assistant. "
-            "Return JSON only with a top-level key 'suggestions' that is an array. "
-            "Each suggestion must include target_entity_id, summary, confidence, risk_level, "
-            "proposed_patch (array), and verification_steps (array)."
-        )
-
-        for target in targets:
-            context_payload = build_automation_context(session, profile, target)
-            request_payload = {
-                "schema_version": "haev.automation.suggestion.request.v1",
-                "policy": {
-                    "suggest_only": True,
-                    "max_patch_ops": SUGGESTION_MAX_PATCH_OPS,
-                },
-                "context": context_payload,
+        for item in ranked_items:
+            concept_payload = {
+                "schema_version": item.get("schema_version", "haev.automation.concept.v2"),
+                "title": item.get("title"),
+                "summary": item.get("summary"),
+                "concept_type": item.get("concept_type"),
+                "target_kind": item.get("target_kind"),
+                "target_entity_id": item.get("target_entity_id"),
+                "involved_entities": item.get("involved_entities", []),
+                "impact_score": item.get("impact_score"),
+                "feasibility_score": item.get("feasibility_score"),
+                "novelty_score": item.get("novelty_score"),
+                "confidence": item.get("confidence"),
+                "risk_level": item.get("risk_level"),
+                "prerequisites": item.get("prerequisites", []),
+                "verification_outline": item.get("verification_outline", []),
+                "rationale": item.get("rationale", ""),
             }
-
-            try:
-                llm_response = await llm_client.chat_json(system_prompt, request_payload)
-                valid_items, validation_errors = validate_suggestion_payload(
-                    llm_response,
-                    known_entity_ids=known_entity_ids,
-                    max_patch_ops=SUGGESTION_MAX_PATCH_OPS,
+            proposal = SuggestionProposal(
+                profile_id=run.profile_id,
+                suggestion_run_id=run.id if run.id is not None else 0,
+                config_snapshot_id=None,
+                target_entity_id=proposal_target_entity_id(item),
+                status="proposed",
+                schema_version=str(item.get("schema_version", "haev.automation.concept.v2")),
+                summary=str(item.get("summary", "")).strip()[:512] or None,
+                confidence=float(item.get("confidence", 0.0)),
+                risk_level=str(item.get("risk_level", "medium")).strip().lower(),
+                concept_payload_json=safe_json_dump(concept_payload),
+                concept_type=str(item.get("concept_type", "general")).strip().lower() or "general",
+                impact_score=float(item.get("impact_score", 0.0)),
+                feasibility_score=float(item.get("feasibility_score", 0.0)),
+                novelty_score=float(item.get("novelty_score", 0.0)),
+                ranking_score=float(item.get("ranking_score", 0.0)),
+                ranking_breakdown_json=safe_json_dump(item.get("ranking_breakdown", {})),
+                duplicate_fingerprint=concept_duplicate_fingerprint(concept_payload),
+                queue_stage="suggested",
+                queue_note=None,
+                queue_updated_at=utcnow(),
+                proposed_patch_json=None,
+                verification_steps_json=safe_json_dump(item.get("verification_outline", [])),
+                raw_response_json=safe_json_dump(sanitized_response),
+                validation_error=None,
+                created_at=utcnow(),
+                updated_at=utcnow(),
+            )
+            session.add(proposal)
+            session.flush()
+            if proposal.id is not None:
+                create_suggestion_audit_event(
+                    session,
+                    profile_id=run.profile_id,
+                    suggestion_run_id=run.id,
+                    proposal_id=proposal.id,
+                    event_type="suggestion_proposal_created",
+                    actor="system",
+                    payload={
+                        "queue_stage": proposal.queue_stage,
+                        "target_entity_id": proposal.target_entity_id,
+                    },
                 )
-                sanitized_response = sanitize_payload(llm_response, secrets_to_redact)
-            except LLMClientError as exc:
-                run.error_count += 1
-                run.processed_count += 1
-                run.updated_at = utcnow()
-                session.add(
-                    SuggestionProposal(
-                        profile_id=run.profile_id,
-                        suggestion_run_id=run.id if run.id is not None else 0,
-                        config_snapshot_id=target.id,
-                        target_entity_id=target.entity_id,
-                        status="invalid",
-                        schema_version="haev.automation.suggestion.v1",
-                        summary=None,
-                        confidence=None,
-                        risk_level=None,
-                        proposed_patch_json=None,
-                        verification_steps_json=None,
-                        raw_response_json=None,
-                        validation_error=f"provider_error:{exc}",
-                        created_at=utcnow(),
-                        updated_at=utcnow(),
-                    )
-                )
-                session.add(run)
-                session.commit()
-                continue
 
-            if valid_items:
-                for item in valid_items:
-                    proposal = SuggestionProposal(
-                        profile_id=run.profile_id,
-                        suggestion_run_id=run.id if run.id is not None else 0,
-                        config_snapshot_id=target.id,
-                        target_entity_id=item["target_entity_id"],
-                        status="proposed",
-                        schema_version=item["schema_version"],
-                        summary=item["summary"],
-                        confidence=item["confidence"],
-                        risk_level=item["risk_level"],
-                        proposed_patch_json=safe_json_dump(item["proposed_patch"]),
-                        verification_steps_json=safe_json_dump(item["verification_steps"]),
-                        raw_response_json=safe_json_dump(sanitized_response),
-                        validation_error=None,
-                        created_at=utcnow(),
-                        updated_at=utcnow(),
-                    )
-                    session.add(proposal)
-                    session.flush()
-                    if proposal.id is not None:
-                        create_suggestion_audit_event(
-                            session,
-                            profile_id=run.profile_id,
-                            suggestion_run_id=run.id,
-                            proposal_id=proposal.id,
-                            event_type="suggestion_proposal_created",
-                            actor="system",
-                            payload={"target_entity_id": proposal.target_entity_id},
-                        )
-                    run.success_count += 1
-
-            if validation_errors:
-                run.invalid_count += 1
-                invalid_proposal = SuggestionProposal(
+        if validation_errors:
+            session.add(
+                SuggestionProposal(
                     profile_id=run.profile_id,
                     suggestion_run_id=run.id if run.id is not None else 0,
-                    config_snapshot_id=target.id,
-                    target_entity_id=target.entity_id,
+                    config_snapshot_id=None,
+                    target_entity_id=INVALID_CONCEPT_RESPONSE_ENTITY_ID,
                     status="invalid",
-                    schema_version="haev.automation.suggestion.v1",
+                    schema_version="haev.automation.concept.v2",
                     summary=None,
                     confidence=None,
                     risk_level=None,
+                    concept_payload_json=None,
+                    concept_type=None,
+                    impact_score=None,
+                    feasibility_score=None,
+                    novelty_score=None,
+                    ranking_score=None,
+                    ranking_breakdown_json=None,
+                    duplicate_fingerprint=None,
+                    queue_stage="suggested",
+                    queue_note=None,
+                    queue_updated_at=utcnow(),
                     proposed_patch_json=None,
                     verification_steps_json=None,
                     raw_response_json=safe_json_dump(sanitized_response),
-                    validation_error=";".join(validation_errors),
+                    validation_error=";".join(validation_errors[:20]),
                     created_at=utcnow(),
                     updated_at=utcnow(),
                 )
-                session.add(invalid_proposal)
-                session.flush()
-                if invalid_proposal.id is not None:
-                    create_suggestion_audit_event(
-                        session,
-                        profile_id=run.profile_id,
-                        suggestion_run_id=run.id,
-                        proposal_id=invalid_proposal.id,
-                        event_type="suggestion_proposal_invalid",
-                        actor="system",
-                        payload={"errors": validation_errors[:8]},
-                    )
-
-            run.processed_count += 1
-            run.updated_at = utcnow()
-            session.add(run)
-            session.commit()
+            )
 
         run.finished_at = utcnow()
         run.updated_at = utcnow()
@@ -2406,16 +3252,24 @@ async def process_suggestion_run_job(run_id: int) -> None:
             run.error = None
         else:
             run.status = "failed"
-            run.error = "No valid suggestions were generated."
-        run.result_summary_json = safe_json_dump(
-            {
-                "target_count": run.target_count,
-                "processed_count": run.processed_count,
-                "success_count": run.success_count,
-                "invalid_count": run.invalid_count,
-                "error_count": run.error_count,
-            }
-        )
+            run.error = "No valid concept suggestions were generated."
+        result_summary_payload = {
+            "run_kind": run.run_kind,
+            "idea_type": idea_type,
+            "mode": mode,
+            "top_k": top_k,
+            "target_count": run.target_count,
+            "processed_count": run.processed_count,
+            "success_count": run.success_count,
+            "invalid_count": run.invalid_count,
+            "error_count": run.error_count,
+            "context_stats": context_stats,
+            "request_payload_size_bytes": request_payload_size_bytes,
+            "adjusted_timeout_seconds": adjusted_timeout_seconds,
+        }
+        if validation_errors:
+            result_summary_payload["invalid_reasons"] = validation_errors[:10]
+        run.result_summary_json = safe_json_dump(result_summary_payload)
         session.add(run)
         create_suggestion_audit_event(
             session,
@@ -3569,11 +4423,12 @@ def create_app() -> FastAPI:
         request: Request,
         csrf_token: str = Form(...),
         next_url: str = Form(default="/suggestions"),
-        llm_connection_id: str = Form(default=""),
-        config_sync_run_id: str = Form(default=""),
-        snapshot_id: str = Form(default=""),
-        q: str = Form(default=""),
-        max_targets: int = Form(default=SUGGESTION_MAX_TARGETS_PER_RUN),
+        idea_type: str = Form(default="general"),
+        custom_intent: str = Form(default=""),
+        mode: str = Form(default="standard"),
+        top_k: int = Form(default=10),
+        include_existing: str = Form(default=""),
+        include_new: str = Form(default=""),
         session: Session = Depends(get_session),
     ) -> RedirectResponse:
         verify_csrf(request, csrf_token)
@@ -3588,79 +4443,43 @@ def create_app() -> FastAPI:
                 status_code=303,
             )
 
-        selected_connection: LLMConnection | None = None
-        normalized_connection_id = llm_connection_id.strip()
-        if normalized_connection_id:
-            try:
-                parsed_connection_id = int(normalized_connection_id)
-            except ValueError:
-                set_flash(request, "error", "Invalid LLM connection selection.")
-                return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
-            candidate = session.get(LLMConnection, parsed_connection_id)
-            if (
-                candidate is not None
-                and candidate.profile_id == profile.id
-                and candidate.provider_kind in LLM_PROVIDER_KINDS
-                and candidate.is_enabled
-            ):
-                selected_connection = candidate
-        if selected_connection is None:
-            selected_connection = get_default_llm_connection(session, profile.id)
+        selected_connection = get_default_llm_connection(session, profile.id)
         if selected_connection is None:
             set_flash(request, "error", "No enabled LLM connection configured for this profile.")
             return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
 
-        resolved_config_sync_run_id: int | None = None
-        normalized_config_sync_run_id = config_sync_run_id.strip()
-        if normalized_config_sync_run_id:
-            try:
-                parsed_config_sync_run_id = int(normalized_config_sync_run_id)
-            except ValueError:
-                set_flash(request, "error", "Invalid config sync run selection.")
-                return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
-            candidate_run = session.get(ConfigSyncRun, parsed_config_sync_run_id)
-            if candidate_run is None or candidate_run.profile_id != profile.id:
-                set_flash(request, "error", "Config sync run not found for this profile.")
-                return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
-            resolved_config_sync_run_id = candidate_run.id
-        else:
-            latest_config_sync_run = get_latest_config_sync_run(session, profile.id)
-            if latest_config_sync_run is not None:
-                resolved_config_sync_run_id = latest_config_sync_run.id
+        latest_config_sync_run = get_latest_config_sync_run(session, profile.id)
+        resolved_config_sync_run_id = latest_config_sync_run.id if latest_config_sync_run else None
 
-        normalized_snapshot_id = snapshot_id.strip()
-        snapshot_ids: list[int] = []
-        if normalized_snapshot_id:
-            try:
-                parsed_snapshot_id = int(normalized_snapshot_id)
-            except ValueError:
-                set_flash(request, "error", "Invalid config snapshot selection.")
-                return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
-            snapshot = session.get(ConfigSnapshot, parsed_snapshot_id)
-            if (
-                snapshot is None
-                or snapshot.profile_id != profile.id
-                or snapshot.kind != "automation"
-                or snapshot.fetch_status != "success"
-            ):
-                set_flash(request, "error", "Selected config snapshot is not eligible for automation suggestions.")
-                return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
-            if snapshot.id is None:
-                set_flash(request, "error", "Selected config snapshot has no identifier.")
-                return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
-            snapshot_ids = [snapshot.id]
-            resolved_config_sync_run_id = snapshot.config_sync_run_id
+        normalized_idea_type = normalize_idea_type(idea_type)
+        normalized_mode = normalize_concept_mode(mode, idea_type=normalized_idea_type)
+        normalized_custom_intent = custom_intent.strip()
+        normalized_top_k = max(1, min(25, int(top_k)))
+        include_existing_bool = parse_checkbox_value(include_existing)
+        include_new_bool = parse_checkbox_value(include_new)
+        if not include_existing_bool and not include_new_bool:
+            include_new_bool = True
 
         run_filters = {
-            "q": q.strip(),
-            "max_targets": max(1, min(max_targets, SUGGESTION_MAX_TARGETS_PER_RUN)),
-            "snapshot_ids": snapshot_ids,
+            "idea_type": normalized_idea_type,
+            "custom_intent": normalized_custom_intent,
+            "mode": normalized_mode,
+            "top_k": normalized_top_k,
+            "include_existing": include_existing_bool,
+            "include_new": include_new_bool,
         }
 
         run = SuggestionRun(
             profile_id=profile.id,
             llm_connection_id=selected_connection.id if selected_connection.id is not None else 0,
             config_sync_run_id=resolved_config_sync_run_id,
+            run_kind="concept_v2",
+            idea_type=normalized_idea_type,
+            custom_intent=normalized_custom_intent or None,
+            mode=normalized_mode,
+            top_k=normalized_top_k,
+            include_existing=include_existing_bool,
+            include_new=include_new_bool,
             status="queued",
             target_count=0,
             processed_count=0,
@@ -3689,7 +4508,11 @@ def create_app() -> FastAPI:
             payload={
                 "llm_connection_id": selected_connection.id,
                 "config_sync_run_id": resolved_config_sync_run_id,
-                "snapshot_ids": snapshot_ids,
+                "idea_type": normalized_idea_type,
+                "mode": normalized_mode,
+                "top_k": normalized_top_k,
+                "include_existing": include_existing_bool,
+                "include_new": include_new_bool,
             },
         )
         session.commit()
@@ -3726,6 +4549,7 @@ def create_app() -> FastAPI:
         request: Request,
         profile_id: int | None = Query(default=None),
         status: str = Query(default=""),
+        page: int = Query(default=1, ge=1),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
         active_profile = choose_active_profile(session, request, profile_id)
@@ -3733,13 +4557,44 @@ def create_app() -> FastAPI:
 
         runs: list[SuggestionRun] = []
         active_connection: LLMConnection | None = None
+        total_runs = 0
+        total_pages = 1
+        page_size = SUGGESTION_RUNS_PAGE_SIZE
         if active_profile is not None:
             active_connection = get_default_llm_connection(session, active_profile.id)
-            stmt = select(SuggestionRun).where(SuggestionRun.profile_id == active_profile.id)
+            concept_run_exists_stmt = (
+                select(SuggestionProposal.id)
+                .where(
+                    SuggestionProposal.suggestion_run_id == SuggestionRun.id,
+                    or_(
+                        SuggestionProposal.concept_payload_json.is_not(None),
+                        SuggestionProposal.target_entity_id == INVALID_CONCEPT_RESPONSE_ENTITY_ID,
+                    ),
+                )
+                .limit(1)
+            )
+            stmt = select(SuggestionRun).where(
+                SuggestionRun.profile_id == active_profile.id,
+                SuggestionRun.run_kind == "concept_v2",
+                or_(
+                    SuggestionRun.status.in_(["queued", "running", "failed"]),
+                    concept_run_exists_stmt.exists(),
+                ),
+            )
             normalized_status = status.strip().lower()
             if normalized_status in SUGGESTION_RUN_STATUSES:
                 stmt = stmt.where(SuggestionRun.status == normalized_status)
-            runs = list(session.exec(stmt.order_by(SuggestionRun.created_at.desc(), SuggestionRun.id.desc())).all())
+            total_runs = int(session.exec(select(func.count()).select_from(stmt.subquery())).one())
+            total_pages = max(1, (total_runs + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            offset = (page - 1) * page_size
+            runs = list(
+                session.exec(
+                    stmt.order_by(SuggestionRun.created_at.desc(), SuggestionRun.id.desc())
+                    .offset(offset)
+                    .limit(page_size)
+                ).all()
+            )
 
         return render_template(
             request,
@@ -3752,18 +4607,24 @@ def create_app() -> FastAPI:
                     "active_connection": active_connection,
                     "runs": runs,
                     "status": status.strip().lower(),
+                    "total_runs": total_runs,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "idea_type_choices": sorted(SUGGESTION_IDEA_TYPES),
+                    "default_top_k": 10,
                     "profile_count": profile_count,
                 },
                 active_profile,
             ),
         )
 
-    @app.get("/suggestions/{run_id}", response_class=HTMLResponse)
+    @app.get("/suggestions/{run_id:int}", response_class=HTMLResponse)
     async def suggestion_run_detail(
         run_id: int,
         request: Request,
         profile_id: int | None = Query(default=None),
-        proposal_status: str = Query(default=""),
+        queue_stage: str = Query(default=""),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
         active_profile = choose_active_profile(session, request, profile_id)
@@ -3774,15 +4635,109 @@ def create_app() -> FastAPI:
         if run is None or run.profile_id != active_profile.id:
             raise HTTPException(status_code=404, detail="Suggestion run not found")
 
-        normalized_status = proposal_status.strip().lower()
-        stmt = select(SuggestionProposal).where(SuggestionProposal.suggestion_run_id == run.id)
-        if normalized_status and normalized_status in SUGGESTION_PROPOSAL_STATUSES:
-            stmt = stmt.where(SuggestionProposal.status == normalized_status)
+        normalized_stage = queue_stage.strip().lower()
+        if normalized_stage and normalized_stage not in SUGGESTION_QUEUE_STAGES:
+            normalized_stage = ""
+        stmt = select(SuggestionProposal).where(
+            SuggestionProposal.suggestion_run_id == run.id,
+            SuggestionProposal.concept_payload_json.is_not(None),
+        )
+        if normalized_stage:
+            stmt = stmt.where(SuggestionProposal.queue_stage == normalized_stage)
         proposals = list(session.exec(stmt.order_by(SuggestionProposal.created_at.asc(), SuggestionProposal.id.asc())).all())
+
+        stage_counts: dict[str, int] = {stage: 0 for stage in sorted(SUGGESTION_QUEUE_STAGES)}
+        all_run_proposals = list(
+            session.exec(
+                select(SuggestionProposal).where(
+                    SuggestionProposal.suggestion_run_id == run.id,
+                    SuggestionProposal.concept_payload_json.is_not(None),
+                )
+            ).all()
+        )
+        for item in all_run_proposals:
+            stage_counts[item.queue_stage] = stage_counts.get(item.queue_stage, 0) + 1
+
+        enriched_proposals: list[dict[str, Any]] = []
+        for proposal in proposals:
+            concept_payload = concept_payload_from_proposal(proposal)
+            involved_entities_raw = concept_payload.get("involved_entities")
+            prerequisites_raw = concept_payload.get("prerequisites")
+            verification_raw = concept_payload.get("verification_outline")
+            involved_entities = (
+                [str(item).strip() for item in involved_entities_raw if str(item).strip()]
+                if isinstance(involved_entities_raw, list)
+                else []
+            )
+            prerequisites = (
+                [str(item).strip() for item in prerequisites_raw if str(item).strip()]
+                if isinstance(prerequisites_raw, list)
+                else []
+            )
+            verification_outline = (
+                [str(item).strip() for item in verification_raw if str(item).strip()]
+                if isinstance(verification_raw, list)
+                else []
+            )
+            ranking_breakdown = safe_json_load(proposal.ranking_breakdown_json, {})
+            if not isinstance(ranking_breakdown, dict):
+                ranking_breakdown = {}
+            enriched_proposals.append(
+                {
+                    "proposal": proposal,
+                    "concept": concept_payload,
+                    "title": concept_display_title(proposal),
+                    "involved_entities": involved_entities,
+                    "prerequisites": prerequisites,
+                    "verification_outline": verification_outline,
+                    "ranking_breakdown": ranking_breakdown,
+                    "ranking_breakdown_pretty": safe_pretty_json(safe_json_dump(ranking_breakdown)),
+                    "score_display": {
+                        "confidence": format_score_out_of_ten(proposal.confidence),
+                        "impact": format_score_out_of_ten(proposal.impact_score),
+                        "feasibility": format_score_out_of_ten(proposal.feasibility_score),
+                        "novelty": format_score_out_of_ten(proposal.novelty_score),
+                        "ranking": format_score_out_of_ten(proposal.ranking_score),
+                    },
+                }
+            )
 
         connection = session.get(LLMConnection, run.llm_connection_id)
         summary_payload = safe_json_load(run.result_summary_json, {})
+        if not isinstance(summary_payload, dict):
+            summary_payload = {}
         summary_pretty = safe_pretty_json(safe_json_dump(summary_payload))
+        debug_diagnostics = summary_payload.get("debug", {})
+        if not isinstance(debug_diagnostics, dict):
+            debug_diagnostics = {}
+        if not debug_diagnostics and run.error:
+            debug_diagnostics = {"error": classify_suggestion_run_error(run.error)}
+        debug_pretty = safe_pretty_json(safe_json_dump(debug_diagnostics))
+
+        audit_rows = list(
+            session.exec(
+                select(SuggestionAuditEvent)
+                .where(SuggestionAuditEvent.suggestion_run_id == run.id)
+                .order_by(SuggestionAuditEvent.created_at.desc(), SuggestionAuditEvent.id.desc())
+                .limit(20)
+            ).all()
+        )
+        debug_report_text = build_suggestion_run_debug_report_text(
+            run=run,
+            connection=connection,
+            summary_payload=summary_payload,
+            debug_diagnostics=debug_diagnostics,
+            audit_rows=audit_rows,
+        )
+        audit_events = [
+            {
+                "created_at": row.created_at,
+                "event_type": row.event_type,
+                "actor": row.actor,
+                "payload_pretty": safe_pretty_json(row.payload_json),
+            }
+            for row in audit_rows
+        ]
 
         return render_template(
             request,
@@ -3795,14 +4750,68 @@ def create_app() -> FastAPI:
                     "run": run,
                     "connection": connection,
                     "proposals": proposals,
-                    "proposal_status": normalized_status,
+                    "enriched_proposals": enriched_proposals,
+                    "queue_stage": normalized_stage,
+                    "score_tooltips": concept_score_tooltips(),
                     "summary_payload": summary_payload,
                     "summary_pretty": summary_pretty,
+                    "debug_diagnostics": debug_diagnostics,
+                    "debug_pretty": debug_pretty,
+                    "debug_report_text": debug_report_text,
+                    "audit_events": audit_events,
+                    "stage_counts": stage_counts,
                     "back_url": f"/suggestions?{build_query(profile_id=active_profile.id)}",
-                    "status_choices": sorted(SUGGESTION_PROPOSAL_STATUSES),
+                    "queue_stage_choices": sorted(SUGGESTION_QUEUE_STAGES),
                 },
                 active_profile,
             ),
+        )
+
+    @app.get("/suggestions/{run_id:int}/debug.txt")
+    async def download_suggestion_run_debug_report(
+        run_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> Response:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profiles found")
+
+        run = session.get(SuggestionRun, run_id)
+        if run is None or run.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Suggestion run not found")
+
+        connection = session.get(LLMConnection, run.llm_connection_id)
+        summary_payload = safe_json_load(run.result_summary_json, {})
+        if not isinstance(summary_payload, dict):
+            summary_payload = {}
+        debug_diagnostics = summary_payload.get("debug", {})
+        if not isinstance(debug_diagnostics, dict):
+            debug_diagnostics = {}
+        if not debug_diagnostics and run.error:
+            debug_diagnostics = {"error": classify_suggestion_run_error(run.error)}
+
+        audit_rows = list(
+            session.exec(
+                select(SuggestionAuditEvent)
+                .where(SuggestionAuditEvent.suggestion_run_id == run.id)
+                .order_by(SuggestionAuditEvent.created_at.desc(), SuggestionAuditEvent.id.desc())
+                .limit(100)
+            ).all()
+        )
+        report_text = build_suggestion_run_debug_report_text(
+            run=run,
+            connection=connection,
+            summary_payload=summary_payload,
+            debug_diagnostics=debug_diagnostics,
+            audit_rows=audit_rows,
+        )
+        filename = f"suggestion_run_{run.id}_debug.txt"
+        return Response(
+            content=report_text,
+            media_type="text/plain",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
     @app.post("/suggestions/proposals/{proposal_id}/status")
@@ -3819,6 +4828,9 @@ def create_app() -> FastAPI:
         proposal = session.get(SuggestionProposal, proposal_id)
         if proposal is None:
             raise HTTPException(status_code=404, detail="Suggestion proposal not found")
+        if not proposal_has_concept_payload(proposal):
+            set_flash(request, "error", "This suggestion is from a legacy non-concept run.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
 
         normalized_status = status.strip().lower()
         if normalized_status not in {"accepted", "rejected"}:
@@ -3843,6 +4855,1093 @@ def create_app() -> FastAPI:
         set_flash(request, "success", f"Suggestion marked as {normalized_status}.")
         return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
 
+    @app.post("/suggestions/proposals/{proposal_id}/queue")
+    async def queue_suggestion_proposal(
+        proposal_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/suggestions/queue"),
+        profile_id: str = Form(default=""),
+        queue_note: str = Form(default=""),
+        force_duplicate: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        resolved_profile_id: int | None = None
+        if profile_id.strip().isdigit():
+            resolved_profile_id = int(profile_id.strip())
+        active_profile = choose_active_profile(session, request, resolved_profile_id)
+        proposal = session.get(SuggestionProposal, proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Suggestion proposal not found")
+        if not proposal_has_concept_payload(proposal):
+            set_flash(request, "error", "Only concept suggestions can be queued in this flow.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+        if active_profile is None or proposal.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Suggestion proposal not found in active profile")
+
+        duplicates_count = 0
+        if proposal.duplicate_fingerprint:
+            duplicates_count = int(
+                session.exec(
+                    select(func.count())
+                    .select_from(SuggestionProposal)
+                    .where(
+                        SuggestionProposal.profile_id == proposal.profile_id,
+                        SuggestionProposal.id != proposal.id,
+                        SuggestionProposal.duplicate_fingerprint == proposal.duplicate_fingerprint,
+                        SuggestionProposal.queue_stage.in_(
+                            ["queued", "specifying", "ready_for_yaml", "yaml_generated", "submitted"]
+                        ),
+                    )
+                ).one()
+            )
+
+        if duplicates_count > 0 and not parse_checkbox_value(force_duplicate):
+            set_flash(
+                request,
+                "error",
+                "A similar concept is already in queue. Submit again with duplicate confirmation to queue anyway.",
+            )
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        proposal.queue_stage = "queued"
+        proposal.queue_note = queue_note.strip() or None
+        proposal.queue_updated_at = utcnow()
+        proposal.updated_at = utcnow()
+        session.add(proposal)
+        create_suggestion_audit_event(
+            session,
+            profile_id=proposal.profile_id,
+            suggestion_run_id=proposal.suggestion_run_id,
+            proposal_id=proposal.id,
+            event_type="suggestion_proposal_queued",
+            actor="user",
+            payload={"duplicates_detected": duplicates_count},
+        )
+        session.commit()
+        set_flash(request, "success", f"Queued concept '{concept_display_title(proposal)}'.")
+        return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/proposals/{proposal_id}/stage")
+    async def update_suggestion_proposal_stage(
+        proposal_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        queue_stage: str = Form(...),
+        queue_note: str = Form(default=""),
+        next_url: str = Form(default="/suggestions/queue"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        proposal = session.get(SuggestionProposal, proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Suggestion proposal not found")
+        if not proposal_has_concept_payload(proposal):
+            set_flash(request, "error", "Only concept suggestions can change queue stage in this flow.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        normalized_stage = queue_stage.strip().lower()
+        if normalized_stage not in SUGGESTION_QUEUE_STAGES:
+            set_flash(request, "error", "Invalid queue stage.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        proposal.queue_stage = normalized_stage
+        proposal.queue_note = queue_note.strip() or None
+        proposal.queue_updated_at = utcnow()
+        proposal.updated_at = utcnow()
+        session.add(proposal)
+        create_suggestion_audit_event(
+            session,
+            profile_id=proposal.profile_id,
+            suggestion_run_id=proposal.suggestion_run_id,
+            proposal_id=proposal.id,
+            event_type="suggestion_proposal_stage_updated",
+            actor="user",
+            payload={"queue_stage": normalized_stage},
+        )
+        session.commit()
+        set_flash(request, "success", f"Concept stage updated to '{normalized_stage}'.")
+        return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/runs/{run_id}/queue-all")
+    async def queue_all_suggestions_from_run(
+        run_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default=""),
+        force_duplicate: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        run = session.get(SuggestionRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Suggestion run not found")
+
+        proposals = list(
+            session.exec(
+                select(SuggestionProposal).where(
+                    SuggestionProposal.suggestion_run_id == run.id,
+                    SuggestionProposal.status == "proposed",
+                    SuggestionProposal.concept_payload_json.is_not(None),
+                )
+            ).all()
+        )
+        if not proposals:
+            set_flash(request, "error", "No proposals available to queue.")
+            return RedirectResponse(url=with_profile_id(next_url or "/suggestions", run.profile_id), status_code=303)
+
+        queued_count = 0
+        skipped_duplicates = 0
+        allow_duplicates = parse_checkbox_value(force_duplicate)
+        for proposal in proposals:
+            if proposal.queue_stage in {"queued", "specifying", "ready_for_yaml", "yaml_generated", "submitted"}:
+                continue
+            duplicates_count = 0
+            if proposal.duplicate_fingerprint:
+                duplicates_count = int(
+                    session.exec(
+                        select(func.count())
+                        .select_from(SuggestionProposal)
+                        .where(
+                            SuggestionProposal.profile_id == proposal.profile_id,
+                            SuggestionProposal.id != proposal.id,
+                            SuggestionProposal.duplicate_fingerprint == proposal.duplicate_fingerprint,
+                            SuggestionProposal.queue_stage.in_(
+                                ["queued", "specifying", "ready_for_yaml", "yaml_generated", "submitted"]
+                            ),
+                        )
+                    ).one()
+                )
+            if duplicates_count > 0 and not allow_duplicates:
+                skipped_duplicates += 1
+                continue
+            proposal.queue_stage = "queued"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            queued_count += 1
+
+        session.commit()
+        set_flash(
+            request,
+            "success",
+            f"Queued {queued_count} concepts. Skipped {skipped_duplicates} duplicates.",
+        )
+        target = next_url.strip() or f"/suggestions/{run_id}"
+        return RedirectResponse(url=with_profile_id(target, run.profile_id), status_code=303)
+
+    @app.get("/suggestions/queue", response_class=HTMLResponse)
+    async def suggestion_queue(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        queue_stage: str = Query(default=""),
+        q: str = Query(default=""),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
+
+        normalized_stage = queue_stage.strip().lower()
+        if normalized_stage and normalized_stage not in SUGGESTION_QUEUE_STAGES:
+            normalized_stage = ""
+
+        proposals: list[SuggestionProposal] = []
+        enriched_proposals: list[dict[str, Any]] = []
+        stage_counts: dict[str, int] = {item: 0 for item in sorted(SUGGESTION_QUEUE_STAGES)}
+        total = 0
+        total_pages = 1
+
+        if active_profile is not None:
+            base_stmt = select(SuggestionProposal).where(
+                SuggestionProposal.profile_id == active_profile.id,
+                SuggestionProposal.concept_payload_json.is_not(None),
+            )
+            all_rows = list(
+                session.exec(
+                    base_stmt.order_by(
+                        SuggestionProposal.queue_updated_at.desc(),
+                        SuggestionProposal.updated_at.desc(),
+                        SuggestionProposal.id.desc(),
+                    )
+                ).all()
+            )
+            for row in all_rows:
+                stage_counts[row.queue_stage] = stage_counts.get(row.queue_stage, 0) + 1
+
+            if normalized_stage:
+                base_stmt = base_stmt.where(SuggestionProposal.queue_stage == normalized_stage)
+            if q.strip():
+                pattern = f"%{q.strip().lower()}%"
+                base_stmt = base_stmt.where(
+                    or_(
+                        func.lower(SuggestionProposal.target_entity_id).like(pattern),
+                        func.lower(func.coalesce(SuggestionProposal.summary, "")).like(pattern),
+                        func.lower(func.coalesce(SuggestionProposal.concept_payload_json, "")).like(pattern),
+                    )
+                )
+
+            count_stmt = select(func.count()).select_from(base_stmt.subquery())
+            total = int(session.exec(count_stmt).one())
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            offset = (page - 1) * page_size
+
+            proposals = list(
+                session.exec(
+                    base_stmt.order_by(
+                        SuggestionProposal.queue_updated_at.desc(),
+                        SuggestionProposal.updated_at.desc(),
+                        SuggestionProposal.id.desc(),
+                    )
+                    .offset(offset)
+                    .limit(page_size)
+                ).all()
+            )
+
+            for proposal in proposals:
+                concept_payload = concept_payload_from_proposal(proposal)
+                enriched_proposals.append(
+                    {
+                        "proposal": proposal,
+                        "concept": concept_payload,
+                        "title": concept_display_title(proposal),
+                        "ranking_display": format_score_out_of_ten(proposal.ranking_score),
+                    }
+                )
+
+        return render_template(
+            request,
+            "suggestion_queue.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "profile_count": profile_count,
+                    "proposals": proposals,
+                    "enriched_proposals": enriched_proposals,
+                    "queue_stage": normalized_stage,
+                    "queue_stage_choices": sorted(SUGGESTION_QUEUE_STAGES),
+                    "score_tooltips": concept_score_tooltips(),
+                    "stage_counts": stage_counts,
+                    "q": q,
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": total_pages,
+                },
+                active_profile,
+            ),
+        )
+
+    @app.post("/suggestions/proposals/{proposal_id}/generate")
+    async def generate_from_suggestion_proposal(
+        proposal_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        generation_mode: str = Form(default="auto"),
+        optional_instruction: str = Form(default=""),
+        next_url: str = Form(default="/suggestions/queue"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        proposal = session.get(SuggestionProposal, proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Suggestion proposal not found")
+        if not proposal_has_concept_payload(proposal):
+            set_flash(request, "error", "Only concept suggestions can generate YAML in this flow.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+        profile = session.get(Profile, proposal.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        connection = get_default_llm_connection(session, profile.id)
+        if connection is None:
+            set_flash(request, "error", "No enabled default LLM connection configured for this profile.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        normalized_mode = generation_mode.strip().lower()
+        if normalized_mode not in SUGGESTION_GENERATION_MODES:
+            normalized_mode = "auto"
+
+        generation = SuggestionGeneration(
+            proposal_id=proposal.id if proposal.id is not None else 0,
+            profile_id=proposal.profile_id,
+            llm_connection_id=connection.id if connection.id is not None else 0,
+            mode=normalized_mode,
+            status="running" if normalized_mode == "auto" else "awaiting_user",
+            optional_instruction=optional_instruction.strip() or None,
+            current_step=0,
+            pending_question_json=(
+                safe_json_dump(next_pending_question(0))
+                if normalized_mode == "advanced"
+                else None
+            ),
+            planning_answers_json=safe_json_dump({}) if normalized_mode == "advanced" else None,
+            final_yaml_text=None,
+            final_structured_json=None,
+            error=None,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+            finished_at=None,
+        )
+        session.add(generation)
+        session.flush()
+        generation_id = generation.id
+        if generation_id is None:
+            raise HTTPException(status_code=500, detail="Generation ID unavailable")
+
+        if normalized_mode == "advanced":
+            proposal.queue_stage = "specifying"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.add(generation)
+            session.commit()
+            return RedirectResponse(
+                url=f"/suggestions/generations/{generation_id}?{build_query(profile_id=proposal.profile_id)}",
+                status_code=303,
+            )
+
+        try:
+            yaml_text, structured_payload = await generate_yaml_from_concept(
+                session=session,
+                profile=profile,
+                connection=connection,
+                proposal=proposal,
+                optional_instruction=optional_instruction,
+            )
+            generation.final_yaml_text = yaml_text
+            generation.final_structured_json = safe_json_dump(structured_payload)
+            generation.status = "completed"
+            generation.error = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            create_generation_revision(
+                session,
+                generation_id=generation_id,
+                source="initial",
+                prompt_text=optional_instruction,
+                yaml_text=yaml_text,
+                structured_payload=structured_payload,
+                change_summary="Initial concept-to-YAML generation.",
+            )
+            proposal.queue_stage = "yaml_generated"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.commit()
+        except (LLMClientError, ValueError) as exc:
+            generation.status = "failed"
+            generation.error = str(exc)
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            session.commit()
+            set_flash(request, "error", f"Generation failed: {exc}")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        set_flash(request, "success", "Generated YAML draft from concept.")
+        return RedirectResponse(
+            url=f"/suggestions/generations/{generation_id}?{build_query(profile_id=proposal.profile_id)}",
+            status_code=303,
+        )
+
+    @app.get("/suggestions/generations/{generation_id}", response_class=HTMLResponse)
+    async def suggestion_generation_detail(
+        generation_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profile found")
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None or generation.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Generation not found")
+
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None or proposal.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+
+        revisions = list(
+            session.exec(
+                select(SuggestionGenerationRevision)
+                .where(SuggestionGenerationRevision.generation_id == generation.id)
+                .order_by(
+                    SuggestionGenerationRevision.revision_index.asc(),
+                    SuggestionGenerationRevision.id.asc(),
+                )
+            ).all()
+        )
+        pending_question = safe_json_load(generation.pending_question_json, {})
+        if not isinstance(pending_question, dict):
+            pending_question = {}
+        answers = parse_generation_answers(generation)
+        concept_payload = concept_payload_from_proposal(proposal)
+
+        return render_template(
+            request,
+            "suggestion_generation_detail.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "generation": generation,
+                    "proposal": proposal,
+                    "concept_payload": concept_payload,
+                    "revisions": revisions,
+                    "pending_question": pending_question,
+                    "answers": answers,
+                    "diff_text": generation_revision_diff_text(revisions),
+                    "back_url": f"/suggestions/queue?{build_query(profile_id=active_profile.id)}",
+                },
+                active_profile,
+            ),
+        )
+
+    @app.post("/suggestions/generations/{generation_id}/answer")
+    async def answer_suggestion_generation_question(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        answer: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+        profile = session.get(Profile, proposal.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        connection = session.get(LLMConnection, generation.llm_connection_id)
+        if connection is None:
+            raise HTTPException(status_code=404, detail="LLM connection not found")
+
+        redirect_target = next_url.strip() or f"/suggestions/generations/{generation_id}"
+        cleaned_answer = answer.strip()
+        if generation.status != "awaiting_user":
+            set_flash(request, "error", "Generation is not waiting for answers.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+        if not cleaned_answer:
+            set_flash(request, "error", "Answer cannot be empty.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        pending_question = safe_json_load(generation.pending_question_json, {})
+        if not isinstance(pending_question, dict):
+            pending_question = {}
+        question_key = str(pending_question.get("key", "")).strip()
+        if not question_key:
+            set_flash(request, "error", "No active question found for this generation.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        answers = parse_generation_answers(generation)
+        answers[question_key] = cleaned_answer
+        generation.planning_answers_json = safe_json_dump(answers)
+
+        next_step = generation.current_step + 1
+        if next_step < len(ADVANCED_GENERATION_STEPS):
+            generation.current_step = next_step
+            generation.pending_question_json = safe_json_dump(next_pending_question(next_step))
+            generation.updated_at = utcnow()
+            session.add(generation)
+            session.commit()
+            set_flash(request, "success", "Answer saved. Continue to the next step.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        try:
+            yaml_text, structured_payload = await generate_yaml_from_concept(
+                session=session,
+                profile=profile,
+                connection=connection,
+                proposal=proposal,
+                optional_instruction=generation.optional_instruction or "",
+                advanced_answers=answers,
+            )
+            generation.final_yaml_text = yaml_text
+            generation.final_structured_json = safe_json_dump(structured_payload)
+            generation.pending_question_json = None
+            generation.status = "completed"
+            generation.error = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            create_generation_revision(
+                session,
+                generation_id=generation.id if generation.id is not None else 0,
+                source="advanced",
+                prompt_text=safe_json_dump(answers),
+                yaml_text=yaml_text,
+                structured_payload=structured_payload,
+                change_summary="Advanced planning answers finalized into YAML.",
+            )
+            proposal.queue_stage = "yaml_generated"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.commit()
+            set_flash(request, "success", "Advanced generation completed.")
+        except (LLMClientError, ValueError) as exc:
+            generation.status = "failed"
+            generation.error = str(exc)
+            generation.pending_question_json = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            session.commit()
+            set_flash(request, "error", f"Generation failed: {exc}")
+
+        return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/generations/{generation_id}/let-llm-decide")
+    async def let_llm_decide_generation_rest(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+        profile = session.get(Profile, proposal.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        connection = session.get(LLMConnection, generation.llm_connection_id)
+        if connection is None:
+            raise HTTPException(status_code=404, detail="LLM connection not found")
+
+        redirect_target = next_url.strip() or f"/suggestions/generations/{generation_id}"
+        if generation.status not in {"awaiting_user", "running"}:
+            set_flash(request, "error", "Generation is not in advanced planning mode.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        answers = parse_generation_answers(generation)
+        try:
+            yaml_text, structured_payload = await generate_yaml_from_concept(
+                session=session,
+                profile=profile,
+                connection=connection,
+                proposal=proposal,
+                optional_instruction=generation.optional_instruction or "",
+                advanced_answers=answers,
+            )
+            generation.final_yaml_text = yaml_text
+            generation.final_structured_json = safe_json_dump(structured_payload)
+            generation.pending_question_json = None
+            generation.status = "completed"
+            generation.error = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            create_generation_revision(
+                session,
+                generation_id=generation.id if generation.id is not None else 0,
+                source="advanced",
+                prompt_text=safe_json_dump(answers),
+                yaml_text=yaml_text,
+                structured_payload=structured_payload,
+                change_summary="Advanced flow short-circuited with LLM deciding the remaining details.",
+            )
+            proposal.queue_stage = "yaml_generated"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.commit()
+            set_flash(request, "success", "LLM completed the remaining planning steps.")
+        except (LLMClientError, ValueError) as exc:
+            generation.status = "failed"
+            generation.error = str(exc)
+            generation.pending_question_json = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            session.commit()
+            set_flash(request, "error", f"Generation failed: {exc}")
+
+        return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/generations/{generation_id}/tweak")
+    async def tweak_generated_yaml(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        tweak_prompt: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+        profile = session.get(Profile, proposal.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        connection = session.get(LLMConnection, generation.llm_connection_id)
+        if connection is None:
+            raise HTTPException(status_code=404, detail="LLM connection not found")
+
+        redirect_target = next_url.strip() or f"/suggestions/generations/{generation_id}"
+        prompt = tweak_prompt.strip()
+        if not prompt:
+            set_flash(request, "error", "Tweak prompt cannot be empty.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+        if not generation.final_yaml_text:
+            set_flash(request, "error", "No generated YAML exists to tweak.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        try:
+            yaml_text, structured_payload = await generate_yaml_from_concept(
+                session=session,
+                profile=profile,
+                connection=connection,
+                proposal=proposal,
+                optional_instruction=generation.optional_instruction or "",
+                advanced_answers=parse_generation_answers(generation),
+                tweak_prompt=prompt,
+                existing_yaml=generation.final_yaml_text,
+            )
+            generation.final_yaml_text = yaml_text
+            generation.final_structured_json = safe_json_dump(structured_payload)
+            generation.status = "completed"
+            generation.error = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            session.add(generation)
+            create_generation_revision(
+                session,
+                generation_id=generation.id if generation.id is not None else 0,
+                source="llm_tweak",
+                prompt_text=prompt,
+                yaml_text=yaml_text,
+                structured_payload=structured_payload,
+                change_summary="Applied LLM tweak prompt.",
+            )
+            proposal.queue_stage = "yaml_generated"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.commit()
+            set_flash(request, "success", "Applied LLM tweak to YAML.")
+        except (LLMClientError, ValueError) as exc:
+            set_flash(request, "error", f"Tweak failed: {exc}")
+        return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/generations/{generation_id}/manual-edit")
+    async def manual_edit_generated_yaml(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        yaml_text: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+
+        redirect_target = next_url.strip() or f"/suggestions/generations/{generation_id}"
+        raw_yaml = yaml_text.strip()
+        if not raw_yaml:
+            set_flash(request, "error", "YAML cannot be empty.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        try:
+            normalized = parse_automation_yaml(raw_yaml)
+        except ValueError as exc:
+            set_flash(request, "error", str(exc))
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        normalized_yaml = yaml_from_automation_payload(normalized)
+        generation.final_yaml_text = normalized_yaml
+        generation.final_structured_json = safe_json_dump(normalized)
+        generation.status = "completed"
+        generation.error = None
+        generation.updated_at = utcnow()
+        generation.finished_at = utcnow()
+        session.add(generation)
+        create_generation_revision(
+            session,
+            generation_id=generation.id if generation.id is not None else 0,
+            source="manual_edit",
+            prompt_text=None,
+            yaml_text=normalized_yaml,
+            structured_payload=normalized,
+            change_summary="Manual YAML edit.",
+        )
+        proposal.queue_stage = "yaml_generated"
+        proposal.queue_updated_at = utcnow()
+        proposal.updated_at = utcnow()
+        session.add(proposal)
+        session.commit()
+        set_flash(request, "success", "Manual YAML edit saved.")
+        return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/generations/{generation_id}/cancel")
+    async def cancel_suggestion_generation(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+
+        generation.status = "cancelled"
+        generation.error = None
+        generation.pending_question_json = None
+        generation.updated_at = utcnow()
+        generation.finished_at = utcnow()
+        session.add(generation)
+        if proposal.queue_stage == "specifying":
+            proposal.queue_stage = "queued"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+        session.commit()
+        set_flash(request, "success", "Generation cancelled.")
+        redirect_target = next_url.strip() or "/suggestions/queue"
+        return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/generations/{generation_id}/restart")
+    async def restart_suggestion_generation(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        generation_mode: str = Form(default="auto"),
+        optional_instruction: str = Form(default=""),
+        next_url: str = Form(default="/suggestions/queue"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+        profile = session.get(Profile, proposal.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        connection = get_default_llm_connection(session, profile.id)
+        if connection is None:
+            set_flash(request, "error", "No enabled default LLM connection configured for this profile.")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        normalized_mode = generation_mode.strip().lower()
+        if normalized_mode not in SUGGESTION_GENERATION_MODES:
+            normalized_mode = "auto"
+
+        replacement = SuggestionGeneration(
+            proposal_id=proposal.id if proposal.id is not None else 0,
+            profile_id=proposal.profile_id,
+            llm_connection_id=connection.id if connection.id is not None else 0,
+            mode=normalized_mode,
+            status="running" if normalized_mode == "auto" else "awaiting_user",
+            optional_instruction=optional_instruction.strip() or generation.optional_instruction,
+            current_step=0,
+            pending_question_json=safe_json_dump(next_pending_question(0)) if normalized_mode == "advanced" else None,
+            planning_answers_json=safe_json_dump({}) if normalized_mode == "advanced" else None,
+            final_yaml_text=None,
+            final_structured_json=None,
+            error=None,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+            finished_at=None,
+        )
+        session.add(replacement)
+        session.flush()
+        replacement_id = replacement.id
+        if replacement_id is None:
+            raise HTTPException(status_code=500, detail="Replacement generation ID unavailable")
+
+        if normalized_mode == "advanced":
+            proposal.queue_stage = "specifying"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.commit()
+            return RedirectResponse(
+                url=f"/suggestions/generations/{replacement_id}?{build_query(profile_id=proposal.profile_id)}",
+                status_code=303,
+            )
+
+        try:
+            yaml_text, structured_payload = await generate_yaml_from_concept(
+                session=session,
+                profile=profile,
+                connection=connection,
+                proposal=proposal,
+                optional_instruction=replacement.optional_instruction or "",
+            )
+            replacement.final_yaml_text = yaml_text
+            replacement.final_structured_json = safe_json_dump(structured_payload)
+            replacement.status = "completed"
+            replacement.error = None
+            replacement.updated_at = utcnow()
+            replacement.finished_at = utcnow()
+            session.add(replacement)
+            create_generation_revision(
+                session,
+                generation_id=replacement_id,
+                source="initial",
+                prompt_text=replacement.optional_instruction,
+                yaml_text=yaml_text,
+                structured_payload=structured_payload,
+                change_summary="Restarted generation.",
+            )
+            proposal.queue_stage = "yaml_generated"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(proposal)
+            session.commit()
+        except (LLMClientError, ValueError) as exc:
+            replacement.status = "failed"
+            replacement.error = str(exc)
+            replacement.updated_at = utcnow()
+            replacement.finished_at = utcnow()
+            session.add(replacement)
+            session.commit()
+            set_flash(request, "error", f"Restart failed: {exc}")
+            return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
+        set_flash(request, "success", "Generation restarted successfully.")
+        return RedirectResponse(
+            url=f"/suggestions/generations/{replacement_id}?{build_query(profile_id=proposal.profile_id)}",
+            status_code=303,
+        )
+
+    @app.get("/suggestions/generations/{generation_id}/export.yaml")
+    async def export_suggestion_generation_yaml(
+        generation_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> Response:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profile found")
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None or generation.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        if not generation.final_yaml_text:
+            raise HTTPException(status_code=404, detail="No generated YAML to export")
+
+        filename = f"suggestion-generation-{generation_id}.yaml"
+        headers = {"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+        return Response(content=generation.final_yaml_text, media_type="text/yaml", headers=headers)
+
+    @app.post("/suggestions/generations/{generation_id}/submit")
+    async def submit_suggestion_generation_to_home_assistant(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        confirm_submit: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+        profile = session.get(Profile, proposal.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        redirect_target = next_url.strip() or f"/suggestions/generations/{generation_id}"
+        if not parse_checkbox_value(confirm_submit):
+            set_flash(request, "error", "Submission confirmation is required.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+        if not generation.final_yaml_text:
+            set_flash(request, "error", "No generated YAML exists for submission.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        try:
+            automation_payload = parse_automation_yaml(generation.final_yaml_text)
+        except ValueError as exc:
+            set_flash(request, "error", str(exc))
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        concept_payload = concept_payload_from_proposal(proposal)
+        target_kind = str(concept_payload.get("target_kind", "")).strip().lower()
+        target_entity_id = str(concept_payload.get("target_entity_id", "")).strip().lower()
+        existing_snapshot: ConfigSnapshot | None = None
+        operation = "create"
+        previous_config: dict[str, Any] | None = None
+        if target_kind == "existing_automation" and target_entity_id:
+            existing_snapshot = find_existing_config_snapshot_for_entity(
+                session,
+                profile_id=profile.id,
+                entity_id=target_entity_id,
+            )
+
+        if existing_snapshot is not None and existing_snapshot.config_key:
+            config_key = existing_snapshot.config_key
+            operation = "update"
+            previous_payload = safe_json_load(existing_snapshot.config_json, {})
+            previous_config = previous_payload if isinstance(previous_payload, dict) else None
+        else:
+            config_key = derive_unique_config_key(
+                session,
+                profile_id=profile.id,
+                title=str(concept_payload.get("title", concept_display_title(proposal))),
+            )
+
+        token = resolve_profile_token(profile)
+        if not token:
+            set_flash(request, "error", "No token configured in profile or environment.")
+            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+        client = HAClient(
+            base_url=profile.base_url,
+            token=token,
+            verify_tls=profile.verify_tls,
+            timeout_seconds=profile.timeout_seconds,
+        )
+
+        try:
+            submit_response = await client.upsert_automation_config(config_key, automation_payload)
+            generation.status = "submitted"
+            generation.error = None
+            generation.updated_at = utcnow()
+            generation.finished_at = utcnow()
+            proposal.queue_stage = "submitted"
+            proposal.queue_updated_at = utcnow()
+            proposal.updated_at = utcnow()
+            session.add(generation)
+            session.add(proposal)
+            session.add(
+                SuggestionSubmissionEvent(
+                    generation_id=generation.id if generation.id is not None else 0,
+                    profile_id=proposal.profile_id,
+                    config_key=config_key,
+                    operation=operation,
+                    previous_config_json=safe_json_dump(previous_config) if previous_config else None,
+                    request_payload_json=safe_json_dump(automation_payload),
+                    response_payload_json=safe_json_dump(submit_response),
+                    status="success",
+                    error=None,
+                    created_at=utcnow(),
+                )
+            )
+            session.commit()
+            set_flash(request, "success", f"Submitted automation using config key '{config_key}'.")
+        except HAClientError as exc:
+            session.add(
+                SuggestionSubmissionEvent(
+                    generation_id=generation.id if generation.id is not None else 0,
+                    profile_id=proposal.profile_id,
+                    config_key=config_key,
+                    operation=operation,
+                    previous_config_json=safe_json_dump(previous_config) if previous_config else None,
+                    request_payload_json=safe_json_dump(automation_payload),
+                    response_payload_json=None,
+                    status="failed",
+                    error=str(exc),
+                    created_at=utcnow(),
+                )
+            )
+            session.commit()
+            set_flash(request, "error", f"Submission failed: {exc}")
+
+        return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+
+    @app.post("/suggestions/generations/{generation_id}/clone-variant")
+    async def clone_suggestion_generation_variant(
+        generation_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/suggestions/queue"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+        generation = session.get(SuggestionGeneration, generation_id)
+        if generation is None:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        proposal = session.get(SuggestionProposal, generation.proposal_id)
+        if proposal is None:
+            raise HTTPException(status_code=404, detail="Generation proposal not found")
+
+        concept_payload = concept_payload_from_proposal(proposal)
+        title = str(concept_payload.get("title", concept_display_title(proposal))).strip()
+        concept_payload["title"] = f"{title} (Variant)"
+        concept_payload["summary"] = str(concept_payload.get("summary", "")).strip() or f"{title} variant"
+
+        clone = SuggestionProposal(
+            profile_id=proposal.profile_id,
+            suggestion_run_id=proposal.suggestion_run_id,
+            config_snapshot_id=proposal.config_snapshot_id,
+            target_entity_id=proposal_target_entity_id(concept_payload),
+            status="proposed",
+            schema_version=proposal.schema_version,
+            summary=str(concept_payload.get("summary", "")).strip()[:512] or proposal.summary,
+            confidence=proposal.confidence,
+            risk_level=proposal.risk_level,
+            concept_payload_json=safe_json_dump(concept_payload),
+            concept_type=proposal.concept_type,
+            impact_score=proposal.impact_score,
+            feasibility_score=proposal.feasibility_score,
+            novelty_score=proposal.novelty_score,
+            ranking_score=proposal.ranking_score,
+            ranking_breakdown_json=proposal.ranking_breakdown_json,
+            duplicate_fingerprint=concept_duplicate_fingerprint(concept_payload),
+            queue_stage="queued",
+            queue_note="Cloned as variant",
+            queue_updated_at=utcnow(),
+            proposed_patch_json=None,
+            verification_steps_json=proposal.verification_steps_json,
+            raw_response_json=proposal.raw_response_json,
+            validation_error=None,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        session.add(clone)
+        session.commit()
+        set_flash(request, "success", "Cloned concept as variant and queued it.")
+        return RedirectResponse(url=with_profile_id(next_url, proposal.profile_id), status_code=303)
+
     @app.get("/api/suggestions/runs/{run_id}")
     async def api_suggestion_run_status(
         run_id: int,
@@ -3860,17 +5959,38 @@ def create_app() -> FastAPI:
 
         proposals = list(
             session.exec(
-                select(SuggestionProposal).where(SuggestionProposal.suggestion_run_id == run.id)
+                select(SuggestionProposal).where(
+                    SuggestionProposal.suggestion_run_id == run.id,
+                    or_(
+                        SuggestionProposal.concept_payload_json.is_not(None),
+                        SuggestionProposal.target_entity_id == INVALID_CONCEPT_RESPONSE_ENTITY_ID,
+                    ),
+                )
             ).all()
         )
         proposal_counts: dict[str, int] = {}
+        queue_counts: dict[str, int] = {}
         for item in proposals:
             proposal_counts[item.status] = proposal_counts.get(item.status, 0) + 1
+            queue_counts[item.queue_stage] = queue_counts.get(item.queue_stage, 0) + 1
+
+        summary_payload = safe_json_load(run.result_summary_json, {})
+        if not isinstance(summary_payload, dict):
+            summary_payload = {}
+        debug_payload = summary_payload.get("debug", {})
+        if not isinstance(debug_payload, dict):
+            debug_payload = {}
 
         payload = {
             "run": {
                 "id": run.id,
                 "profile_id": run.profile_id,
+                "run_kind": run.run_kind,
+                "idea_type": run.idea_type,
+                "mode": run.mode,
+                "top_k": run.top_k,
+                "include_existing": run.include_existing,
+                "include_new": run.include_new,
                 "status": run.status,
                 "target_count": run.target_count,
                 "processed_count": run.processed_count,
@@ -3883,18 +6003,29 @@ def create_app() -> FastAPI:
                 "created_at": run.created_at.isoformat(),
                 "updated_at": run.updated_at.isoformat(),
                 "context_hash": run.context_hash,
-                "summary": safe_json_load(run.result_summary_json, {}),
+                "summary": summary_payload,
+                "debug": debug_payload,
             },
             "proposal_counts": proposal_counts,
+            "queue_counts": queue_counts,
             "proposals": [
                 {
                     "id": item.id,
                     "config_snapshot_id": item.config_snapshot_id,
                     "target_entity_id": item.target_entity_id,
                     "status": item.status,
+                    "queue_stage": item.queue_stage,
+                    "title": str(safe_json_load(item.concept_payload_json, {}).get("title", "")),
+                    "concept_type": item.concept_type,
                     "summary": item.summary,
                     "confidence": item.confidence,
                     "risk_level": item.risk_level,
+                    "impact_score": item.impact_score,
+                    "feasibility_score": item.feasibility_score,
+                    "novelty_score": item.novelty_score,
+                    "ranking_score": item.ranking_score,
+                    "ranking_breakdown": safe_json_load(item.ranking_breakdown_json, {}),
+                    "concept_payload": safe_json_load(item.concept_payload_json, {}),
                     "validation_error": item.validation_error,
                     "created_at": item.created_at.isoformat(),
                     "updated_at": item.updated_at.isoformat(),

@@ -5,16 +5,26 @@
   <div class="row gap-sm wrap">
     <a class="button" href="{{ back_url }}">Back to Runs</a>
     {% if active_profile %}
-      <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id, config_sync_run_id=run.config_sync_run_id) }}">Config Items</a>
+      <a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id) }}">Open Queue</a>
+      <a class="button" href="/suggestions/{{ run.id }}/debug.txt?{{ build_query(profile_id=active_profile.id) }}">Download Debug Report</a>
     {% endif %}
+    <form method="post" action="/suggestions/runs/{{ run.id }}/queue-all">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, queue_stage=queue_stage) }}" />
+      <button type="submit" data-tooltip="Queue all concepts in this run.">Add All to Queue</button>
+      <button type="submit" name="force_duplicate" value="on" class="button-secondary" data-tooltip="Queue all concepts including duplicates.">Queue All (Allow Duplicates)</button>
+    </form>
   </div>
 
   <div class="detail-grid">
     <div><strong>Status</strong></div><div><span class="status-chip status-{{ run.status }}">{{ run.status }}</span></div>
     <div><strong>LLM Connection</strong></div><div>{{ connection.name if connection else '' }}</div>
+    <div><strong>Type</strong></div><div>{{ run.idea_type }}</div>
+    <div><strong>Mode</strong></div><div>{{ run.mode }}</div>
+    <div><strong>Top K</strong></div><div>{{ run.top_k }}</div>
     <div><strong>Targets</strong></div><div>{{ run.target_count }}</div>
     <div><strong>Processed</strong></div><div>{{ run.processed_count }}</div>
-    <div><strong>Proposed</strong></div><div>{{ run.success_count }}</div>
+    <div><strong>Ranked</strong></div><div>{{ run.success_count }}</div>
     <div><strong>Invalid</strong></div><div>{{ run.invalid_count }}</div>
     <div><strong>Errors</strong></div><div>{{ run.error_count }}</div>
     <div><strong>Error</strong></div><div>{{ run.error or '' }}</div>
@@ -26,14 +36,92 @@
   <h3>Summary</h3>
   <pre>{{ summary_pretty }}</pre>
 
+  {% if debug_diagnostics %}
+    {% set error_debug = debug_diagnostics.get("error", {}) %}
+    <h3>Debug Diagnostics</h3>
+    <div class="detail-grid">
+      <div><strong>Error Kind</strong></div><div>{{ error_debug.get("kind", "") }}</div>
+      <div><strong>Error Title</strong></div><div>{{ error_debug.get("title", "") }}</div>
+      <div><strong>Provider Message</strong></div><div>{{ error_debug.get("provider_message", run.error or "") }}</div>
+      <div><strong>HTTP Status</strong></div><div>{{ error_debug.get("status_code", "") }}</div>
+      <div><strong>LLM Endpoint</strong></div><div>{{ debug_diagnostics.get("provider_debug", {}).get("endpoint", "") }}</div>
+      <div><strong>Attempt Count</strong></div><div>{{ debug_diagnostics.get("provider_debug", {}).get("attempt_count", "") }}</div>
+      <div><strong>Retry Reasons</strong></div><div>{{ debug_diagnostics.get("provider_debug", {}).get("retry_reasons", []) }}</div>
+      <div><strong>Last Response Status</strong></div><div>{{ debug_diagnostics.get("provider_debug", {}).get("last_response_status", "") }}</div>
+      <div><strong>Model</strong></div><div>{{ debug_diagnostics.get("llm_connection", {}).get("model", "") }}</div>
+      <div><strong>Base URL</strong></div><div>{{ debug_diagnostics.get("llm_connection", {}).get("base_url", "") }}</div>
+    </div>
+
+    {% if error_debug.get("likely_causes") %}
+      <h4>Likely Causes</h4>
+      <ul>
+        {% for item in error_debug.get("likely_causes", []) %}
+          <li>{{ item }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {% if error_debug.get("recommended_steps") %}
+      <h4>Recommended Next Steps</h4>
+      <ol>
+        {% for item in error_debug.get("recommended_steps", []) %}
+          <li>{{ item }}</li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+
+    <h4>Debug Payload</h4>
+    <div class="row gap-sm wrap">
+      <button type="button" id="copy-debug-json" data-tooltip="Copy debug JSON payload to clipboard.">Copy Debug JSON</button>
+      <button type="button" id="copy-debug-report" data-tooltip="Copy full debug report text to clipboard.">Copy Full Debug Report</button>
+      <span id="debug-copy-status" aria-live="polite"></span>
+    </div>
+    <pre id="debug-payload-json">{{ debug_pretty }}</pre>
+    <textarea id="debug-report-text" hidden>{{ debug_report_text }}</textarea>
+  {% endif %}
+
+  <div class="detail-grid">
+    {% for stage_name, count in stage_counts.items() %}
+      <div><strong>{{ stage_name }}</strong></div><div>{{ count }}</div>
+    {% endfor %}
+  </div>
+
+  <h3>Run Audit Events</h3>
+  {% if audit_events %}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Created</th>
+            <th>Event</th>
+            <th>Actor</th>
+            <th>Payload</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in audit_events %}
+            <tr>
+              <td data-label="Created">{{ item.created_at }}</td>
+              <td data-label="Event">{{ item.event_type }}</td>
+              <td data-label="Actor">{{ item.actor }}</td>
+              <td data-label="Payload"><pre>{{ item.payload_pretty }}</pre></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p>No audit events for this run.</p>
+  {% endif %}
+
   <form method="get" action="/suggestions/{{ run.id }}" class="grid-form compact">
     <input type="hidden" name="profile_id" value="{{ active_profile.id if active_profile else '' }}" />
     <label>
-      Proposal Status
-      <select name="proposal_status">
+      Queue Stage
+      <select name="queue_stage">
         <option value="">All</option>
-        {% for choice in status_choices %}
-          <option value="{{ choice }}" {% if proposal_status == choice %}selected{% endif %}>{{ choice }}</option>
+        {% for choice in queue_stage_choices %}
+          <option value="{{ choice }}" {% if queue_stage == choice %}selected{% endif %}>{{ choice }}</option>
         {% endfor %}
       </select>
     </label>
@@ -41,58 +129,196 @@
     <a class="button" href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
   </form>
 
-  {% if proposals %}
-    <p>{{ proposals|length }} proposals.</p>
-    {% for proposal in proposals %}
+  {% if enriched_proposals %}
+    <p>{{ enriched_proposals|length }} concepts.</p>
+    {% for row in enriched_proposals %}
+      {% set proposal = row.proposal %}
+      {% set concept = row.concept %}
       <article class="panel panel-inner">
         <div class="row between wrap gap-sm">
           <div>
-            <strong>{{ proposal.target_entity_id }}</strong>
-            {% if proposal.summary %}
-              <div>{{ proposal.summary }}</div>
-            {% endif %}
+            <strong>{{ row.title }}</strong>
+            <div>{{ concept.summary or proposal.summary or '' }}</div>
           </div>
-          <span class="status-chip status-{{ proposal.status }}">{{ proposal.status }}</span>
+          <span class="status-chip status-{{ proposal.queue_stage }}">{{ proposal.queue_stage }}</span>
         </div>
+
         <div class="detail-grid">
-          <div><strong>Confidence</strong></div><div>{{ proposal.confidence if proposal.confidence is not none else '' }}</div>
+          <div><strong>Concept Type</strong></div><div>{{ concept.concept_type or proposal.concept_type or '' }}</div>
+          <div><strong>Target Kind</strong></div><div>{{ concept.target_kind or '' }}</div>
+          <div><strong>Target Entity</strong></div><div><code>{{ concept.target_entity_id or proposal.target_entity_id }}</code></div>
           <div><strong>Risk</strong></div><div>{{ proposal.risk_level or '' }}</div>
-          <div><strong>Validation Error</strong></div><div>{{ proposal.validation_error or '' }}</div>
+          <div><strong>Status</strong></div><div>{{ proposal.status }}</div>
           <div><strong>Created At</strong></div><div>{{ proposal.created_at }}</div>
         </div>
-        {% if proposal.proposed_patch_json %}
-          <h4>Proposed Patch</h4>
-          <pre>{{ proposal.proposed_patch_json }}</pre>
-        {% endif %}
-        {% if proposal.verification_steps_json %}
-          <h4>Verification Steps</h4>
-          <pre>{{ proposal.verification_steps_json }}</pre>
-        {% endif %}
-        {% if proposal.raw_response_json %}
-          <h4>Sanitized Provider Response</h4>
-          <pre>{{ proposal.raw_response_json }}</pre>
+
+        <details class="metric-disclosure">
+          <summary>Scoring Details (Experimental)</summary>
+          <p class="muted-text">These metrics are provisional and may be recalibrated in future updates.</p>
+          <div class="detail-grid metric-grid">
+            <div>
+              <strong>Confidence</strong>
+              <span class="field-help" title="{{ score_tooltips.get('confidence', '') }}" aria-label="{{ score_tooltips.get('confidence', '') }}">?</span>
+            </div>
+            <div>{{ row.score_display["confidence"] or '' }}</div>
+            <div>
+              <strong>Impact</strong>
+              <span class="field-help" title="{{ score_tooltips.get('impact', '') }}" aria-label="{{ score_tooltips.get('impact', '') }}">?</span>
+            </div>
+            <div>{{ row.score_display["impact"] or '' }}</div>
+            <div>
+              <strong>Feasibility</strong>
+              <span class="field-help" title="{{ score_tooltips.get('feasibility', '') }}" aria-label="{{ score_tooltips.get('feasibility', '') }}">?</span>
+            </div>
+            <div>{{ row.score_display["feasibility"] or '' }}</div>
+            <div>
+              <strong>Novelty</strong>
+              <span class="field-help" title="{{ score_tooltips.get('novelty', '') }}" aria-label="{{ score_tooltips.get('novelty', '') }}">?</span>
+            </div>
+            <div>{{ row.score_display["novelty"] or '' }}</div>
+            <div>
+              <strong>Ranking</strong>
+              <span class="field-help" title="{{ score_tooltips.get('ranking', '') }}" aria-label="{{ score_tooltips.get('ranking', '') }}">?</span>
+            </div>
+            <div>{{ row.score_display["ranking"] or '' }}</div>
+          </div>
+          <h5>Ranking Breakdown</h5>
+          <pre class="pretty-block">{{ row.ranking_breakdown_pretty }}</pre>
+        </details>
+
+        <h4>Involved Entities</h4>
+        {% if row.involved_entities %}
+          <ul class="clean-list">
+            {% for item in row.involved_entities %}
+              <li><code>{{ item }}</code></li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted-text">No involved entities listed.</p>
         {% endif %}
 
-        {% if proposal.status == "proposed" %}
-          <div class="row gap-sm wrap">
-            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/status">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <input type="hidden" name="status" value="accepted" />
-              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, proposal_status=proposal_status) }}" />
-              <button type="submit" data-tooltip="Mark this proposal as accepted.">Accept</button>
-            </form>
-            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/status">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <input type="hidden" name="status" value="rejected" />
-              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, proposal_status=proposal_status) }}" />
-              <button type="submit" class="danger" data-tooltip="Mark this proposal as rejected.">Reject</button>
-            </form>
-          </div>
+        <h4>Prerequisites</h4>
+        {% if row.prerequisites %}
+          <ul class="clean-list">
+            {% for item in row.prerequisites %}
+              <li>{{ item }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted-text">No prerequisites listed.</p>
         {% endif %}
+
+        <h4>Verification Outline</h4>
+        {% if row.verification_outline %}
+          <ol class="clean-list">
+            {% for item in row.verification_outline %}
+              <li>{{ item }}</li>
+            {% endfor %}
+          </ol>
+        {% else %}
+          <p class="muted-text">No verification outline listed.</p>
+        {% endif %}
+
+        <div class="suggestion-action-groups">
+          <section class="suggestion-action-group">
+            <h5>Queue Actions</h5>
+            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/queue">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="profile_id" value="{{ active_profile.id if active_profile else '' }}" />
+              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, queue_stage=queue_stage) }}" />
+              <div class="button-row">
+                <button type="submit" data-tooltip="Add concept to review queue.">Add to Queue</button>
+                <button type="submit" name="force_duplicate" value="on" class="button-secondary" data-tooltip="Add to queue even if similar concept exists.">Queue Anyway</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="suggestion-action-group">
+            <h5>Stage Management</h5>
+            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/stage" class="grid-form compact">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, queue_stage=queue_stage) }}" />
+              <label>
+                Stage
+                <select name="queue_stage">
+                  {% for choice in queue_stage_choices %}
+                    <option value="{{ choice }}" {% if proposal.queue_stage == choice %}selected{% endif %}>{{ choice }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <button type="submit">Update Stage</button>
+            </form>
+          </section>
+
+          <section class="suggestion-action-group">
+            <h5>YAML Generation</h5>
+            <form method="post" action="/suggestions/proposals/{{ proposal.id }}/generate" class="grid-form compact">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="next_url" value="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None, queue_stage=queue_stage) }}" />
+              <label>
+                Generation Mode
+                <select name="generation_mode">
+                  <option value="auto">Auto</option>
+                  <option value="advanced">Advanced</option>
+                </select>
+              </label>
+              <label>
+                Optional Instruction
+                <input type="text" name="optional_instruction" placeholder="Optional guidance for the LLM" />
+              </label>
+              <button type="submit" data-tooltip="Generate YAML from this concept.">Generate YAML</button>
+            </form>
+          </section>
+        </div>
       </article>
     {% endfor %}
   {% else %}
-    <p>No proposals for this run.</p>
+    <p>No concepts for this run.</p>
   {% endif %}
 </section>
+<script>
+  (function () {
+    function setCopyStatus(message, isError) {
+      const statusEl = document.getElementById("debug-copy-status");
+      if (!statusEl) {
+        return;
+      }
+      statusEl.textContent = message;
+      statusEl.className = isError ? "flash flash-error" : "flash flash-success";
+      window.setTimeout(function () {
+        statusEl.textContent = "";
+        statusEl.className = "";
+      }, 2200);
+    }
+
+    async function copyText(text) {
+      if (!text) {
+        setCopyStatus("Nothing to copy.", true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopyStatus("Copied to clipboard.", false);
+      } catch (_err) {
+        setCopyStatus("Clipboard copy failed.", true);
+      }
+    }
+
+    const copyJsonBtn = document.getElementById("copy-debug-json");
+    const copyReportBtn = document.getElementById("copy-debug-report");
+    const payloadEl = document.getElementById("debug-payload-json");
+    const reportEl = document.getElementById("debug-report-text");
+
+    if (copyJsonBtn && payloadEl) {
+      copyJsonBtn.addEventListener("click", function () {
+        copyText(payloadEl.textContent || "");
+      });
+    }
+    if (copyReportBtn && reportEl) {
+      copyReportBtn.addEventListener("click", function () {
+        copyText(reportEl.value || "");
+      });
+    }
+  })();
+</script>
 {% endblock %}
