@@ -82,6 +82,56 @@
     return runIds;
   }
 
+  function normalizedTextValue(rawValue) {
+    if (typeof rawValue !== "string") {
+      return "";
+    }
+    return rawValue.trim();
+  }
+
+  function getInitialDomStateForRun(runId) {
+    if (mode === "detail") {
+      const statusChip = document.getElementById("suggestion-run-status-chip");
+      const finishedAtNode = document.getElementById("suggestion-run-finished-at");
+      const statusText =
+        statusChip instanceof HTMLElement ? normalizedTextValue(statusChip.textContent || "").toLowerCase() : "";
+      const finishedAtText =
+        finishedAtNode instanceof HTMLElement ? normalizedTextValue(finishedAtNode.textContent || "") : "";
+      return {
+        status: statusText || null,
+        updatedAt: null,
+        finishedAt: finishedAtText || null,
+      };
+    }
+
+    const row = root.querySelector('[data-run-id="' + String(runId) + '"]');
+    if (!(row instanceof HTMLElement)) {
+      return {
+        status: null,
+        updatedAt: null,
+        finishedAt: null,
+      };
+    }
+    const statusNode = row.querySelector("[data-run-status]");
+    const statusText =
+      statusNode instanceof HTMLElement ? normalizedTextValue(statusNode.textContent || "").toLowerCase() : "";
+    return {
+      status: statusText || null,
+      updatedAt: null,
+      finishedAt: null,
+    };
+  }
+
+  function seedInitialRunStates() {
+    const runIds = getTrackedRunIds();
+    for (const runId of runIds) {
+      if (runStateById.has(runId)) {
+        continue;
+      }
+      runStateById.set(runId, getInitialDomStateForRun(runId));
+    }
+  }
+
   function isEditableTextInput(element) {
     if (!(element instanceof HTMLInputElement)) {
       return false;
@@ -131,7 +181,12 @@
     setElementTextById("suggestion-run-started-at", String(run.started_at || ""));
     setElementTextById("suggestion-run-finished-at", String(run.finished_at || ""));
 
-    const queueCounts = payload.queue_counts && typeof payload.queue_counts === "object" ? payload.queue_counts : {};
+    const queueCounts =
+      payload.concept_queue_counts && typeof payload.concept_queue_counts === "object"
+        ? payload.concept_queue_counts
+        : payload.queue_counts && typeof payload.queue_counts === "object"
+          ? payload.queue_counts
+          : {};
     const stageCountNodes = root.querySelectorAll("[data-stage-count]");
     for (const node of stageCountNodes) {
       if (!(node instanceof HTMLElement)) {
@@ -347,5 +402,6 @@
     schedule(activeSuccessDelayMs());
   });
 
+  seedInitialRunStates();
   runPollCycle();
 })();

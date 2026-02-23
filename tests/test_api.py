@@ -1512,6 +1512,10 @@ def test_suggestion_run_status_api_supports_lightweight_counts_mode(client: Test
         "queued": 1,
         "suggested": 1,
     }
+    assert lightweight_payload["concept_queue_counts"] == {
+        "queued": 1,
+        "suggested": 1,
+    }
 
     full_response = client.get(f"/api/suggestions/runs/{run_id}?profile_id={profile_id}")
     assert full_response.status_code == 200
@@ -1519,6 +1523,7 @@ def test_suggestion_run_status_api_supports_lightweight_counts_mode(client: Test
     assert sorted([int(item["id"]) for item in full_payload["proposals"]]) == sorted(proposal_ids)
     assert full_payload["proposal_counts"] == lightweight_payload["proposal_counts"]
     assert full_payload["queue_counts"] == lightweight_payload["queue_counts"]
+    assert full_payload["concept_queue_counts"] == lightweight_payload["concept_queue_counts"]
 
 
 def test_suggestions_page_renders_refresh_hooks(client: TestClient) -> None:

@@ -5968,6 +5968,7 @@ def create_app() -> FastAPI:
         proposals: list[SuggestionProposal] = []
         proposal_counts: dict[str, int] = {}
         queue_counts: dict[str, int] = {}
+        concept_queue_counts: dict[str, int] = {}
         if include_proposals:
             proposals = list(
                 session.exec(select(SuggestionProposal).where(*proposal_filters)).all()
@@ -5975,6 +5976,10 @@ def create_app() -> FastAPI:
             for item in proposals:
                 proposal_counts[item.status] = proposal_counts.get(item.status, 0) + 1
                 queue_counts[item.queue_stage] = queue_counts.get(item.queue_stage, 0) + 1
+                if item.concept_payload_json is not None:
+                    concept_queue_counts[item.queue_stage] = (
+                        concept_queue_counts.get(item.queue_stage, 0) + 1
+                    )
         else:
             proposal_count_rows = list(
                 session.exec(
@@ -5995,6 +6000,19 @@ def create_app() -> FastAPI:
             )
             for queue_stage_value, count_value in queue_count_rows:
                 queue_counts[str(queue_stage_value)] = int(count_value)
+
+            concept_queue_count_rows = list(
+                session.exec(
+                    select(SuggestionProposal.queue_stage, func.count())
+                    .where(
+                        SuggestionProposal.suggestion_run_id == run.id,
+                        SuggestionProposal.concept_payload_json.is_not(None),
+                    )
+                    .group_by(SuggestionProposal.queue_stage)
+                ).all()
+            )
+            for queue_stage_value, count_value in concept_queue_count_rows:
+                concept_queue_counts[str(queue_stage_value)] = int(count_value)
 
         summary_payload = safe_json_load(run.result_summary_json, {})
         if not isinstance(summary_payload, dict):
@@ -6030,6 +6048,7 @@ def create_app() -> FastAPI:
             },
             "proposal_counts": proposal_counts,
             "queue_counts": queue_counts,
+            "concept_queue_counts": concept_queue_counts,
             "proposals": (
                 [
                     {
