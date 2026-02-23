@@ -108,6 +108,32 @@ def get_llm_connection_id(profile_id: int, name: str) -> int:
         return connection.id
 
 
+def seed_default_llm_connection(profile_id: int, *, name: str = "Default LLM") -> int:
+    now = utcnow()
+    with Session(db.get_engine()) as session:
+        connection = LLMConnection(
+            profile_id=profile_id,
+            name=name,
+            provider_kind="openai_compatible",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4o-mini",
+            api_key_env_var="TEST_LLM_KEY",
+            timeout_seconds=20,
+            temperature=0.2,
+            max_output_tokens=900,
+            extra_headers_json=None,
+            is_enabled=True,
+            is_default=True,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(connection)
+        session.commit()
+        session.refresh(connection)
+        assert connection.id is not None
+        return connection.id
+
+
 def seed_config_snapshot(
     profile_id: int,
     *,
@@ -160,6 +186,151 @@ def seed_config_snapshot(
         session.refresh(snapshot)
         assert snapshot.id is not None
         return config_run.id, snapshot.id
+
+
+def seed_suggestion_run_with_proposals(
+    profile_id: int,
+    connection_id: int,
+    *,
+    run_status: str = "succeeded",
+) -> tuple[int, list[int]]:
+    now = utcnow()
+    with Session(db.get_engine()) as session:
+        run = SuggestionRun(
+            profile_id=profile_id,
+            llm_connection_id=connection_id,
+            config_sync_run_id=None,
+            run_kind="concept_v2",
+            idea_type="general",
+            custom_intent=None,
+            mode="standard",
+            top_k=10,
+            include_existing=True,
+            include_new=True,
+            status=run_status,
+            target_count=3,
+            processed_count=3 if run_status in {"succeeded", "failed"} else 1,
+            success_count=1,
+            invalid_count=1,
+            error_count=1 if run_status == "failed" else 0,
+            error="synthetic_failure" if run_status == "failed" else None,
+            context_hash=None,
+            filters_json=json.dumps({"idea_type": "general"}),
+            result_summary_json=json.dumps({"target_count": 3}),
+            started_at=now,
+            finished_at=now if run_status in {"succeeded", "failed"} else None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        assert run.id is not None
+
+        proposals = [
+            SuggestionProposal(
+                profile_id=profile_id,
+                suggestion_run_id=run.id,
+                config_snapshot_id=None,
+                target_entity_id="automation.kitchen_alert",
+                status="proposed",
+                summary="Kitchen alert concept.",
+                confidence=0.82,
+                risk_level="low",
+                concept_payload_json=json.dumps(
+                    {
+                        "title": "Kitchen Alert",
+                        "concept_type": "safety",
+                        "target_kind": "new_automation",
+                        "target_entity_id": "automation.kitchen_alert",
+                    }
+                ),
+                concept_type="safety",
+                impact_score=0.81,
+                feasibility_score=0.79,
+                novelty_score=0.52,
+                ranking_score=0.76,
+                ranking_breakdown_json=json.dumps({"weighted_total": 0.76}),
+                duplicate_fingerprint=None,
+                queue_stage="suggested",
+                queue_note=None,
+                queue_updated_at=now,
+                proposed_patch_json=None,
+                verification_steps_json=json.dumps(["Simulate trigger in HA UI"]),
+                raw_response_json=json.dumps({}),
+                validation_error=None,
+                created_at=now,
+                updated_at=now,
+            ),
+            SuggestionProposal(
+                profile_id=profile_id,
+                suggestion_run_id=run.id,
+                config_snapshot_id=None,
+                target_entity_id="automation.night_lock_check",
+                status="accepted",
+                summary="Night lock reminder",
+                confidence=0.74,
+                risk_level="low",
+                concept_payload_json=json.dumps(
+                    {
+                        "title": "Night Lock Check",
+                        "concept_type": "security",
+                        "target_kind": "new_automation",
+                        "target_entity_id": "automation.night_lock_check",
+                    }
+                ),
+                concept_type="security",
+                impact_score=0.69,
+                feasibility_score=0.85,
+                novelty_score=0.44,
+                ranking_score=0.71,
+                ranking_breakdown_json=json.dumps({"weighted_total": 0.71}),
+                duplicate_fingerprint=None,
+                queue_stage="queued",
+                queue_note=None,
+                queue_updated_at=now,
+                proposed_patch_json=None,
+                verification_steps_json=json.dumps(["Run lock status simulation"]),
+                raw_response_json=json.dumps({}),
+                validation_error=None,
+                created_at=now,
+                updated_at=now,
+            ),
+            SuggestionProposal(
+                profile_id=profile_id,
+                suggestion_run_id=run.id,
+                config_snapshot_id=None,
+                target_entity_id="automation.invalid_response",
+                status="invalid",
+                summary="Invalid response placeholder",
+                confidence=None,
+                risk_level=None,
+                concept_payload_json=None,
+                concept_type=None,
+                impact_score=None,
+                feasibility_score=None,
+                novelty_score=None,
+                ranking_score=None,
+                ranking_breakdown_json=None,
+                duplicate_fingerprint=None,
+                queue_stage="archived",
+                queue_note=None,
+                queue_updated_at=now,
+                proposed_patch_json=None,
+                verification_steps_json=None,
+                raw_response_json=json.dumps({"reason": "schema_invalid"}),
+                validation_error="response_missing_suggestions_array",
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+        session.add_all(proposals)
+        session.commit()
+        for item in proposals:
+            session.refresh(item)
+            assert item.id is not None
+
+        return run.id, [item.id for item in proposals if item.id is not None]
 
 
 def wait_for_suggestion_run(
@@ -1314,6 +1485,95 @@ def test_suggestions_page_includes_failed_runs_and_paginates(
     assert len(second_page_run_ids) == 2
     assert second_page_run_ids == sorted(second_page_run_ids, reverse=True)
     assert max(second_page_run_ids) < min(first_page_run_ids)
+
+
+def test_suggestion_run_status_api_supports_lightweight_counts_mode(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="api-counts")
+    connection_id = seed_default_llm_connection(profile_id, name="API Counts LLM")
+    run_id, proposal_ids = seed_suggestion_run_with_proposals(profile_id, connection_id)
+
+    lightweight_response = client.get(
+        f"/api/suggestions/runs/{run_id}?profile_id={profile_id}&include_proposals=false"
+    )
+    assert lightweight_response.status_code == 200
+    lightweight_payload = lightweight_response.json()
+    assert lightweight_payload["run"]["id"] == run_id
+    assert lightweight_payload["proposals"] == []
+    assert lightweight_payload["proposal_counts"] == {
+        "accepted": 1,
+        "invalid": 1,
+        "proposed": 1,
+    }
+    assert lightweight_payload["queue_counts"] == {
+        "archived": 1,
+        "queued": 1,
+        "suggested": 1,
+    }
+    assert lightweight_payload["concept_queue_counts"] == {
+        "queued": 1,
+        "suggested": 1,
+    }
+
+    full_response = client.get(f"/api/suggestions/runs/{run_id}?profile_id={profile_id}")
+    assert full_response.status_code == 200
+    full_payload = full_response.json()
+    assert sorted([int(item["id"]) for item in full_payload["proposals"]]) == sorted(proposal_ids)
+    assert full_payload["proposal_counts"] == lightweight_payload["proposal_counts"]
+    assert full_payload["queue_counts"] == lightweight_payload["queue_counts"]
+    assert full_payload["concept_queue_counts"] == lightweight_payload["concept_queue_counts"]
+
+
+def test_suggestions_page_renders_refresh_hooks(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="refresh-list")
+    connection_id = seed_default_llm_connection(profile_id, name="Refresh List LLM")
+    run_id, _ = seed_suggestion_run_with_proposals(profile_id, connection_id, run_status="running")
+
+    response = client.get(f"/suggestions?profile_id={profile_id}")
+    assert response.status_code == 200
+    html = response.text
+    assert 'src="/static/suggestion_run_refresh.js"' in html
+    assert 'data-suggestion-refresh="list"' in html
+    assert f'data-profile-id="{profile_id}"' in html
+    assert 'data-status-filter=""' in html
+    assert "data-refresh-banner" in html
+    assert "data-refresh-now" in html
+    assert f'data-run-id="{run_id}"' in html
+    assert "data-run-status" in html
+    assert "data-run-progress" in html
+    assert "data-run-results" in html
+
+
+def test_suggestion_run_detail_page_renders_refresh_hooks(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="refresh-detail")
+    connection_id = seed_default_llm_connection(profile_id, name="Refresh Detail LLM")
+    run_id, _ = seed_suggestion_run_with_proposals(profile_id, connection_id, run_status="running")
+
+    response = client.get(f"/suggestions/{run_id}?profile_id={profile_id}")
+    assert response.status_code == 200
+    html = response.text
+    assert 'data-suggestion-refresh="detail"' in html
+    assert f'data-profile-id="{profile_id}"' in html
+    assert f'data-run-id="{run_id}"' in html
+    assert 'id="suggestion-run-status-chip"' in html
+    assert "data-run-target" in html
+    assert "data-run-processed" in html
+    assert "data-run-success" in html
+    assert "data-run-invalid" in html
+    assert "data-run-error-count" in html
+    assert "data-run-error" in html
+    assert "data-run-started-at" in html
+    assert "data-run-finished-at" in html
+    assert "data-run-stage-counts" in html
+    assert 'data-stage-count="suggested"' in html
 
 
 def test_llm_presets_api_returns_expected_catalog(client: TestClient) -> None:
