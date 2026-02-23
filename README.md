@@ -34,6 +34,10 @@ PYTHON=python3.12 npm run run
 ```
 
 ### Path B: Docker Compose (Recommended Deployment Path)
+First-time Docker user? Follow [docs/getting-started.md](docs/getting-started.md#docker-quickstart-from-zero) for clone-to-running instructions.
+
+For deployment operations and troubleshooting, use [docs/deployment/docker.md](docs/deployment/docker.md).
+
 Prerequisites:
 - Docker 24+
 - Docker Compose plugin v2.20+
@@ -42,9 +46,8 @@ From repo root:
 
 ```bash
 cp .env.docker.example .env
+# update SESSION_SECRET in .env before first deployment
 docker compose up -d --build
-docker compose ps
-docker compose logs -f app
 curl -fsS http://localhost:8000/healthz
 ```
 
@@ -70,34 +73,22 @@ For deployment operations (backup/restore, reverse proxy, troubleshooting), see 
 5. Optional: run `Run Suggestions Check` and automation suggestions workflows.
 
 ## Deploy Command Basics
-Use these day-2 commands for Docker Compose deployments:
+For day-2 Docker Compose operations:
 
 ```bash
-docker compose up -d --build   # deploy or upgrade
 docker compose ps              # status
 docker compose logs -f app     # app logs
 docker compose restart app     # restart app service
 docker compose down            # stop stack
 ```
 
-Destructive cleanup (removes volumes/data):
+Destructive cleanup (removes persisted volumes/data):
 
 ```bash
 docker compose down -v
 ```
 
-Postgres overlay variants:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f app
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml restart app
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml down -v
-```
-
-For full Docker operations guidance, see [docs/deployment/docker.md](docs/deployment/docker.md).
+For full Docker command variants (including Postgres overlay), see [docs/deployment/docker.md](docs/deployment/docker.md).
 
 ## What's New
 - 2026-02-22: Header/page navigation was cleaned up with accessible primary tabs, active-route highlighting, mobile horizontal scrolling, and API Docs moved to a global footer utility link. See `CHANGELOG.md` for details.

@@ -13,6 +13,22 @@ For a quick onboarding path, see [docs/getting-started.md](../getting-started.md
 - Docker Compose plugin v2.20+.
 - A copy of `.env.docker.example` saved as `.env` with real secrets.
 
+## Preflight Checks
+Run these checks from the repository root before deployment or troubleshooting:
+
+```bash
+pwd
+ls docker-compose.yml docker-compose.postgres.yml .env.docker.example
+docker --version
+docker compose version
+docker info
+```
+
+Expected results:
+- The compose and env template files are found in the current directory.
+- `docker --version` and `docker compose version` both return version output.
+- `docker info` returns Server details (not daemon connection errors).
+
 ## Single-Host Deploy (Compose Default)
 This is the recommended production-like path on one host.
 
@@ -180,27 +196,224 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 
 ## Troubleshooting
 
-### App container is unhealthy
-- Check logs: `docker compose logs -f app`.
-- Verify health endpoint manually: `curl -v http://localhost:8000/healthz`.
+### Common Errors (Top 8)
 
-### Migration/startup failures
-- Validate `DATABASE_URL` format.
-- Confirm DB service is healthy (Postgres overlay): `docker compose ... ps`.
-- Check for permission issues on mounted volumes.
+| Symptom | Likely Cause | Fix |
+| --- | --- | --- |
+| `docker: command not found` | Docker CLI is not installed or shell session is stale. | Install Docker Desktop (macOS/Windows) or Docker Engine + Compose plugin (Linux), then re-run version checks. |
+| `Cannot connect to the Docker daemon` | Docker daemon is not running. | Start Docker Desktop (macOS/Windows) or start the `docker` service (Linux). |
+| `permission denied /var/run/docker.sock` | Current Linux user is not in the `docker` group. | Add user to `docker` group, then re-login or refresh group membership. |
+| `docker compose` not recognized | Compose plugin is missing or old command syntax is used. | Install/update Compose plugin and use `docker compose` (with a space). |
+| `.env` missing or placeholder `SESSION_SECRET` | Environment file was not created or not updated. | Copy `.env.docker.example` to `.env`, set a real `SESSION_SECRET`, keep `DATABASE_URL=` for SQLite mode. |
+| Port `8000` already in use | Another process or container is bound to `8000`. | Stop conflicting process/container or map to another host port. |
+| App container unhealthy/startup crash | Runtime, migration, or env config issue during startup. | Inspect app logs and restart with a clean rebuild. |
+| Postgres overlay auth/connect failures | `HEV_POSTGRES_*` vars mismatch or stale Postgres volume state. | Verify `.env` values, restart overlay, and reset Postgres volume if credentials changed. |
 
-### SQLite permission errors
-- Verify the container can write to `/data`.
-- If needed, recreate volume and restart:
+### 1) `docker: command not found`
+- **What you'll see:** `zsh: command not found: docker` or similar.
+- **Run this check:**
 
 ```bash
-docker compose down -v
-docker compose up -d --build
+docker --version
 ```
 
-### Postgres connection failures
-- Confirm credentials in `.env` match compose variables.
-- Ensure password values are URL-safe in `DATABASE_URL` (encode special characters if needed).
+- **Fix:**
+
+```bash
+# Ubuntu/Debian example
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-plugin
+```
+
+On macOS or Windows, install/start Docker Desktop, then open a new terminal.
+
+- **Re-test:**
+
+```bash
+docker --version
+docker compose version
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
+```
+
+### 2) `Cannot connect to the Docker daemon`
+- **What you'll see:** `Cannot connect to the Docker daemon at unix:///var/run/docker.sock`.
+- **Run this check:**
+
+```bash
+docker info
+```
+
+- **Fix:**
+
+```bash
+# Linux
+sudo systemctl start docker
+sudo systemctl enable docker
+```
+
+On macOS or Windows, start Docker Desktop and wait until it reports "Engine running."
+
+- **Re-test:**
+
+```bash
+docker info
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
+```
+
+### 3) `permission denied /var/run/docker.sock` (Linux)
+- **What you'll see:** `permission denied while trying to connect to the Docker daemon socket`.
+- **Run this check:**
+
+```bash
+id -nG
+```
+
+- **Fix:**
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+If `newgrp` is not available, log out and back in.
+
+- **Re-test:**
+
+```bash
+docker info
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
+```
+
+### 4) `docker compose` not recognized / old Compose
+- **What you'll see:** `docker: 'compose' is not a docker command` or only `docker-compose` works.
+- **Run this check:**
+
+```bash
+docker compose version
+```
+
+- **Fix:**
+
+```bash
+# Ubuntu/Debian example
+sudo apt-get update
+sudo apt-get install -y docker-compose-plugin
+```
+
+Use `docker compose` (space), not `docker-compose` (hyphen), in this repo.
+
+- **Re-test:**
+
+```bash
+docker compose version
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
+```
+
+### 5) `.env` missing or placeholder `SESSION_SECRET` not replaced
+- **What you'll see:** startup/config errors, or insecure placeholder secret left in `.env`.
+- **Run this check:**
+
+```bash
+ls -l .env && grep '^SESSION_SECRET=' .env && grep '^DATABASE_URL=' .env
+```
+
+- **Fix:**
+
+```bash
+cp .env.docker.example .env
+openssl rand -hex 32
+```
+
+Set the generated value as `SESSION_SECRET=` in `.env`, and keep `DATABASE_URL=` empty for SQLite mode.
+
+- **Re-test:**
+
+```bash
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
+```
+
+### 6) Port `8000` already in use
+- **What you'll see:** `Bind for 0.0.0.0:8000 failed: port is already allocated`.
+- **Run this check:**
+
+```bash
+lsof -iTCP:8000 -sTCP:LISTEN
+```
+
+- **Fix:**
+
+```bash
+docker compose down
+docker ps --format '{{.Names}}\t{{.Ports}}'
+```
+
+Stop the process/container already using port `8000`, or change the app port mapping in `docker-compose.yml` (for example `8001:8000`).
+
+- **Re-test:**
+
+```bash
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
+```
+
+### 7) App container unhealthy or startup crash
+- **What you'll see:** `docker compose ps` shows `unhealthy`, `restarting`, or exits quickly.
+- **Run this check:**
+
+```bash
+docker compose logs --tail=200 app
+```
+
+- **Fix:**
+
+```bash
+docker compose down
+docker compose up -d --build
+docker compose logs --tail=200 app
+```
+
+If logs show DB/migration errors, verify `DATABASE_URL` and Postgres overlay settings.
+
+- **Re-test:**
+
+```bash
+docker compose ps
+curl -fsS http://localhost:8000/healthz
+```
+
+### 8) Postgres overlay connection/auth failures
+- **What you'll see:** app logs include authentication failures or cannot connect to `postgres:5432`.
+- **Run this check:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs --tail=200 postgres app
+```
+
+- **Fix:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+If credentials were changed after first startup, reset Postgres state (data-destructive):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down -v
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+- **Re-test:**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
+curl -fsS http://localhost:8000/healthz
+```
 
 ## Scaling Limitation
 Run one app replica by default. Suggestion processing relies on an in-process queue, so multi-replica deployments can lead to inconsistent queue behavior unless queue architecture is redesigned.
