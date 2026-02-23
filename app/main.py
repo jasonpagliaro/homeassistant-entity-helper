@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import delete, func, or_
+from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -1253,6 +1253,171 @@ def issue_codes_for_suggestion(suggestion: EntitySuggestion) -> set[str]:
             if code:
                 codes.add(code)
     return codes
+
+
+def workflow_required_flags_from_fixable_codes(fixable_codes: set[str]) -> dict[str, bool]:
+    return {
+        "friendly_name": bool({"missing_friendly_name", "generic_friendly_name"} & fixable_codes),
+        "area": bool({"missing_area", "missing_area_enrichment_unavailable"} & fixable_codes),
+        "device_class": bool(
+            {"missing_sensor_semantic_type", "missing_binary_sensor_device_class"} & fixable_codes
+        ),
+        "labels": "missing_labels" in fixable_codes,
+    }
+
+
+def area_parent_device_names_for_entity_name_from_snapshots(
+    session: Session,
+    profile_id: int,
+    sync_run_id: int,
+    entity_name: str | None,
+) -> dict[str, list[str]]:
+    if entity_name is None:
+        return {}
+
+    rows = list(
+        session.exec(
+            select(
+                EntitySnapshot.area_id,
+                EntitySnapshot.area_name,
+                EntitySnapshot.friendly_name,
+                EntitySnapshot.device_name,
+            )
+            .where(
+                EntitySnapshot.profile_id == profile_id,
+                EntitySnapshot.sync_run_id == sync_run_id,
+            )
+            .where(
+                and_(
+                    EntitySnapshot.area_name.is_not(None),
+                    EntitySnapshot.friendly_name.is_not(None),
+                    EntitySnapshot.device_name.is_not(None),
+                )
+            )
+        ).all()
+    )
+
+    by_area_key: dict[str, list[str]] = {}
+    for area_id_value, area_name_value, friendly_name_value, device_name_value in rows:
+        area_id_clean = as_clean_string(area_id_value)
+        area_name_clean = as_clean_string(area_name_value)
+        friendly_name_clean = as_clean_string(friendly_name_value)
+        device_name_clean = as_clean_string(device_name_value)
+        if (
+            area_name_clean is None
+            or friendly_name_clean is None
+            or device_name_clean is None
+            or friendly_name_clean.casefold() != entity_name.casefold()
+        ):
+            continue
+        keys = [area_name_clean]
+        if area_id_clean:
+            keys.append(area_id_clean)
+        for key in keys:
+            names = by_area_key.setdefault(key, [])
+            if device_name_clean not in names:
+                names.append(device_name_clean)
+    return by_area_key
+
+
+def area_parent_device_names_for_entity_name_from_registry(
+    entity_registry_entries: list[dict[str, Any]],
+    device_registry_entries: list[dict[str, Any]],
+    entity_name: str | None,
+) -> dict[str, list[str]]:
+    if entity_name is None:
+        return {}
+
+    devices_by_id: dict[str, dict[str, Any]] = {}
+    for device in device_registry_entries:
+        device_id = as_clean_string(device.get("id") or device.get("device_id"))
+        if device_id is not None:
+            devices_by_id[device_id] = device
+
+    by_area_id: dict[str, list[str]] = {}
+    for entity_entry in entity_registry_entries:
+        entity_name_value = as_clean_string(entity_entry.get("name")) or as_clean_string(
+            entity_entry.get("original_name")
+        )
+        if entity_name_value is None or entity_name_value.casefold() != entity_name.casefold():
+            continue
+
+        device_id = as_clean_string(entity_entry.get("device_id"))
+        device_entry = devices_by_id.get(device_id, {}) if device_id else {}
+        area_id = as_clean_string(entity_entry.get("area_id")) or (
+            as_clean_string(device_entry.get("area_id")) if isinstance(device_entry, dict) else None
+        )
+        if area_id is None:
+            continue
+
+        parent_device_name = (
+            as_clean_string(device_entry.get("name_by_user")) if isinstance(device_entry, dict) else None
+        ) or (
+            as_clean_string(device_entry.get("name")) if isinstance(device_entry, dict) else None
+        )
+        if parent_device_name is None:
+            continue
+
+        names = by_area_id.setdefault(area_id, [])
+        if parent_device_name not in names:
+            names.append(parent_device_name)
+
+    return by_area_id
+
+
+def parent_device_context_for_entity(
+    entity_id: str | None,
+    entity_registry_entries: list[dict[str, Any]],
+    device_registry_entries: list[dict[str, Any]],
+    area_options_by_id: dict[str, dict[str, str]],
+) -> tuple[str | None, str | None]:
+    if entity_id is None:
+        return None, None
+
+    entity_entry: dict[str, Any] | None = None
+    for candidate in entity_registry_entries:
+        candidate_entity_id = as_clean_string(candidate.get("entity_id"))
+        if candidate_entity_id is not None and candidate_entity_id.casefold() == entity_id.casefold():
+            entity_entry = candidate
+            break
+    if entity_entry is None:
+        return None, None
+
+    devices_by_id: dict[str, dict[str, Any]] = {}
+    for device in device_registry_entries:
+        device_id = as_clean_string(device.get("id") or device.get("device_id"))
+        if device_id is not None:
+            devices_by_id[device_id] = device
+
+    device_id = as_clean_string(entity_entry.get("device_id"))
+    device_entry = devices_by_id.get(device_id, {}) if device_id is not None else {}
+    parent_device_name = (as_clean_string(device_entry.get("name_by_user")) if device_entry else None) or (
+        as_clean_string(device_entry.get("name")) if device_entry else None
+    )
+
+    area_id = as_clean_string(entity_entry.get("area_id")) or (
+        as_clean_string(device_entry.get("area_id")) if device_entry else None
+    )
+    parent_area_name: str | None = None
+    if area_id is not None:
+        area_entry = area_options_by_id.get(area_id, {})
+        parent_area_name = as_clean_string(area_entry.get("area_name")) if area_entry else None
+        if parent_area_name is None:
+            parent_area_name = area_id
+
+    return parent_device_name, parent_area_name
+
+
+def format_area_option_label(area_name: str, parent_device_names: list[str]) -> str:
+    if not parent_device_names:
+        return area_name
+    max_names = 2
+    shown = parent_device_names[:max_names]
+    suffix = ", ".join(shown)
+    remaining = len(parent_device_names) - len(shown)
+    if remaining > 0:
+        suffix = f"{suffix}, +{remaining} more"
+    return f"{area_name} (Parent device: {suffix})"
 
 
 def parse_label_ids_from_snapshot(snapshot: EntitySnapshot | None) -> list[str]:
@@ -4523,16 +4688,15 @@ def create_app() -> FastAPI:
 
         fixable_issues, manual_issues = build_workflow_issue_sections(suggestion)
         issue_codes = issue_codes_for_suggestion(suggestion)
-        allow_friendly_name = bool({"missing_friendly_name", "generic_friendly_name"} & issue_codes)
-        allow_area = bool({"missing_area", "missing_area_enrichment_unavailable"} & issue_codes)
-        allow_device_class = bool(
-            {"missing_sensor_semantic_type", "missing_binary_sensor_device_class"} & issue_codes
-        )
-        allow_labels = "missing_labels" in issue_codes
+        fixable_codes = {code for code in issue_codes if code in WORKFLOW_FIXABLE_ISSUE_CODES}
+        required_flags = workflow_required_flags_from_fixable_codes(fixable_codes)
 
         area_options_by_id: dict[str, dict[str, str]] = {}
         area_options_source = "snapshot"
         area_options_error: str | None = None
+        client: HAClient | None = None
+        entity_registry_entries: list[dict[str, Any]] = []
+        device_registry_entries: list[dict[str, Any]] = []
 
         area_rows = list(
             session.exec(
@@ -4564,43 +4728,92 @@ def create_app() -> FastAPI:
                 "area_name": option_area_name,
             }
 
-        if allow_area:
-            token = resolve_profile_token(active_profile)
-            if token:
-                client = HAClient(
-                    base_url=active_profile.base_url,
-                    token=token,
-                    verify_tls=active_profile.verify_tls,
-                    timeout_seconds=active_profile.timeout_seconds,
-                )
-                try:
-                    area_entries = await client.fetch_area_registry_entries()
-                    area_options_by_id = {}
-                    for area_item in area_entries:
-                        area_id_clean = as_clean_string(area_item.get("area_id") or area_item.get("id"))
-                        area_name_clean = as_clean_string(area_item.get("name"))
-                        if area_id_clean is None and area_name_clean is None:
-                            continue
-                        option_area_id = area_id_clean or area_name_clean or ""
-                        option_area_name = area_name_clean or area_id_clean or ""
-                        if not option_area_id:
-                            continue
-                        area_options_by_id[option_area_id] = {
-                            "area_id": option_area_id,
-                            "area_name": option_area_name,
-                        }
-                    area_options_source = "home_assistant"
-                except HAClientError as exc:
-                    area_options_error = str(exc)
-                    area_options_source = "snapshot"
-            else:
-                area_options_error = "No token configured in profile or environment."
+        token = resolve_profile_token(active_profile)
+        if token:
+            client = HAClient(
+                base_url=active_profile.base_url,
+                token=token,
+                verify_tls=active_profile.verify_tls,
+                timeout_seconds=active_profile.timeout_seconds,
+            )
+            try:
+                area_entries = await client.fetch_area_registry_entries()
+                area_options_by_id = {}
+                for area_item in area_entries:
+                    area_id_clean = as_clean_string(area_item.get("area_id") or area_item.get("id"))
+                    area_name_clean = as_clean_string(area_item.get("name"))
+                    if area_id_clean is None and area_name_clean is None:
+                        continue
+                    option_area_id = area_id_clean or area_name_clean or ""
+                    option_area_name = area_name_clean or area_id_clean or ""
+                    if not option_area_id:
+                        continue
+                    area_options_by_id[option_area_id] = {
+                        "area_id": option_area_id,
+                        "area_name": option_area_name,
+                    }
+                area_options_source = "home_assistant"
+            except HAClientError as exc:
+                area_options_error = str(exc)
                 area_options_source = "snapshot"
+            try:
+                entity_registry_entries = await client.fetch_entity_registry_entries()
+                device_registry_entries = await client.fetch_device_registry_entries()
+            except HAClientError:
+                entity_registry_entries = []
+                device_registry_entries = []
+        else:
+            area_options_error = "No token configured in profile or environment."
+            area_options_source = "snapshot"
 
-        area_options = sorted(
-            area_options_by_id.values(),
-            key=lambda item: item["area_name"].lower(),
+        target_entity_name = as_clean_string(snapshot.friendly_name if snapshot else None)
+        area_name_device_hints = area_parent_device_names_for_entity_name_from_snapshots(
+            session,
+            active_profile.id,
+            run.sync_run_id,
+            target_entity_name,
         )
+        if (
+            not area_name_device_hints
+            and target_entity_name is not None
+            and entity_registry_entries
+            and device_registry_entries
+        ):
+            area_name_device_hints = area_parent_device_names_for_entity_name_from_registry(
+                entity_registry_entries,
+                device_registry_entries,
+                target_entity_name,
+            )
+
+        parent_device_name = as_clean_string(snapshot.device_name if snapshot else None)
+        parent_device_area_name = as_clean_string(snapshot.area_name if snapshot else None) or as_clean_string(
+            snapshot.area_id if snapshot else None
+        )
+        registry_parent_device_name, registry_parent_area_name = parent_device_context_for_entity(
+            as_clean_string(snapshot.entity_id if snapshot else None),
+            entity_registry_entries,
+            device_registry_entries,
+            area_options_by_id,
+        )
+        if registry_parent_device_name is not None:
+            parent_device_name = registry_parent_device_name
+        if registry_parent_area_name is not None:
+            parent_device_area_name = registry_parent_area_name
+
+        area_options: list[dict[str, str]] = []
+        for item in sorted(area_options_by_id.values(), key=lambda row: row["area_name"].lower()):
+            area_id_value = item["area_id"]
+            area_name_value = item["area_name"]
+            parent_device_names = area_name_device_hints.get(area_id_value) or area_name_device_hints.get(
+                area_name_value
+            ) or []
+            area_options.append(
+                {
+                    "area_id": area_id_value,
+                    "area_name": area_name_value,
+                    "option_label": format_area_option_label(area_name_value, parent_device_names),
+                }
+            )
 
         label_options_by_id: dict[str, str] = {}
         label_rows = list(
@@ -4729,10 +4942,12 @@ def create_app() -> FastAPI:
                     "snapshot": snapshot,
                     "fixable_issues": fixable_issues,
                     "manual_issues": manual_issues,
-                    "allow_friendly_name": allow_friendly_name,
-                    "allow_area": allow_area,
-                    "allow_device_class": allow_device_class,
-                    "allow_labels": allow_labels,
+                    "required_friendly_name": required_flags["friendly_name"],
+                    "required_area": required_flags["area"],
+                    "required_device_class": required_flags["device_class"],
+                    "required_labels": required_flags["labels"],
+                    "parent_device_name": parent_device_name,
+                    "parent_device_area_name": parent_device_area_name,
                     "area_options": area_options,
                     "area_options_source": area_options_source,
                     "area_options_error": area_options_error,
@@ -4791,12 +5006,6 @@ def create_app() -> FastAPI:
 
         issue_codes = issue_codes_for_suggestion(suggestion)
         fixable_codes = {code for code in issue_codes if code in WORKFLOW_FIXABLE_ISSUE_CODES}
-        allow_friendly_name = bool({"missing_friendly_name", "generic_friendly_name"} & fixable_codes)
-        allow_area = bool({"missing_area", "missing_area_enrichment_unavailable"} & fixable_codes)
-        allow_device_class = bool(
-            {"missing_sensor_semantic_type", "missing_binary_sensor_device_class"} & fixable_codes
-        )
-        allow_labels = "missing_labels" in fixable_codes
 
         submitted_payload = {
             "friendly_name": friendly_name.strip(),
@@ -4841,14 +5050,6 @@ def create_app() -> FastAPI:
         new_device_class = as_clean_string(device_class)
         submitted_label_ids = normalize_label_ids_form(labels_csv.split(","))
 
-        if (new_friendly_name is not None or friendly_name.strip()) and not allow_friendly_name:
-            return persist_workflow_error("Friendly name is not editable for this suggestion.")
-        if (selected_area_id or new_area_name_clean) and not allow_area:
-            return persist_workflow_error("Area is not editable for this suggestion.")
-        if (new_device_class is not None or device_class.strip()) and not allow_device_class:
-            return persist_workflow_error("Device class is not editable for this suggestion.")
-        if (submitted_label_ids or labels_csv.strip()) and not allow_labels:
-            return persist_workflow_error("Labels are not editable for this suggestion.")
         if selected_area_id and new_area_name_clean:
             return persist_workflow_error("Choose either an existing area or a new area name, not both.")
         if create_new_area_requested and new_area_name_clean is None:
@@ -4868,15 +5069,15 @@ def create_app() -> FastAPI:
         area_resolution: dict[str, Any] | None = None
 
         current_name = as_clean_string(snapshot.friendly_name)
-        if allow_friendly_name and new_friendly_name is not None and new_friendly_name != current_name:
+        if new_friendly_name is not None and new_friendly_name != current_name:
             update_payload["name"] = new_friendly_name
             applied_fields.append("friendly_name")
 
-        if allow_device_class and new_device_class is not None and new_device_class != current_device_class:
+        if new_device_class is not None and new_device_class != current_device_class:
             update_payload["device_class"] = new_device_class
             applied_fields.append("device_class")
 
-        if allow_labels and submitted_label_ids and submitted_label_ids != current_label_ids:
+        if submitted_label_ids and submitted_label_ids != current_label_ids:
             update_payload["labels"] = submitted_label_ids
             applied_fields.append("labels")
 
@@ -4892,7 +5093,7 @@ def create_app() -> FastAPI:
 
         try:
             resolved_area_id: str | None = None
-            if allow_area and (selected_area_id or new_area_name_clean):
+            if selected_area_id or new_area_name_clean:
                 if selected_area_id:
                     resolved_area_id = selected_area_id
                     area_resolution = {"mode": "existing", "area_id": selected_area_id}

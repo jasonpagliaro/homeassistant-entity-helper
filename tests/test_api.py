@@ -31,6 +31,21 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
     monkeypatch.setenv("APP_NAME", "HA Entity Vault Test")
 
+    async def default_fetch_entity_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return []
+
+    async def default_fetch_device_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_entity_registry_entries",
+        default_fetch_entity_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_device_registry_entries",
+        default_fetch_device_registry_entries,
+    )
+
     db.reset_engine_for_tests()
     app = create_app()
 
@@ -1875,6 +1890,253 @@ def test_workflow_detail_uses_registry_areas_dropdown_with_create_option(
     assert 'option value="garage_area">Garage</option>' in detail_response.text
 
 
+def test_workflow_detail_area_option_adds_parent_device_for_entity_named_area(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-area-parent-device-label")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.missing_area_target",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "2024 IONIQ 5 Air Conditioner",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            },
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "areas": [],
+            "devices": [],
+            "entities": [],
+            "labels": [],
+            "floors": [],
+        }
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "on_the_go", "name": "On the go"}]
+
+    async def fake_fetch_entity_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.missing_area_target",
+                "name": "2024 IONIQ 5 Air Conditioner",
+                "device_id": "dev_ioniq_5",
+                "area_id": "on_the_go",
+            }
+        ]
+
+    async def fake_fetch_device_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "dev_ioniq_5",
+                "name_by_user": "2024 IONIQ 5 (IONIQ 5)",
+                "area_id": "on_the_go",
+            }
+        ]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_entity_registry_entries",
+        fake_fetch_entity_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_device_registry_entries",
+        fake_fetch_device_registry_entries,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    by_entity = {item["entity_id"]: item for item in suggestions_payload["items"]}
+    suggestion_id = by_entity["sensor.missing_area_target"]["id"]
+    detail_response = client.get(
+        f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert (
+        'option value="on_the_go">On the go (Parent device: 2024 IONIQ 5 (IONIQ 5))</option>'
+        in detail_response.text
+    )
+    assert "Parent Device:" in detail_response.text
+    assert "2024 IONIQ 5 (IONIQ 5)" in detail_response.text
+    assert "Assigned Area:" in detail_response.text
+    assert "On the go" in detail_response.text
+
+
+def test_workflow_detail_places_apply_form_before_context_and_issues(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-layout-order")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.order_target",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Order Target",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "office_area", "name": "Office"}]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+    detail_response = client.get(
+        f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    apply_form_index = detail_response.text.find(
+        f'action="/entity-suggestions/{suggestion_id}/workflow/apply"'
+    )
+    context_heading_index = detail_response.text.find("<h3>Entity Context</h3>")
+    fixable_heading_index = detail_response.text.find("<h3>Fixable Issues</h3>")
+    assert apply_form_index >= 0
+    assert context_heading_index >= 0
+    assert fixable_heading_index >= 0
+    assert apply_form_index < context_heading_index
+    assert apply_form_index < fixable_heading_index
+
+
+def test_workflow_detail_shows_required_resolution_guidance(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-required-guidance")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.required_target",
+                "state": "70",
+                "attributes": {
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "office_area", "name": "Office"}]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+    detail_response = client.get(
+        f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert "Required to resolve naming issue" in detail_response.text
+    assert "Choose an existing area or create a new one to resolve area mapping." in detail_response.text
+    assert "Required when Create New Area is selected to resolve area mapping" in detail_response.text
+
+
+def test_workflow_detail_non_required_fields_remain_editable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-non-required-editable")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.editable_target",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Editable Target",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "office_area", "name": "Office"}]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+    detail_response = client.get(
+        f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+
+    friendly_input = re.search(r'<input[^>]*name="friendly_name"[^>]*>', detail_response.text)
+    assert friendly_input is not None
+    assert "disabled" not in friendly_input.group(0)
+
+    area_select = re.search(r'<select[^>]*name="area_id"[^>]*>', detail_response.text)
+    assert area_select is not None
+    assert "disabled" not in area_select.group(0)
+
+    device_class_input = re.search(r'<input[^>]*name="device_class"[^>]*>', detail_response.text)
+    assert device_class_input is not None
+    assert "disabled" not in device_class_input.group(0)
+
+    labels_input = re.search(r'<input[^>]*name="labels_csv"[^>]*>', detail_response.text)
+    assert labels_input is not None
+    assert "disabled" not in labels_input.group(0)
+    assert "Required to resolve naming issue" not in detail_response.text
+
+
 def test_workflow_detail_area_dropdown_falls_back_to_snapshot_on_ha_error(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2006,6 +2268,73 @@ def test_workflow_apply_friendly_name_and_existing_area(
     ).json()
     assert detail_payload["workflow_status"] == "applied_pending_recheck"
     assert detail_payload["workflow_updated_at"] is not None
+
+
+def test_workflow_apply_allows_non_issue_field_when_workflow_eligible(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-non-issue-field")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.non_issue_field_target",
+                "state": "69",
+                "attributes": {
+                    "friendly_name": "Original Name",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    applied: dict[str, Any] = {}
+
+    async def fake_update_entity_registry_entry(_: Any, **payload: Any) -> dict[str, Any]:
+        applied.update(payload)
+        return {"entity_id": payload["entity_id"]}
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.update_entity_registry_entry",
+        fake_update_entity_registry_entry,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+
+    apply_response = client.post(
+        f"/entity-suggestions/{suggestion_id}/workflow/apply",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}",
+            "friendly_name": "Updated Name",
+            "area_id": "",
+            "new_area_name": "",
+            "device_class": "",
+            "labels_csv": "",
+        },
+        follow_redirects=False,
+    )
+    assert apply_response.status_code == 303
+    assert applied["entity_id"] == "sensor.non_issue_field_target"
+    assert applied["name"] == "Updated Name"
+    assert "area_id" not in applied
+
+    detail_payload = client.get(
+        f"/api/entity-suggestions/{suggestion_id}?profile_id={profile_id}"
+    ).json()
+    assert detail_payload["workflow_status"] == "applied_pending_recheck"
 
 
 def test_workflow_apply_creates_new_area_when_missing(
