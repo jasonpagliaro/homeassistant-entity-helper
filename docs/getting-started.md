@@ -6,6 +6,7 @@ For complete project details, see [README.md](../README.md).
 For Docker operations (backup/restore, reverse proxy, troubleshooting), see [docs/deployment/docker.md](deployment/docker.md).
 
 ## Prerequisites
+- Git
 - Node.js 20+
 - npm 10+
 - Python 3.12+
@@ -28,23 +29,93 @@ PYTHON=python3.12 npm run run
 
 Open `http://localhost:8000`.
 
-## Option B: Docker Compose Deploy (Default)
-From repo root:
+## Docker Quickstart (From Zero)
+If you have minimal Docker experience, use this exact path.
+
+### 1) Clone the repository and enter the project directory
+
+```bash
+git clone https://github.com/jasonpagliaro/homeassistant-entity-helper.git
+cd homeassistant-entity-helper
+```
+
+PowerShell equivalent:
+
+```powershell
+git clone https://github.com/jasonpagliaro/homeassistant-entity-helper.git
+Set-Location homeassistant-entity-helper
+```
+
+### 2) Verify Docker and Compose are installed
+
+```bash
+docker --version
+docker compose version
+```
+
+### 3) Verify Docker daemon/Desktop is running
+
+```bash
+docker info
+```
+
+You should see Docker Server information. If this fails, check [Common Errors](deployment/docker.md#common-errors-top-8).
+
+### 4) Create `.env` from the Docker example file
 
 ```bash
 cp .env.docker.example .env
+```
+
+PowerShell equivalent:
+
+```powershell
+Copy-Item .env.docker.example .env
+```
+
+### 5) Set required values in `.env`
+- Replace `SESSION_SECRET=replace-with-a-long-random-secret` with a real secret value.
+- Keep `DATABASE_URL=` empty to use the default SQLite deployment mode.
+
+### 6) Start the app
+
+```bash
 docker compose up -d --build
+```
+
+### 7) Validate startup and health
+
+```bash
 docker compose ps
 docker compose logs -f app
 curl -fsS http://localhost:8000/healthz
 ```
 
+### 8) Open the app
+
 Open `http://localhost:8000`.
 
-Optional Postgres overlay:
+### 9) Stop the stack when needed
+
+```bash
+docker compose down
+```
+
+### Optional advanced mode: Postgres overlay
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+Postgres mode persists data in Docker volume `hev_pg_data`.
+
+## Option B: Docker Compose Deploy (Default)
+Experienced Docker users can run the short path from repo root:
+
+```bash
+cp .env.docker.example .env
+docker compose up -d --build
+curl -fsS http://localhost:8000/healthz
 ```
 
 ## First Use Workflow (Core)
