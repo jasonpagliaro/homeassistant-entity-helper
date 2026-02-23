@@ -70,6 +70,28 @@ class HAClient:
         except httpx.RequestError as exc:
             raise HAClientError(f"Unable to reach Home Assistant: {exc}") from exc
 
+    async def _post_json(self, path: str, payload: dict[str, Any]) -> Any:
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                headers=self._headers(),
+                verify=self.verify_tls,
+                timeout=self.timeout_seconds,
+                transport=self.transport,
+            ) as client:
+                response = await client.post(path, json=payload)
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in {401, 403}:
+                message = "Authentication failed. Check your Home Assistant token."
+            else:
+                message = f"Home Assistant API returned HTTP {status}."
+            raise HAClientError(message, status_code=status) from exc
+        except httpx.RequestError as exc:
+            raise HAClientError(f"Unable to reach Home Assistant: {exc}") from exc
+
     def _websocket_url(self) -> str:
         parsed = urlsplit(self.base_url)
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
@@ -227,6 +249,23 @@ class HAClient:
 
     async def fetch_automation_config(self, config_key: str) -> dict[str, Any]:
         return await self._fetch_config("automation", config_key)
+
+    async def upsert_automation_config(
+        self,
+        config_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        cleaned_key = config_key.strip()
+        if not cleaned_key:
+            raise HAClientError("Config key is required.")
+        if not isinstance(payload, dict):
+            raise HAClientError("Automation payload must be an object.")
+
+        encoded_key = quote(cleaned_key, safe="")
+        response = await self._post_json(f"/api/config/automation/config/{encoded_key}", payload)
+        if not isinstance(response, dict):
+            raise HAClientError("Unexpected response format from automation upsert endpoint.")
+        return response
 
     async def fetch_script_config(self, config_key: str) -> dict[str, Any]:
         return await self._fetch_config("script", config_key)

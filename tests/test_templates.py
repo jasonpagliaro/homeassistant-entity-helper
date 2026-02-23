@@ -28,10 +28,11 @@ TEMPLATE_TABLE_LABELS: dict[str, tuple[str, ...]] = {
     "suggestions.html": (
         "Run",
         "Status",
+        "Type",
+        "Mode",
         "Progress",
         "Results",
         "Created",
-        "Finished",
         "Actions",
     ),
     "entity_suggestions.html": (
@@ -85,14 +86,14 @@ HIGH_IMPACT_BUTTON_TOOLTIP_LABELS: dict[str, dict[str, int]] = {
         "Suggest": 1,
     },
     "config_item_detail.html": {
-        "Suggest Automation Update": 1,
+        "Suggest Improvement Concepts": 1,
     },
     "suggestions.html": {
-        "Queue Suggestion Run": 1,
+        "Generate Concept Suggestions": 1,
     },
     "suggestion_run_detail.html": {
-        "Accept": 1,
-        "Reject": 1,
+        "Add All to Queue": 1,
+        "Generate YAML": 1,
     },
     "entity_suggestions.html": {
         "Run Suggestions Check": 1,

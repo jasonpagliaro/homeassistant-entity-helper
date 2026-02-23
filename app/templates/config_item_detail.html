@@ -10,17 +10,20 @@
         method="post"
         action="/profiles/{{ profile.id }}/suggestions/runs"
         data-sync-modal="true"
-        data-sync-modal-label="Queueing automation suggestion..."
+        data-sync-modal-label="Queueing automation concepts..."
       >
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="/suggestions?{{ build_query(profile_id=profile.id) }}" />
-        <input type="hidden" name="llm_connection_id" value="{{ active_llm_connection.id }}" />
-        <input type="hidden" name="snapshot_id" value="{{ snapshot.id }}" />
+        <input type="hidden" name="idea_type" value="general" />
+        <input type="hidden" name="custom_intent" value="Focus on improving {{ snapshot.entity_id }}" />
+        <input type="hidden" name="mode" value="standard" />
+        <input type="hidden" name="top_k" value="5" />
+        <input type="hidden" name="include_existing" value="on" />
         <button
           type="submit"
-          data-tooltip="Queue an automation update suggestion for this config item."
+          data-tooltip="Queue concept suggestions focused on improving this automation."
         >
-          Suggest Automation Update
+          Suggest Improvement Concepts
         </button>
       </form>
     {% elif snapshot.kind == "automation" and snapshot.fetch_status == "success" %}

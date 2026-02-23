@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Suggestion Queue</h2>
+
+  <div class="row gap-sm wrap">
+    {% if active_profile %}
+      <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id) }}">Back to Suggestion Runs</a>
+    {% endif %}
+  </div>
+
+  <form method="get" action="/suggestions/queue" class="grid-form compact">
+    {% if active_profile %}
+      <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    {% endif %}
+    <label>
+      Queue Stage
+      <select name="queue_stage">
+        <option value="">All</option>
+        {% for choice in queue_stage_choices %}
+          <option value="{{ choice }}" {% if queue_stage == choice %}selected{% endif %}>{{ choice }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Search
+      <input type="text" name="q" value="{{ q }}" placeholder="title/summary/entity..." />
+    </label>
+    <label>
+      Page Size
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </label>
+    <button type="submit">Apply</button>
+    <a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+  </form>
+
+  {% if active_profile %}
+    <div class="detail-grid">
+      {% for stage_name, count in stage_counts.items() %}
+        <div><strong>{{ stage_name }}</strong></div><div>{{ count }}</div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if active_profile and enriched_proposals %}
+    <p>{{ total }} queued concepts match filters.</p>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Title</th>
+            <th>Type</th>
+            <th>Target</th>
+            <th>Stage</th>
+            <th>
+              Score
+              <span class="field-help" title="{{ score_tooltips.get('ranking', '') }}" aria-label="{{ score_tooltips.get('ranking', '') }}">?</span>
+            </th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in enriched_proposals %}
+            {% set proposal = row.proposal %}
+            {% set concept = row.concept %}
+            <tr>
+              <td data-label="ID">{{ proposal.id }}</td>
+              <td data-label="Title">{{ row.title }}</td>
+              <td data-label="Type">{{ concept.concept_type or proposal.concept_type or '' }}</td>
+              <td data-label="Target"><code>{{ concept.target_entity_id or proposal.target_entity_id }}</code></td>
+              <td data-label="Stage"><span class="status-chip status-{{ proposal.queue_stage }}">{{ proposal.queue_stage }}</span></td>
+              <td data-label="Score">{{ row.ranking_display or '' }}</td>
+              <td data-label="Updated">{{ proposal.queue_updated_at or proposal.updated_at }}</td>
+              <td data-label="Actions">
+                <form method="post" action="/suggestions/proposals/{{ proposal.id }}/generate" class="grid-form compact">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="next_url" value="/suggestions/queue?{{ build_query(profile_id=active_profile.id, queue_stage=queue_stage, q=q, page=page, page_size=page_size) }}" />
+                  <select name="generation_mode">
+                    <option value="auto">auto</option>
+                    <option value="advanced">advanced</option>
+                  </select>
+                  <button type="submit">Generate</button>
+                </form>
+                <form method="post" action="/suggestions/proposals/{{ proposal.id }}/stage" class="grid-form compact">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="next_url" value="/suggestions/queue?{{ build_query(profile_id=active_profile.id, queue_stage=queue_stage, q=q, page=page, page_size=page_size) }}" />
+                  <select name="queue_stage">
+                    {% for choice in queue_stage_choices %}
+                      <option value="{{ choice }}" {% if proposal.queue_stage == choice %}selected{% endif %}>{{ choice }}</option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit">Stage</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }}</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id, queue_stage=queue_stage, q=q, page=page-1, page_size=page_size) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id, queue_stage=queue_stage, q=q, page=page+1, page_size=page_size) }}">Next</a>
+        {% endif %}
+      </div>
+    </div>
+  {% elif active_profile %}
+    <p>No queue items for this profile yet.</p>
+  {% elif profile_count > 0 %}
+    <p>No enabled profiles are available. Enable a profile on the <a href="/settings">Profiles page</a>.</p>
+  {% else %}
+    <p>No profiles are configured yet. Add one on the <a href="/settings">Profiles page</a>.</p>
+  {% endif %}
+</section>
+{% endblock %}

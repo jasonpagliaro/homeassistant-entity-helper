@@ -432,3 +432,114 @@ async def test_test_connection_verbose_captures_http_400_body(monkeypatch: pytes
     assert debug["endpoint"].endswith("/chat/completions")
     assert debug["headers"]["Authorization"] == "Bearer ***redacted***"
     assert debug["attempts"][0]["response_status"] == 400
+
+
+@pytest.mark.asyncio
+async def test_chat_json_retries_with_higher_output_tokens_when_content_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    class EmptyContentLengthResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": ""},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 900,
+                    "total_tokens": 1000,
+                },
+            }
+
+    class SuccessResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "choices": [
+                    {
+                        "message": {"content": json.dumps({"ok": True})},
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.post_bodies: list[dict[str, Any]] = []
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def post(self, *args: Any, **kwargs: Any) -> Any:
+            body = kwargs.get("json")
+            if isinstance(body, dict):
+                self.post_bodies.append(body)
+            else:
+                self.post_bodies.append({})
+            if len(self.post_bodies) == 1:
+                return EmptyContentLengthResponse()
+            return SuccessResponse()
+
+    fake_client = FakeClient()
+    monkeypatch.setattr("app.llm_client.httpx.AsyncClient", lambda *args, **kwargs: fake_client)
+
+    client = OpenAICompatibleLLMClient(
+        LLMSettings(
+            enabled=True,
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            model="gpt-5.2",
+            timeout_seconds=1,
+            max_concurrency=1,
+            max_output_tokens=900,
+        )
+    )
+    response = await client.chat_json("system", {"ping": "pong"})
+    assert response["ok"] is True
+    assert len(fake_client.post_bodies) == 2
+    assert int(fake_client.post_bodies[0]["max_tokens"]) == 900
+    assert int(fake_client.post_bodies[1]["max_tokens"]) > 900
+
+
+@pytest.mark.asyncio
+async def test_chat_json_request_error_message_includes_type_and_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClient:
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            return False
+
+        async def post(self, *args: Any, **kwargs: Any) -> Any:
+            request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+            raise httpx.ReadTimeout("", request=request)
+
+    monkeypatch.setattr("app.llm_client.httpx.AsyncClient", lambda *args, **kwargs: FakeClient())
+
+    client = OpenAICompatibleLLMClient(
+        LLMSettings(
+            enabled=True,
+            base_url="https://api.openai.com/v1",
+            api_key="token",
+            model="gpt-5.2",
+            timeout_seconds=1,
+            max_concurrency=1,
+        )
+    )
+    debug_context: dict[str, Any] = {}
+    with pytest.raises(LLMClientError) as exc:
+        await client.chat_json("system", {"ping": "pong"}, debug_context=debug_context)
+    message = str(exc.value)
+    assert "ReadTimeout" in message
+    assert "request timed out" in message
+    assert "https://api.openai.com/v1/chat/completions" in message
+    assert debug_context["attempts"][0]["network_error_type"] == "ReadTimeout"
+    assert "request timed out" in debug_context["attempts"][0]["network_error"]

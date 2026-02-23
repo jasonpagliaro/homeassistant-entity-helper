@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Suggestion Generation #{{ generation.id }}</h2>
+  <div class="row gap-sm wrap">
+    <a class="button" href="{{ back_url }}">Back to Queue</a>
+    <a class="button" href="/suggestions/generations/{{ generation.id }}/export.yaml?{{ build_query(profile_id=active_profile.id) }}">Export YAML</a>
+  </div>
+
+  <div class="detail-grid">
+    <div><strong>Status</strong></div><div><span class="status-chip status-{{ generation.status }}">{{ generation.status }}</span></div>
+    <div><strong>Mode</strong></div><div>{{ generation.mode }}</div>
+    <div><strong>Proposal ID</strong></div><div>{{ proposal.id }}</div>
+    <div><strong>Queue Stage</strong></div><div>{{ proposal.queue_stage }}</div>
+    <div><strong>Current Step</strong></div><div>{{ generation.current_step }}</div>
+    <div><strong>Error</strong></div><div>{{ generation.error or '' }}</div>
+    <div><strong>Created</strong></div><div>{{ generation.created_at }}</div>
+    <div><strong>Updated</strong></div><div>{{ generation.updated_at }}</div>
+    <div><strong>Finished</strong></div><div>{{ generation.finished_at or '' }}</div>
+  </div>
+
+  <h3>Concept</h3>
+  <pre>{{ concept_payload }}</pre>
+
+  {% if generation.optional_instruction %}
+    <h3>Optional Instruction</h3>
+    <pre>{{ generation.optional_instruction }}</pre>
+  {% endif %}
+
+  {% if pending_question and generation.status == "awaiting_user" %}
+    <h3>Advanced Question</h3>
+    <p><strong>Step {{ pending_question.step_index + 1 }} / {{ pending_question.total_steps }}</strong></p>
+    <p>{{ pending_question.question }}</p>
+    <form method="post" action="/suggestions/generations/{{ generation.id }}/answer" class="grid-form compact">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+      <label>
+        Answer
+        <textarea name="answer" rows="4" placeholder="Provide constraints, exceptions, and details."></textarea>
+      </label>
+      <button type="submit">Submit Answer</button>
+    </form>
+
+    <form method="post" action="/suggestions/generations/{{ generation.id }}/let-llm-decide" class="grid-form compact">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+      <button type="submit" data-tooltip="Stop asking questions and let the model decide the rest.">Let LLM Decide the Rest</button>
+    </form>
+  {% endif %}
+
+  <h3>Advanced Answers</h3>
+  <pre>{{ answers }}</pre>
+
+  <h3>Current YAML</h3>
+  <pre>{{ generation.final_yaml_text or '' }}</pre>
+
+  {% if generation.final_yaml_text %}
+    <div class="row gap-sm wrap">
+      <form method="post" action="/suggestions/generations/{{ generation.id }}/submit" class="grid-form compact">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+        <label>
+          <input type="checkbox" name="confirm_submit" value="on" />
+          Confirm submit to Home Assistant
+        </label>
+        <button type="submit" data-tooltip="Submit this generated automation to Home Assistant config API.">Submit to Home Assistant</button>
+      </form>
+
+      <form method="post" action="/suggestions/generations/{{ generation.id }}/clone-variant" class="grid-form compact">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/suggestions/queue?{{ build_query(profile_id=active_profile.id) }}" />
+        <button type="submit" class="button-secondary" data-tooltip="Clone this concept as a variant for additional iteration.">Clone as Variant</button>
+      </form>
+    </div>
+
+    <h3>Tweak via LLM</h3>
+    <form method="post" action="/suggestions/generations/{{ generation.id }}/tweak" class="grid-form compact">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+      <label>
+        Tweak Prompt
+        <input type="text" name="tweak_prompt" placeholder="Example: add a condition to suppress duplicate notifications" />
+      </label>
+      <button type="submit">Apply LLM Tweak</button>
+    </form>
+
+    <h3>Manual YAML Edit</h3>
+    <form method="post" action="/suggestions/generations/{{ generation.id }}/manual-edit" class="grid-form compact">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+      <label>
+        YAML
+        <textarea name="yaml_text" rows="14">{{ generation.final_yaml_text }}</textarea>
+      </label>
+      <button type="submit">Save Manual Edit</button>
+    </form>
+  {% endif %}
+
+  <div class="row gap-sm wrap">
+    <form method="post" action="/suggestions/generations/{{ generation.id }}/cancel">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+      <button type="submit" class="danger">Cancel Generation</button>
+    </form>
+
+    <form method="post" action="/suggestions/generations/{{ generation.id }}/restart" class="grid-form compact">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next_url" value="/suggestions/queue?{{ build_query(profile_id=active_profile.id) }}" />
+      <label>
+        Restart Mode
+        <select name="generation_mode">
+          <option value="auto">auto</option>
+          <option value="advanced">advanced</option>
+        </select>
+      </label>
+      <label>
+        Optional Instruction
+        <input type="text" name="optional_instruction" value="{{ generation.optional_instruction or '' }}" />
+      </label>
+      <button type="submit">Restart</button>
+    </form>
+  </div>
+
+  <h3>Revision History</h3>
+  {% if revisions %}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Revision</th>
+            <th>Source</th>
+            <th>Prompt</th>
+            <th>Summary</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for revision in revisions %}
+            <tr>
+              <td data-label="Revision">{{ revision.revision_index }}</td>
+              <td data-label="Source">{{ revision.source }}</td>
+              <td data-label="Prompt">{{ revision.prompt_text or '' }}</td>
+              <td data-label="Summary">{{ revision.change_summary or '' }}</td>
+              <td data-label="Created">{{ revision.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p>No revisions yet.</p>
+  {% endif %}
+
+  <h3>Latest Revision Diff</h3>
+  <pre>{{ diff_text or '' }}</pre>
+</section>
+{% endblock %}
