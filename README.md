@@ -8,6 +8,97 @@ HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entit
 - Data persistence: local `./data` by default (configurable via `HEV_DATA_DIR`).
 - UI name is configurable via `APP_NAME`, so repo/product naming is easy to change later.
 
+## Install and Run
+For a concise onboarding path, see [docs/getting-started.md](docs/getting-started.md).
+
+### Path A: Local Runtime (npm + Python)
+Prerequisites:
+- Node.js 20+
+- npm 10+
+- Python 3.12+
+
+From repo root:
+
+```bash
+npm ci
+npm run run
+curl -fsS http://localhost:8000/healthz
+```
+
+Then open `http://localhost:8000`.
+
+If your default `python3` is not 3.12+, set `PYTHON` explicitly:
+
+```bash
+PYTHON=python3.12 npm run run
+```
+
+### Path B: Docker Compose (Recommended Deployment Path)
+Prerequisites:
+- Docker 24+
+- Docker Compose plugin v2.20+
+
+From repo root:
+
+```bash
+cp .env.docker.example .env
+docker compose up -d --build
+docker compose ps
+docker compose logs -f app
+curl -fsS http://localhost:8000/healthz
+```
+
+Then open `http://localhost:8000`.
+
+SQLite data persists in the named Docker volume `hev_data`.
+
+Optional Postgres overlay (instead of SQLite):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+Postgres overlay data persists in the named Docker volume `hev_pg_data`.
+
+For deployment operations (backup/restore, reverse proxy, troubleshooting), see [docs/deployment/docker.md](docs/deployment/docker.md).
+
+## First Use Workflow (Core)
+1. Open `/settings`, add a profile (name, base URL, token), and save.
+2. Click `Test Connection` for that profile.
+3. Open `/entities`, then click `Sync Now`.
+4. Apply filters/search, inspect entity details, and export via JSON/CSV.
+5. Optional: run `Run Suggestions Check` and automation suggestions workflows.
+
+## Deploy Command Basics
+Use these day-2 commands for Docker Compose deployments:
+
+```bash
+docker compose up -d --build   # deploy or upgrade
+docker compose ps              # status
+docker compose logs -f app     # app logs
+docker compose restart app     # restart app service
+docker compose down            # stop stack
+```
+
+Destructive cleanup (removes volumes/data):
+
+```bash
+docker compose down -v
+```
+
+Postgres overlay variants:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f app
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml restart app
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down -v
+```
+
+For full Docker operations guidance, see [docs/deployment/docker.md](docs/deployment/docker.md).
+
 ## What's New
 - 2026-02-22: Header/page navigation was cleaned up with accessible primary tabs, active-route highlighting, mobile horizontal scrolling, and API Docs moved to a global footer utility link. See `CHANGELOG.md` for details.
 
@@ -44,79 +135,6 @@ MVP uses immutable snapshot runs:
 3. `entity_snapshots`
 
 Each sync creates one `sync_runs` row and N `entity_snapshots` rows linked by `sync_run_id`, preserving point-in-time views for future diffing/history features.
-
-## Standalone Quick Start (npm)
-Prerequisites:
-- Node.js 20+
-- npm 10+
-- Python 3.12+
-
-From repo root:
-
-```bash
-npm ci
-npm run db:migrate
-npm run run
-```
-
-Then open `http://localhost:8000`.
-
-If your default `python3` is not 3.12+, set `PYTHON` explicitly:
-
-```bash
-PYTHON=python3.12 npm run build
-PYTHON=python3.12 npm run run
-```
-
-## Docker Quick Start
-Prerequisites:
-- Docker 24+.
-- Docker Compose plugin v2.20+.
-
-From repo root:
-
-```bash
-cp .env.docker.example .env
-docker compose up -d --build
-```
-
-Then open `http://localhost:8000`.
-
-Basic runtime checks:
-
-```bash
-docker compose ps
-docker compose logs -f app
-curl -fsS http://localhost:8000/healthz
-```
-
-Stop the stack:
-
-```bash
-docker compose down
-```
-
-SQLite data persists in the named Docker volume `hev_data`.
-
-### Postgres Profile (Optional)
-Use the Compose overlay when you want DB persistence in Postgres instead of SQLite:
-
-```bash
-cp .env.docker.example .env
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
-```
-
-This starts both the app and a local `postgres:16-alpine` container. The app waits for Postgres health before startup.
-
-Stop the Postgres profile stack:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
-```
-
-Postgres data persists in the named Docker volume `hev_pg_data`.
-
-For full deployment, backup/restore, reverse proxy, and troubleshooting guidance, see `docs/deployment/docker.md`.
 
 ## Build and Quality Commands
 ```bash
@@ -265,6 +283,7 @@ npm run test
 - `Dockerfile` - production-oriented image build definition.
 - `docker-compose.yml` - default Docker deployment (SQLite).
 - `docker-compose.postgres.yml` - optional Postgres overlay for Docker deployments.
+- `docs/getting-started.md` - 10-minute install, run, and first-use guide.
 - `docs/deployment/docker.md` - Docker operations and deployment guide.
 - `app/templates/` - server-rendered HTML views.
 - `app/static/` - CSS.

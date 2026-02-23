@@ -1,21 +1,93 @@
 # Docker Deployment Guide
 
-This guide covers standard Docker deployment flows for HA Entity Vault:
+This guide covers Docker deployment and day-2 operations for HA Entity Vault.
 
-- Default: one app container + SQLite data volume.
-- Optional: one app container + Postgres container.
+- Default: one app container + SQLite data volume (Compose).
+- Optional: one app container + Postgres container (Compose overlay).
+- Optional: single container `docker run` flow for quick smoke tests.
 
-The application runs Alembic migrations automatically during app startup.
+For a quick onboarding path, see [docs/getting-started.md](../getting-started.md).
 
 ## Prerequisites
 - Docker Engine 24+.
 - Docker Compose plugin v2.20+.
 - A copy of `.env.docker.example` saved as `.env` with real secrets.
 
-## Deployment Options
+## Single-Host Deploy (Compose Default)
+This is the recommended production-like path on one host.
 
-### Option A: Single Container (`docker run`)
-This is useful for quick smoke tests and simple hosts.
+```bash
+cp .env.docker.example .env
+docker compose up -d --build
+docker compose ps
+docker compose logs -f app
+curl -fsS http://localhost:8000/healthz
+```
+
+The app applies Alembic migrations automatically at startup.
+
+SQLite data is persisted in Docker volume `hev_data`.
+
+## Command Basics (Day-2 Operations)
+Default Compose commands:
+
+```bash
+docker compose up -d --build   # start/update
+docker compose ps              # status
+docker compose logs -f app     # logs
+docker compose restart app     # restart app service
+docker compose down            # stop stack
+```
+
+Data-destructive cleanup (removes volumes and persisted data):
+
+```bash
+docker compose down -v
+```
+
+Compose + Postgres overlay variants:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f app
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml restart app
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down -v
+```
+
+Jump links:
+- [Persistence, Backup, and Restore](#persistence-backup-and-restore)
+- [Troubleshooting](#troubleshooting)
+
+## Optional: Docker Compose + Postgres Overlay
+
+```bash
+cp .env.docker.example .env
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+This starts both the app and a local `postgres:16-alpine` container.
+The app waits for Postgres health before startup and still runs migrations automatically.
+
+Check status:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f app
+curl -fsS http://localhost:8000/healthz
+```
+
+Stop:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
+```
+
+Postgres data is persisted in volume `hev_pg_data`.
+
+## Optional: Single Container (`docker run`)
+Useful for quick smoke tests and simple hosts.
 
 ```bash
 docker build -t ha-entity-vault:local .
@@ -46,54 +118,6 @@ Stop/remove:
 docker stop ha-entity-vault
 docker rm ha-entity-vault
 ```
-
-### Option B: Docker Compose (Default SQLite Profile)
-This is the recommended default path for local-first deployments.
-
-```bash
-cp .env.docker.example .env
-docker compose up -d --build
-```
-
-Check status:
-
-```bash
-docker compose ps
-docker compose logs -f app
-curl -fsS http://localhost:8000/healthz
-```
-
-Stop:
-
-```bash
-docker compose down
-```
-
-SQLite data is persisted in volume `hev_data`.
-
-### Option C: Docker Compose + Postgres Overlay (Optional)
-Use this when you want Postgres persistence and a closer production layout.
-
-```bash
-cp .env.docker.example .env
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
-```
-
-Check status:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f app
-curl -fsS http://localhost:8000/healthz
-```
-
-Stop:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
-```
-
-Postgres data is persisted in volume `hev_pg_data`.
 
 ## Environment Variables
 
@@ -145,19 +169,8 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 ## Upgrades
 1. Pull latest code.
 2. Review `.env` for newly added variables.
-3. Rebuild and restart containers:
-
-```bash
-docker compose up -d --build
-```
-
-For Postgres overlay:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
-```
-
-Because migrations run during app startup, schema updates are applied automatically at boot.
+3. Run `docker compose up -d --build` (or the Postgres overlay variant).
+4. Validate health with `curl -fsS http://localhost:8000/healthz`.
 
 ## Reverse Proxy and TLS Notes
 - Terminate TLS at your reverse proxy (for example Nginx, Caddy, Traefik).
