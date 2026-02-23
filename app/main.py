@@ -186,6 +186,19 @@ def app_name() -> str:
     return os.getenv("APP_NAME", "HA Entity Vault")
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def configure_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(message)s"))
@@ -3316,7 +3329,7 @@ def create_app() -> FastAPI:
         SessionMiddleware,
         secret_key=os.getenv("SESSION_SECRET", "dev-only-change-me"),
         same_site="lax",
-        https_only=False,
+        https_only=env_bool("SESSION_HTTPS_ONLY", default=False),
     )
 
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))

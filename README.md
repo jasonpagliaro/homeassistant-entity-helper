@@ -8,10 +8,8 @@ HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entit
 - Data persistence: local `./data` by default (configurable via `HEV_DATA_DIR`).
 - UI name is configurable via `APP_NAME`, so repo/product naming is easy to change later.
 
-Containerization is intentionally deferred. This repository currently targets standalone execution.
-
 ## What's New
-- 2026-02-22: Header/page navigation was cleaned up with accessible primary tabs, active-route highlighting, mobile horizontal scrolling, and API Docs moved to a global footer utility link. See `/Users/jason/Projects/homeassistant-entity-helper/CHANGELOG.md` for details.
+- 2026-02-22: Header/page navigation was cleaned up with accessible primary tabs, active-route highlighting, mobile horizontal scrolling, and API Docs moved to a global footer utility link. See `CHANGELOG.md` for details.
 
 ## MVP Features
 - Multiple Home Assistant profiles.
@@ -70,6 +68,56 @@ PYTHON=python3.12 npm run build
 PYTHON=python3.12 npm run run
 ```
 
+## Docker Quick Start
+Prerequisites:
+- Docker 24+.
+- Docker Compose plugin v2.20+.
+
+From repo root:
+
+```bash
+cp .env.docker.example .env
+docker compose up -d --build
+```
+
+Then open `http://localhost:8000`.
+
+Basic runtime checks:
+
+```bash
+docker compose ps
+docker compose logs -f app
+curl -fsS http://localhost:8000/healthz
+```
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+SQLite data persists in the named Docker volume `hev_data`.
+
+### Postgres Profile (Optional)
+Use the Compose overlay when you want DB persistence in Postgres instead of SQLite:
+
+```bash
+cp .env.docker.example .env
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --build
+```
+
+This starts both the app and a local `postgres:16-alpine` container. The app waits for Postgres health before startup.
+
+Stop the Postgres profile stack:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.postgres.yml down
+```
+
+Postgres data persists in the named Docker volume `hev_pg_data`.
+
+For full deployment, backup/restore, reverse proxy, and troubleshooting guidance, see `docs/deployment/docker.md`.
+
 ## Build and Quality Commands
 ```bash
 npm run bootstrap      # create/update .venv and install requirements-dev.txt
@@ -104,6 +152,7 @@ Environment variables (see `.env.example`):
 
 - `APP_NAME`: UI/application display name.
 - `SESSION_SECRET`: session signing key for CSRF/session cookies.
+- `SESSION_HTTPS_ONLY`: set `true` behind HTTPS/TLS terminators to mark session cookies as secure.
 - `HEV_DATA_DIR`: data directory used for SQLite file (default `./data`).
 - `DATABASE_URL`: optional explicit SQLAlchemy URL.
 - `HA_TOKEN`: optional global token override fallback.
@@ -213,6 +262,10 @@ npm run test
 - `app/ha_client.py` - Home Assistant API client wrapper.
 - `app/models.py` - SQLModel entities.
 - `app/db.py` - engine/session helpers + migration startup hook.
+- `Dockerfile` - production-oriented image build definition.
+- `docker-compose.yml` - default Docker deployment (SQLite).
+- `docker-compose.postgres.yml` - optional Postgres overlay for Docker deployments.
+- `docs/deployment/docker.md` - Docker operations and deployment guide.
 - `app/templates/` - server-rendered HTML views.
 - `app/static/` - CSS.
 - `migrations/` - Alembic env + versions.
@@ -279,6 +332,7 @@ npm run test
 - No built-in secret encryption at rest.
 - No built-in rate limiting.
 - Registry enrichment is best effort and depends on the connected HA version.
+- Suggestion runs use an in-process worker queue; run one app replica unless queue orchestration is redesigned.
 
 ## License
 MIT. See `LICENSE`.

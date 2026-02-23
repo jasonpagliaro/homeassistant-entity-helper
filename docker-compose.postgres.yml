@@ -1,0 +1,30 @@
+services:
+  app:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://${HEV_POSTGRES_USER:-hev}:${HEV_POSTGRES_PASSWORD:-hev_change_me}@postgres:5432/${HEV_POSTGRES_DB:-ha_entity_vault}
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${HEV_POSTGRES_DB:-ha_entity_vault}
+      POSTGRES_USER: ${HEV_POSTGRES_USER:-hev}
+      POSTGRES_PASSWORD: ${HEV_POSTGRES_PASSWORD:-hev_change_me}
+    volumes:
+      - hev_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${HEV_POSTGRES_USER:-hev} -d ${HEV_POSTGRES_DB:-ha_entity_vault}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  hev_pg_data:
