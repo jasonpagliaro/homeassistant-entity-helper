@@ -1921,7 +1921,10 @@ def test_workflow_detail_area_option_adds_parent_device_for_entity_named_area(
         }
 
     async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
-        return [{"area_id": "on_the_go", "name": "On the go"}]
+        return [
+            {"area_id": "office_area", "name": "Office"},
+            {"area_id": "on_the_go", "name": "On the go"},
+        ]
 
     async def fake_fetch_entity_registry_entries(_: Any) -> list[dict[str, Any]]:
         return [
@@ -1970,10 +1973,101 @@ def test_workflow_detail_area_option_adds_parent_device_for_entity_named_area(
         'option value="on_the_go">On the go (Parent device: 2024 IONIQ 5 (IONIQ 5))</option>'
         in detail_response.text
     )
+    parent_area_option_index = detail_response.text.find(
+        'option value="on_the_go">On the go (Parent device: 2024 IONIQ 5 (IONIQ 5))</option>'
+    )
+    office_area_option_index = detail_response.text.find('option value="office_area">Office</option>')
+    assert parent_area_option_index >= 0
+    assert office_area_option_index >= 0
+    assert parent_area_option_index < office_area_option_index
     assert "Parent Device:" in detail_response.text
     assert "2024 IONIQ 5 (IONIQ 5)" in detail_response.text
     assert "Assigned Area:" in detail_response.text
     assert "On the go" in detail_response.text
+
+
+def test_workflow_detail_registry_fetches_use_ttl_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="workflow-registry-cache-ttl")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.cache_target",
+                "state": "70",
+                "attributes": {
+                    "friendly_name": "Cache Target",
+                    "device_class": "temperature",
+                    "state_class": "measurement",
+                },
+            }
+        ]
+
+    async def fake_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        return {"areas": [], "devices": [], "entities": [], "labels": [], "floors": []}
+
+    async def fake_fetch_area_registry_entries(_: Any) -> list[dict[str, Any]]:
+        return [{"area_id": "office_area", "name": "Office"}]
+
+    entity_registry_calls = {"count": 0}
+    device_registry_calls = {"count": 0}
+
+    async def fake_fetch_entity_registry_entries(_: Any) -> list[dict[str, Any]]:
+        entity_registry_calls["count"] += 1
+        return [{"entity_id": "sensor.cache_target", "device_id": "device_cache_target"}]
+
+    async def fake_fetch_device_registry_entries(_: Any) -> list[dict[str, Any]]:
+        device_registry_calls["count"] += 1
+        return [{"id": "device_cache_target", "name_by_user": "Cache Device", "area_id": "office_area"}]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr("app.main.HAClient.fetch_registry_metadata", fake_fetch_registry_metadata)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_area_registry_entries",
+        fake_fetch_area_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_entity_registry_entries",
+        fake_fetch_entity_registry_entries,
+    )
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_device_registry_entries",
+        fake_fetch_device_registry_entries,
+    )
+    monkeypatch.setenv("HEV_LLM_ENABLED", "false")
+
+    run_sync_and_suggestions(client, profile_id, csrf_token)
+    suggestions_payload = client.get(f"/api/entity-suggestions?profile_id={profile_id}").json()
+    suggestion_id = suggestions_payload["items"][0]["id"]
+
+    monotonic_clock = {"now": 100.0}
+
+    def fake_perf_counter() -> float:
+        return monotonic_clock["now"]
+
+    monkeypatch.setattr("app.main.perf_counter", fake_perf_counter)
+    monkeypatch.setattr("app.main.WORKFLOW_REGISTRY_CACHE_TTL_SECONDS", 10.0)
+
+    first_response = client.get(f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}")
+    assert first_response.status_code == 200
+    assert entity_registry_calls["count"] == 1
+    assert device_registry_calls["count"] == 1
+
+    monotonic_clock["now"] = 105.0
+    second_response = client.get(f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}")
+    assert second_response.status_code == 200
+    assert entity_registry_calls["count"] == 1
+    assert device_registry_calls["count"] == 1
+
+    monotonic_clock["now"] = 111.0
+    third_response = client.get(f"/entity-suggestions/{suggestion_id}/workflow?profile_id={profile_id}")
+    assert third_response.status_code == 200
+    assert entity_registry_calls["count"] == 2
+    assert device_registry_calls["count"] == 2
 
 
 def test_workflow_detail_places_apply_form_before_context_and_issues(
