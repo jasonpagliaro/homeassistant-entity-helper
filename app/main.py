@@ -6199,7 +6199,7 @@ def create_app() -> FastAPI:
         client = build_profile_ha_client(profile)
         old_was_enabled: bool | None = None
 
-        request_payload = {
+        request_payload: dict[str, Any] = {
             "old_entity_id": old_entity_id,
             "old_config_key": old_config_key,
             "new_entity_id": new_entity_id,
@@ -6342,7 +6342,7 @@ def create_app() -> FastAPI:
                 status_code=303,
             )
 
-        request_payload = {
+        request_payload: dict[str, Any] = {
             "new_entity_id": new_entity_id,
             "old_entity_id": old_entity_id,
         }
