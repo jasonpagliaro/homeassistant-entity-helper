@@ -56,10 +56,15 @@ docker compose restart app     # restart app service
 docker compose down            # stop stack
 ```
 
-Recommended start/update command (keeps `/config` Installed Commit aligned after `git pull`):
+For existing Compose instances, use this update flow after pulling new code (keeps `/config` Installed Commit aligned with the running build):
 
 ```bash
+git pull --ff-only
+# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
+sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+curl -fsS http://localhost:23010/healthz
+curl -fsS http://localhost:23010/version
 ```
 
 Data-destructive cleanup (removes volumes and persisted data):
@@ -167,7 +172,12 @@ The table below only lists Docker deployment specifics.
 Recommended for local/self-host Compose deploys:
 
 ```bash
+git pull --ff-only
+# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
+sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+curl -fsS http://localhost:23010/healthz
+curl -fsS http://localhost:23010/version
 ```
 
 Compose loads `.env`. If `HEV_BUILD_COMMIT_SHA` is pinned in `.env`, `/config` `Installed Commit` can remain stale after `git pull` unless `.env` is also updated and the image is rebuilt.
@@ -175,7 +185,7 @@ Compose loads `.env`. If `HEV_BUILD_COMMIT_SHA` is pinned in `.env`, `/config` `
 If you previously pinned it in `.env`, remove it (or set it empty), then rebuild/recreate:
 
 ```bash
-sed -i '/^HEV_BUILD_COMMIT_SHA=/d' .env
+sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
 ```
 
@@ -224,8 +234,10 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 ## Upgrades
 1. Pull latest code.
 2. Review `.env` for newly added variables.
-3. Run `HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate` (or the Postgres overlay variant).
-4. Validate health with `curl -fsS http://localhost:23010/healthz`.
+3. If `.env` contains `HEV_BUILD_COMMIT_SHA=...`, remove that line (one-time cleanup).
+4. Run `HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate` (or the Postgres overlay variant).
+5. Validate health with `curl -fsS http://localhost:23010/healthz`.
+6. Validate installed build metadata with `curl -fsS http://localhost:23010/version`.
 
 Upgrade note: Docker defaults now publish on host port `23010`.  
 If existing scripts/bookmarks expect `8000`, set `HEV_HOST_PORT=8000` in `.env` before `docker compose up -d --build`.
