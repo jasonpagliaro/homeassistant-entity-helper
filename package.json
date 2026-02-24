@@ -10,6 +10,9 @@
   "scripts": {
     "bootstrap": "node scripts/npm/bootstrap.mjs",
     "build": "npm run lint && npm run typecheck && npm run test",
+    "docs:lint": "markdownlint-cli2 \"**/*.md\" \"#node_modules\" \"#.venv\" \"#data\"",
+    "docs:links": "find . -name '*.md' -not -path './node_modules/*' -not -path './.venv/*' -not -path './.git/*' -not -path './.pytest_cache/*' -not -path './.mypy_cache/*' -not -path './.ruff_cache/*' -print0 | xargs -0 -n1 markdown-link-check -c .markdown-link-check.json",
+    "docs:check": "npm run docs:lint && npm run docs:links",
     "lint": "node scripts/npm/run-python.mjs -m ruff check app tests",
     "typecheck": "node scripts/npm/run-python.mjs -m mypy app tests",
     "test": "node scripts/npm/run-python.mjs -m pytest -q",
@@ -17,5 +20,9 @@
     "run": "node scripts/npm/run-python.mjs -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
     "db:migrate": "node scripts/npm/run-python.mjs -m alembic upgrade head",
     "clean": "node scripts/npm/clean.mjs"
+  },
+  "devDependencies": {
+    "markdown-link-check": "^3.14.2",
+    "markdownlint-cli2": "^0.21.0"
   }
 }

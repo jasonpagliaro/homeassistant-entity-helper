@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/DavidAnson/markdownlint/main/schema/markdownlint-config-schema.json",
+  "config": {
+    "default": true,
+    "MD013": false,
+    "MD022": false,
+    "MD024": false,
+    "MD031": false,
+    "MD032": false
+  },
+  "ignores": [
+    "node_modules/**",
+    ".venv/**",
+    ".pytest_cache/**",
+    ".mypy_cache/**",
+    ".ruff_cache/**",
+    "data/**"
+  ]
+}

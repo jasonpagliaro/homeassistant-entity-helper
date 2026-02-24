@@ -8,6 +8,12 @@ HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entit
 - Data persistence: local `./data` by default (configurable via `HEV_DATA_DIR`).
 - UI name is configurable via `APP_NAME`, so repo/product naming is easy to change later.
 
+## Documentation Map
+- [docs/getting-started.md](docs/getting-started.md) - clone-to-first-sync quickstart.
+- [docs/deployment/docker.md](docs/deployment/docker.md) - Docker deployment and day-2 operations.
+- [docs/configuration.md](docs/configuration.md) - canonical environment variable and precedence reference.
+- [docs/api-reference.md](docs/api-reference.md) - stable/public HTTP routes and API navigation.
+
 ## Install and Run
 For a concise onboarding path, see [docs/getting-started.md](docs/getting-started.md).
 
@@ -34,7 +40,7 @@ PYTHON=python3.12 npm run run
 ```
 
 ### Path B: Docker Compose (Recommended Deployment Path)
-First-time Docker user? Follow [docs/getting-started.md](docs/getting-started.md#docker-quickstart-from-zero) for clone-to-running instructions.
+First-time Docker user? Follow [docs/getting-started.md](docs/getting-started.md#option-b-docker-quickstart) for clone-to-running instructions.
 
 For deployment operations and troubleshooting, use [docs/deployment/docker.md](docs/deployment/docker.md).
 
@@ -63,8 +69,6 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 Postgres overlay data persists in the named Docker volume `hev_pg_data`.
 
-For deployment operations (backup/restore, reverse proxy, troubleshooting), see [docs/deployment/docker.md](docs/deployment/docker.md).
-
 ## First Use Workflow (Core)
 1. Open `/settings`, add a profile (name, base URL, token), and save.
 2. Click `Test Connection` for that profile.
@@ -72,26 +76,8 @@ For deployment operations (backup/restore, reverse proxy, troubleshooting), see 
 4. Apply filters/search, inspect entity details, and export via JSON/CSV.
 5. Optional: run `Run Suggestions Check` and automation suggestions workflows.
 
-## Deploy Command Basics
-For day-2 Docker Compose operations:
-
-```bash
-docker compose ps              # status
-docker compose logs -f app     # app logs
-docker compose restart app     # restart app service
-docker compose down            # stop stack
-```
-
-Destructive cleanup (removes persisted volumes/data):
-
-```bash
-docker compose down -v
-```
-
-For full Docker command variants (including Postgres overlay), see [docs/deployment/docker.md](docs/deployment/docker.md).
-
-## What's New
-- 2026-02-22: Header/page navigation was cleaned up with accessible primary tabs, active-route highlighting, mobile horizontal scrolling, and API Docs moved to a global footer utility link. See `CHANGELOG.md` for details.
+## Release Notes
+See [CHANGELOG.md](CHANGELOG.md) for current and historical release notes.
 
 ## MVP Features
 - Multiple Home Assistant profiles.
@@ -157,32 +143,10 @@ make clean
 ```
 
 ## Configuration
-Environment variables (see `.env.example`):
-
-- `APP_NAME`: UI/application display name.
-- `SESSION_SECRET`: session signing key for CSRF/session cookies.
-- `SESSION_HTTPS_ONLY`: set `true` behind HTTPS/TLS terminators to mark session cookies as secure.
-- `HEV_DATA_DIR`: data directory used for SQLite file (default `./data`).
-- `DATABASE_URL`: optional explicit SQLAlchemy URL.
-- `HA_TOKEN`: optional global token override fallback.
-- `HEV_LLM_ENABLED`: enable LLM-assisted suggestions/drafts when true and fully configured.
-- `HEV_LLM_BASE_URL`: OpenAI-compatible provider base URL.
-- `HEV_LLM_API_KEY`: provider API key.
-- `HEV_LLM_MODEL`: model ID for suggestion/draft generation.
-- `HEV_LLM_TIMEOUT_SECONDS`: outbound LLM request timeout.
-- `HEV_LLM_MAX_CONCURRENCY`: max in-flight LLM requests per run.
-- `HEV_AUTOMATION_DRAFT_MAX_ITEMS`: cap candidates processed in one draft generation run.
-- `HEV_BUILD_COMMIT_SHA`: optional build commit SHA override used by the update checker when `.git` metadata is unavailable.
-- `OPENAI_API_KEY` / `OPENROUTER_API_KEY` / custom vars: examples of env vars referenced by profile-scoped LLM connections.
-
-Profile token resolution order:
-1. Environment variable defined in `profile.token_env_var` (if present and set).
-2. Token stored in DB for that profile.
-3. `HA_TOKEN` fallback.
-
-LLM API key resolution for profile-scoped automation suggestions:
-1. Environment variable defined in `llm_connections.api_key_env_var` (if present and set).
-2. No plaintext API key fallback in DB (suggestion run fails if key is required and missing).
+Use [docs/configuration.md](docs/configuration.md) as the canonical environment and precedence reference.
+Template files for local and Docker runs:
+- `.env.example`
+- `.env.docker.example`
 
 ## Update Checker
 - App-level update settings and status live on `GET /config`.
@@ -220,55 +184,13 @@ LLM API key resolution for profile-scoped automation suggestions:
 - Use workflow queue for batched edits, then run one batch recheck (`sync + suggestions`) to verify updated statuses.
 - Manual-only issues remain visible with guidance and are not auto-editable in the workflow.
 
-## App Endpoint Reference (Manual)
-- `GET /healthz` - health check.
-- `GET /config` - app-level update checker status and settings page.
-- `POST /config/update-settings` - persist update checker settings.
-- `POST /config/check-updates` - run update check now.
-- `POST /config/update-banner/dismiss` - dismiss current update banner globally.
-- `POST /config/update-banner/reset` - clear banner dismissal state.
-- `GET /settings` - profile settings page.
-- `POST /profiles/select` - set active profile for current session and redirect.
-- `POST /profiles` - create profile.
-- `POST /profiles/{profile_id}/update` - update profile.
-- `POST /profiles/{profile_id}/enable` - enable profile for active use.
-- `POST /profiles/{profile_id}/disable` - disable profile (hidden from switcher/actions).
-- `POST /profiles/{profile_id}/delete` - delete profile + associated sync data.
-- `POST /profiles/{profile_id}/test` - test Home Assistant connection.
-- `POST /profiles/{profile_id}/sync` - sync entities on demand.
-- `POST /profiles/{profile_id}/run-entity-suggestions` - run readiness suggestion checks.
-- `POST /profiles/{profile_id}/generate-automation-drafts` - generate automation drafts from suggestions.
-- `POST /profiles/{profile_id}/llm-connections` - create profile-scoped LLM connection.
-- `POST /llm-connections/{id}/update` - update LLM connection.
-- `POST /llm-connections/{id}/test` - test LLM connection.
-- `POST /llm-connections/{id}/delete` - delete LLM connection.
-- `POST /profiles/{profile_id}/suggestions/runs` - queue automation suggestion run (suggest-only; no auto-apply).
-- `GET /entities` - entity table with filter/pagination query params.
-- `GET /entities/{entity_id}` - entity detail view.
-- `GET /suggestions` - automation suggestion run list.
-- `GET /suggestions/{run_id}` - automation suggestion run detail and proposal review.
-- `POST /suggestions/proposals/{proposal_id}/status` - mark proposal accepted/rejected.
-- `GET /entity-suggestions` - readiness suggestion list.
-- `GET /entity-suggestions/{suggestion_id}` - readiness suggestion detail.
-- `GET /entity-suggestions/workflow` - missing details workflow queue.
-- `GET /entity-suggestions/{suggestion_id}/workflow` - missing details workflow detail/action view.
-- `POST /entity-suggestions/{suggestion_id}/workflow/apply` - apply workflow changes directly to HA registry.
-- `POST /entity-suggestions/{suggestion_id}/workflow/skip` - skip workflow item for now.
-- `POST /profiles/{profile_id}/entity-suggestions/recheck` - run batch verification (`sync` then `suggestions`).
-- `GET /automation-drafts` - automation draft list.
-- `GET /automation-drafts/{draft_id}` - automation draft detail.
-- `POST /automation-drafts/{draft_id}/accept` - mark draft accepted.
-- `POST /automation-drafts/{draft_id}/reject` - mark draft rejected.
-- `GET /export/json` - export filtered entities as JSON.
-- `GET /export/csv` - export filtered entities as CSV.
-- `GET /api/entity-suggestions` - suggestions API (list + filter/pagination).
-- `GET /api/entity-suggestions/{suggestion_id}` - suggestion API detail.
-- `GET /api/suggestions/runs/{run_id}` - automation suggestion run status API.
-- `GET /api/automation-drafts` - draft API (list + filter/pagination).
-- `GET /api/automation-drafts/{draft_id}` - draft API detail.
+## API Reference
+- Generated OpenAPI docs: `GET /docs`
+- Curated stable/public route reference: [docs/api-reference.md](docs/api-reference.md)
 
 ## Quality and CI
-GitHub Actions pipeline (`.github/workflows/ci.yml`) runs one authoritative quality gate:
+GitHub Actions pipeline (`.github/workflows/ci.yml`) runs:
+- `npm run docs:check` (markdown lint + link checks)
 - `npm run build` (lint, typecheck, tests)
 
 Optional helper for GitHub main branch protection:
@@ -289,6 +211,8 @@ npm run test
 - `docker-compose.yml` - default Docker deployment (SQLite).
 - `docker-compose.postgres.yml` - optional Postgres overlay for Docker deployments.
 - `docs/getting-started.md` - 10-minute install, run, and first-use guide.
+- `docs/configuration.md` - canonical environment and precedence reference.
+- `docs/api-reference.md` - stable/public route and API navigation guide.
 - `docs/deployment/docker.md` - Docker operations and deployment guide.
 - `app/templates/` - server-rendered HTML views.
 - `app/static/` - CSS.

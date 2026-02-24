@@ -14,10 +14,17 @@ PYTHON=python3.12 npm run build
 
 ## Quality checks
 - Full gate: `npm run build`
+- Docs checks: `npm run docs:check`
 - Lint: `npm run lint`
 - Typecheck: `npm run typecheck`
 - Tests: `npm run test`
 - Format: `npm run format`
+
+## Documentation updates
+- Canonical environment documentation lives in `docs/configuration.md`.
+- Stable/public route documentation lives in `docs/api-reference.md`.
+- Keep cross-links current when moving or renaming docs pages.
+- Run `npm run docs:check` before opening a PR that changes markdown content.
 
 ## Compatibility make targets
 `make` remains available for compatibility and delegates to npm scripts:
@@ -30,7 +37,7 @@ PYTHON=python3.12 npm run build
 ## Pull requests
 1. Keep PRs focused and include tests for behavior changes.
 2. Do not commit real Home Assistant tokens or private env files.
-3. Update docs (`README.md`) when adding features or endpoints.
+3. Update docs (`README.md` and `docs/`) when adding or changing features, routes, or operational workflows.
 4. Ensure CI (`build`) is green before requesting review.
 
 ## Code style

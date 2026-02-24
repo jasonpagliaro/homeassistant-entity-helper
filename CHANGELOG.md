@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## 2026-02-23
+
+### Changed
+- Reorganized documentation around canonical references:
+  - Added `docs/configuration.md` as the single source of truth for environment variables and precedence rules.
+  - Added `docs/api-reference.md` for stable/public route documentation and `/docs` OpenAPI guidance.
+  - Added a documentation map in `README.md` and replaced the manual endpoint inventory with links to canonical docs.
+- Reduced duplication between `README.md`, `docs/getting-started.md`, and `docs/deployment/docker.md` by moving detailed config/API material into dedicated docs pages.
+- Updated `CONTRIBUTING.md` to include docs contribution expectations and `npm run docs:check` guidance.
+
+### CI / Tooling
+- Added markdown documentation quality tooling:
+  - `markdownlint-cli2`
+  - `markdown-link-check`
+- Added npm scripts: `docs:lint`, `docs:links`, and `docs:check`.
+- Updated CI workflow to run `npm run docs:check` before the existing build gate.
+
 ## 2026-02-22
 
 ### Changed

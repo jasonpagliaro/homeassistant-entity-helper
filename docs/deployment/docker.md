@@ -6,7 +6,8 @@ This guide covers Docker deployment and day-2 operations for HA Entity Vault.
 - Optional: one app container + Postgres container (Compose overlay).
 - Optional: single container `docker run` flow for quick smoke tests.
 
-For a quick onboarding path, see [docs/getting-started.md](../getting-started.md).
+For a quick onboarding path, see [docs/getting-started.md](../getting-started.md).  
+For canonical environment definitions and precedence rules, see [docs/configuration.md](../configuration.md).
 
 ## Prerequisites
 - Docker Engine 24+.
@@ -137,19 +138,18 @@ docker rm ha-entity-vault
 
 ## Environment Variables
 
+Use [docs/configuration.md](../configuration.md) as the canonical environment reference.
+The table below only lists Docker deployment specifics.
+
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `SESSION_SECRET` | Yes (production) | `change-me` in examples | Use a long random secret in real deployments. |
-| `SESSION_HTTPS_ONLY` | No | `false` | Set to `true` when app is served behind HTTPS/TLS. |
-| `HEV_DATA_DIR` | No | `./data` (host), `/data` (container defaults) | SQLite data path. |
-| `DATABASE_URL` | No | empty | Leave empty for SQLite; set Postgres URL for DB container/external DB. |
-| `APP_NAME` | No | `HA Entity Vault` | UI label only. |
-| `HA_TOKEN` | No | empty | Global fallback HA token. |
-| `HEV_LLM_ENABLED` | No | `false` | Enable LLM features only when fully configured. |
-| `HEV_LLM_BASE_URL` | No | empty | OpenAI-compatible endpoint base URL. |
-| `HEV_LLM_API_KEY` | No | empty | Provider API key (or profile-scoped env var references). |
-| `HEV_LLM_MODEL` | No | empty | Model ID for suggestion/draft generation. |
-| `HEV_BUILD_COMMIT_SHA` | No | empty | Optional local build SHA used by `/config` update checker when `.git` is unavailable in container runtime. |
+| `SESSION_SECRET` | Yes (production) | placeholder in `.env.docker.example` | Set to a long random value before first deployment. |
+| `HEV_DATA_DIR` | No | `/data` in Compose app container | Container path for SQLite persistence volume mapping. |
+| `DATABASE_URL` | No | empty | Leave empty for SQLite Compose default. Set for external DB or advanced overrides. |
+| `HEV_POSTGRES_DB` | No | `ha_entity_vault` | Database name used by the Postgres overlay service. |
+| `HEV_POSTGRES_USER` | No | `hev` | Username used by the Postgres overlay service. |
+| `HEV_POSTGRES_PASSWORD` | No | `hev_change_me` | Password used by the Postgres overlay service. Change before production use. |
+| `HEV_BUILD_COMMIT_SHA` | No | empty | Optional local build SHA used by `/config` update checker when `.git` metadata is unavailable in runtime containers. |
 
 To provide deterministic update-checker local version info in containers:
 
