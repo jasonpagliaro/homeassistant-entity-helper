@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -628,6 +629,26 @@ def test_config_page_and_update_settings_persist(
     assert app_config.update_repo_name == "custom-repo"
     assert app_config.update_repo_branch == "release/stable"
     assert app_config.update_check_interval_minutes == 10080
+
+
+def test_config_page_renders_local_datetime_placeholders(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_fetch_latest_commit(_: str, __: str, ___: str) -> tuple[dict[str, Any], None]:
+        return {
+            "sha": "b" * 40,
+            "url": "https://github.com/example/repo/commit/" + ("b" * 40),
+            "published_at": datetime(2026, 2, 22, 8, 30, tzinfo=timezone.utc),
+        }, None
+
+    monkeypatch.setattr("app.main.fetch_latest_commit", fake_fetch_latest_commit)
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    config_response = client.get("/config")
+    assert config_response.status_code == 200
+    assert 'data-local-datetime' in config_response.text
+    assert 'datetime="2026-02-22T08:30:00+00:00"' in config_response.text
 
 
 def test_config_update_settings_validation_preserves_existing_values(
