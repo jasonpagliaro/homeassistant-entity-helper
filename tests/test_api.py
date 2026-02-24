@@ -1575,6 +1575,31 @@ def test_automation_adjustments_list_filters_live_rows(
     assert payload["items"][0]["is_enabled"] is False
 
 
+def test_automation_adjustments_missing_token_surfaces_error(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-missing-token")
+
+    with Session(db.get_engine()) as session:
+        profile = session.get(Profile, profile_id)
+        assert profile is not None
+        profile.token = ""
+        profile.token_env_var = ""
+        session.add(profile)
+        session.commit()
+
+    page_response = client.get(f"/automation-adjustments?profile_id={profile_id}")
+    assert page_response.status_code == 200
+    assert "Unable to fetch live automation data: No token configured in profile or environment." in page_response.text
+
+    api_response = client.get(f"/api/automation-adjustments?profile_id={profile_id}")
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["error"] == "No token configured in profile or environment."
+    assert payload["items"] == []
+
+
 def test_start_adjustment_draft_creates_initial_revision(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1887,9 +1912,13 @@ def test_adjustment_test_and_revert_actions(
         call_log.append(("turn_off", entity_id))
         return [{"entity_id": entity_id, "state": "off", "stop_actions": stop_actions}]
 
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [{"entity_id": "automation.evening_mode", "state": "on"}]
+
     monkeypatch.setattr("app.main.HAClient.upsert_automation_config", fake_upsert)
     monkeypatch.setattr("app.main.HAClient.automation_turn_on", fake_turn_on)
     monkeypatch.setattr("app.main.HAClient.automation_turn_off", fake_turn_off)
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
 
     test_response = client.post(
         f"/automation-adjustments/drafts/{draft_id}/test",
@@ -1916,6 +1945,8 @@ def test_adjustment_test_and_revert_actions(
         assert test_action.status == "success"
         assert test_action.old_entity_id == "automation.evening_mode"
         assert test_action.new_entity_id is not None
+        request_payload = json.loads(test_action.request_payload_json or "{}")
+        assert request_payload["old_was_enabled"] is True
 
     revert_response = client.post(
         f"/automation-adjustments/drafts/{draft_id}/revert-test",
@@ -1948,6 +1979,92 @@ def test_adjustment_test_and_revert_actions(
     assert any(item[0] == "upsert" for item in call_log)
     assert any(item[0] == "turn_on" for item in call_log)
     assert any(item[0] == "turn_off" for item in call_log)
+
+
+def test_adjustment_revert_keeps_original_disabled_when_it_was_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-test-disabled")
+    draft_id = seed_adjustment_draft(profile_id)
+
+    call_log: list[tuple[str, str]] = []
+
+    async def fake_upsert(_: Any, config_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        call_log.append(("upsert", config_key))
+        assert payload["alias"].endswith("(DisabledTest)")
+        return {"result": "ok"}
+
+    async def fake_turn_on(_: Any, entity_id: str) -> list[dict[str, Any]]:
+        call_log.append(("turn_on", entity_id))
+        return [{"entity_id": entity_id, "state": "on"}]
+
+    async def fake_turn_off(_: Any, entity_id: str, stop_actions: bool = False) -> list[dict[str, Any]]:
+        call_log.append(("turn_off", entity_id))
+        return [{"entity_id": entity_id, "state": "off", "stop_actions": stop_actions}]
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [{"entity_id": "automation.evening_mode", "state": "off"}]
+
+    monkeypatch.setattr("app.main.HAClient.upsert_automation_config", fake_upsert)
+    monkeypatch.setattr("app.main.HAClient.automation_turn_on", fake_turn_on)
+    monkeypatch.setattr("app.main.HAClient.automation_turn_off", fake_turn_off)
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+
+    test_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/test",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "test_alias_suffix": " (DisabledTest)",
+            "confirm_test": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert test_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.last_test_action_id is not None
+        test_action = session.get(AutomationAdjustmentAction, draft.last_test_action_id)
+        assert test_action is not None
+        request_payload = json.loads(test_action.request_payload_json or "{}")
+        assert request_payload["old_was_enabled"] is False
+
+    revert_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/revert-test",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "confirm_revert": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert revert_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        revert_actions = list(
+            session.exec(
+                select(AutomationAdjustmentAction).where(
+                    AutomationAdjustmentAction.draft_id == draft_id,
+                    AutomationAdjustmentAction.operation == "revert_test",
+                )
+            ).all()
+        )
+        assert len(revert_actions) == 1
+        assert revert_actions[0].status == "success"
+        revert_response_payload = json.loads(revert_actions[0].response_payload_json or "{}")
+        assert "enable_original_automation" not in revert_response_payload
+        assert "enable_original_automation_skipped" in revert_response_payload
+
+    turn_on_entities = [entity_id for call, entity_id in call_log if call == "turn_on"]
+    assert len(turn_on_entities) == 1
 
 
 def test_suggestions_decoupled_from_adjustment_workflow(

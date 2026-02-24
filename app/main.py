@@ -2122,10 +2122,10 @@ def derive_config_key_from_entity_id(entity_id: str) -> str | None:
 
 async def fetch_live_automation_rows(
     profile: Profile,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     token = resolve_profile_token(profile)
     if not token:
-        return [], [], "No token configured in profile or environment."
+        raise HAClientError("No token configured in profile or environment.")
 
     client = HAClient(
         base_url=profile.base_url,
@@ -2481,6 +2481,32 @@ def build_adjustment_test_config_key(alias: str) -> str:
     base = slugify_config_key(alias)
     unique_suffix = secrets.token_hex(3)
     return f"{base}_{unique_suffix}"
+
+
+def find_entity_enabled_state(
+    states: list[dict[str, Any]],
+    entity_id: str,
+) -> bool | None:
+    normalized_entity_id = entity_id.strip().lower()
+    if not normalized_entity_id:
+        return None
+
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        candidate_entity_id = as_clean_string(state.get("entity_id"))
+        if candidate_entity_id is None or candidate_entity_id.strip().lower() != normalized_entity_id:
+            continue
+        candidate_state = as_clean_string(state.get("state"))
+        if candidate_state is None:
+            return None
+        normalized_state = candidate_state.strip().lower()
+        if normalized_state == "on":
+            return True
+        if normalized_state == "off":
+            return False
+        return None
+    return None
 
 
 def adjustment_ai_whole_system_prompt() -> str:
@@ -6170,6 +6196,9 @@ def create_app() -> FastAPI:
         new_config_key = build_adjustment_test_config_key(new_alias)
         new_entity_id = f"automation.{new_config_key}"
 
+        client = build_profile_ha_client(profile)
+        old_was_enabled: bool | None = None
+
         request_payload = {
             "old_entity_id": old_entity_id,
             "old_config_key": old_config_key,
@@ -6177,13 +6206,20 @@ def create_app() -> FastAPI:
             "new_config_key": new_config_key,
             "new_alias": new_alias,
             "payload": new_payload,
+            "old_was_enabled": None,
         }
         response_payload: dict[str, Any] = {"steps": []}
         action_error: str | None = None
         action_status = "failed"
+        try:
+            states = await client.fetch_states()
+            old_was_enabled = find_entity_enabled_state(states, old_entity_id)
+        except HAClientError as exc:
+            response_payload["old_state_lookup_error"] = str(exc)
+
+        request_payload["old_was_enabled"] = old_was_enabled
 
         try:
-            client = build_profile_ha_client(profile)
             upsert_response = await client.upsert_automation_config(new_config_key, new_payload)
             response_payload["upsert_test_config"] = upsert_response
             response_payload["steps"].append("upsert_test_config")
@@ -6310,6 +6346,15 @@ def create_app() -> FastAPI:
             "new_entity_id": new_entity_id,
             "old_entity_id": old_entity_id,
         }
+        prior_test_request_payload = safe_json_load(test_action.request_payload_json, {})
+        old_was_enabled = False
+        if isinstance(prior_test_request_payload, dict) and isinstance(
+            prior_test_request_payload.get("old_was_enabled"),
+            bool,
+        ):
+            old_was_enabled = prior_test_request_payload["old_was_enabled"]
+        request_payload["old_was_enabled"] = old_was_enabled
+
         response_payload: dict[str, Any] = {"steps": []}
         action_status = "failed"
         action_error: str | None = None
@@ -6319,9 +6364,15 @@ def create_app() -> FastAPI:
             response_payload["disable_test_automation"] = disable_test_response
             response_payload["steps"].append("disable_test_automation")
 
-            enable_old_response = await client.automation_turn_on(old_entity_id)
-            response_payload["enable_original_automation"] = enable_old_response
-            response_payload["steps"].append("enable_original_automation")
+            if old_was_enabled:
+                enable_old_response = await client.automation_turn_on(old_entity_id)
+                response_payload["enable_original_automation"] = enable_old_response
+                response_payload["steps"].append("enable_original_automation")
+            else:
+                response_payload["enable_original_automation_skipped"] = (
+                    "Skipped because original automation was not enabled before test deploy."
+                )
+                response_payload["steps"].append("enable_original_automation_skipped")
 
             action_status = "success"
         except (HAClientError, ValueError) as exc:
