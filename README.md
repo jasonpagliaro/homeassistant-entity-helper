@@ -60,20 +60,18 @@ curl -fsS http://localhost:23010/healthz
 
 Then open `http://localhost:23010`.
 
-Recommended for deploy/update (keeps update-checker local SHA in sync after pulls):
+For existing Docker instances, use this update flow after pulling new code (keeps `/config` Installed Commit in sync with the running build):
 
 ```bash
+git pull --ff-only
+# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
+sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+curl -fsS http://localhost:23010/healthz
+curl -fsS http://localhost:23010/version
 ```
 
-Note: Docker Compose loads `.env`, and teams commonly keep/commit that file locally. If `HEV_BUILD_COMMIT_SHA` is pinned in `.env`, the UI `Installed Commit` can stay old after `git pull` unless you also update `.env` and rebuild the image.
-
-If you previously pinned `HEV_BUILD_COMMIT_SHA` in `.env`, remove it (or set it empty), then rebuild/recreate:
-
-```bash
-sed -i '/^HEV_BUILD_COMMIT_SHA=/d' .env
-HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
-```
+Docker Compose loads `.env`. If `HEV_BUILD_COMMIT_SHA` is pinned there, `/config` can show a stale Installed Commit after `git pull` unless you also update that value and rebuild.
 
 If you want the previous Docker host-port behavior, set `HEV_HOST_PORT=8000` in `.env` before running Compose.
 
