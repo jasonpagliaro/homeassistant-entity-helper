@@ -1,0 +1,18 @@
+{
+  "name": "ha-entity-vault-autotest-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned Playwright runtime package for Linux auto-test runner image",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "browser:install": "npx -y playwright@1.52.0 install --with-deps chromium",
+    "browser:preflight": "node ./scripts/playwright-preflight.mjs",
+    "check:config-timestamps": "node ./scripts/assert-config-timestamps.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.52.0"
+  }
+}

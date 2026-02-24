@@ -11,6 +11,7 @@ HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entit
 ## Documentation Map
 - [docs/getting-started.md](docs/getting-started.md) - clone-to-first-sync quickstart.
 - [docs/deployment/docker.md](docs/deployment/docker.md) - Docker deployment and day-2 operations.
+- [docs/deployment/auto-test-runner.md](docs/deployment/auto-test-runner.md) - Linux auto-test runner browser runtime contract.
 - [docs/configuration.md](docs/configuration.md) - canonical environment variable and precedence reference.
 - [docs/api-reference.md](docs/api-reference.md) - stable/public HTTP routes and API navigation.
 
@@ -212,6 +213,11 @@ Optional helper for GitHub main branch protection:
 - `scripts/github/configure-main-protection.sh`
 - Configures required check: `build` (plus squash-only merge policy)
 
+Browser runtime contract for external commit-level rendered UI checks:
+- `docs/deployment/auto-test-runner.md`
+- `deploy/autotest/`
+- `scripts/harness/run-config-timestamp-check.sh`
+
 ## Testing
 ```bash
 npm run test
@@ -231,11 +237,14 @@ npm run test
 - `docs/configuration.md` - canonical environment and precedence reference.
 - `docs/api-reference.md` - stable/public route and API navigation guide.
 - `docs/deployment/docker.md` - Docker operations and deployment guide.
+- `docs/deployment/auto-test-runner.md` - Linux runner browser runtime and `/config` timestamp check contract.
+- `deploy/autotest/` - pinned Playwright/Chromium auto-test runner assets.
 - `app/templates/` - server-rendered HTML views.
 - `app/static/` - CSS.
 - `migrations/` - Alembic env + versions.
 - `tests/` - unit and API tests.
 - `scripts/npm/` - npm-to-Python bootstrap and execution helpers.
+- `scripts/harness/` - external harness wrapper commands.
 - `scripts/github/` - repository administration helpers.
 
 ## Roadmap / TODO
