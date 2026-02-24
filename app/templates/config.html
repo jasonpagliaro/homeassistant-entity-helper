@@ -119,6 +119,23 @@
   </div>
 </section>
 
+<section class="panel">
+  <h2>Local Docker Update Commands</h2>
+  <p class="muted-text">
+    Run from this repository root on your Docker host to update a local/self-hosted deployment and keep
+    <code>Installed Commit</code> aligned with the running build.
+  </p>
+  <pre>git pull --ff-only
+# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
+sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+curl -fsS http://localhost:23010/healthz
+curl -fsS http://localhost:23010/version</pre>
+  <p class="muted-text">
+    If your deployment uses a non-default host port, replace <code>23010</code> in the <code>curl</code> commands.
+  </p>
+</section>
+
 <script>
   (function () {
     const nodes = document.querySelectorAll("[data-local-datetime]");
