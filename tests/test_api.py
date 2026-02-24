@@ -551,6 +551,42 @@ def test_primary_navigation_active_state_on_top_level_pages(
     assert_docs_link_in_footer_not_primary_nav(response.text)
 
 
+def test_version_endpoint_returns_commit_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "d" * 40)
+
+    response = client.get("/version")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["app_name"] == "HA Entity Vault Test"
+    assert payload["installed_commit_sha"] == "d" * 40
+    assert payload["installed_commit_short_sha"] == "dddddddd"
+
+
+def test_update_status_endpoint_exposes_update_runtime_fields(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTO_UPDATE_ENABLED", "false")
+
+    response = client.get("/update-status")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["auto_update_enabled"] is False
+    assert payload["last_update_attempt_at"] is None
+    assert payload["last_update_result"] == "never"
+    assert payload["updates_enabled"] is True
+    assert payload["last_check_state"] == "never"
+    assert payload["installed_commit_sha"] is None
+
+    app_config = get_app_config()
+    assert app_config.last_update_attempt_at is None
+    assert app_config.last_update_result == "never"
+
+
 def test_config_page_and_update_settings_persist(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

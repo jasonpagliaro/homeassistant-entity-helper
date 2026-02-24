@@ -1,0 +1,16 @@
+[Unit]
+Description=HA Entity Vault Update Manager
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/homeassistant-entity-helper
+ExecStart=/opt/homeassistant-entity-helper/scripts/update-manager.sh run --scheduled
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

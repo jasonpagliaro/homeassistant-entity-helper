@@ -157,6 +157,19 @@ Template files for local and Docker runs:
 - Manual checks run via `POST /config/check-updates`.
 - Update banner dismissal is deployment-scoped (DB-backed) and reappears automatically when a newer commit is detected.
 - If local SHA cannot be resolved, status becomes `unknown_local_sha`. Set `HEV_BUILD_COMMIT_SHA` for deterministic deployment version tracking.
+- Deployment metadata endpoints:
+  - `GET /version`
+  - `GET /update-status`
+
+## Automated Self-Update (Docker + systemd)
+- Host-side manager script: `scripts/update-manager.sh`.
+- systemd templates: `deploy/systemd/ha-entity-vault-update.service` and `deploy/systemd/ha-entity-vault-update.timer`.
+- Default schedule gate: daily at `04:00` local time via `.env` (`AUTO_UPDATE_SCHEDULE`).
+- Safety checks include Docker daemon reachability, git origin/branch checks, container health, disk headroom, and SQLite volume/db validation.
+- Deploy is health-gated with automatic rollback to `ha-entity-vault:last-known-good`.
+- Post-deploy crash loops (default: 3 restarts in 10 minutes) trigger rollback and pause updates until manual resume.
+- Structured logs are written to `/var/log/ha-entity-vault-update.log`.
+- Full operational steps: [docs/deployment/docker.md](docs/deployment/docker.md).
 
 ## Security Notes
 - Home Assistant tokens can be stored in SQLite for convenience.
@@ -212,6 +225,8 @@ npm run test
 - `Dockerfile` - production-oriented image build definition.
 - `docker-compose.yml` - default Docker deployment (SQLite).
 - `docker-compose.postgres.yml` - optional Postgres overlay for Docker deployments.
+- `scripts/update-manager.sh` - host-side Docker Compose self-update manager with rollback and backup automation.
+- `deploy/systemd/` - systemd service/timer templates for scheduled auto-updates.
 - `docs/getting-started.md` - 10-minute install, run, and first-use guide.
 - `docs/configuration.md` - canonical environment and precedence reference.
 - `docs/api-reference.md` - stable/public route and API navigation guide.

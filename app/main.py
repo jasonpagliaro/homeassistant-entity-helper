@@ -3624,6 +3624,53 @@ def create_app() -> FastAPI:
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    @app.get("/version")
+    async def version() -> JSONResponse:
+        installed_commit_sha = resolve_installed_commit_sha()
+        return JSONResponse(
+            {
+                "app_name": app_name(),
+                "installed_commit_sha": installed_commit_sha,
+                "installed_commit_short_sha": (
+                    installed_commit_sha[:8] if installed_commit_sha else None
+                ),
+            }
+        )
+
+    @app.get("/update-status")
+    async def update_status(session: Session = Depends(get_session)) -> JSONResponse:
+        app_config = get_or_create_app_config(session)
+        return JSONResponse(
+            {
+                "auto_update_enabled": env_bool("AUTO_UPDATE_ENABLED", default=True),
+                "last_update_attempt_at": (
+                    app_config.last_update_attempt_at.isoformat()
+                    if app_config.last_update_attempt_at
+                    else None
+                ),
+                "last_update_result": app_config.last_update_result,
+                "updates_enabled": app_config.updates_enabled,
+                "update_repo_owner": app_config.update_repo_owner,
+                "update_repo_name": app_config.update_repo_name,
+                "update_repo_branch": app_config.update_repo_branch,
+                "last_checked_at": (
+                    app_config.last_checked_at.isoformat()
+                    if app_config.last_checked_at
+                    else None
+                ),
+                "last_check_state": app_config.last_check_state,
+                "last_check_error": app_config.last_check_error,
+                "installed_commit_sha": app_config.installed_commit_sha,
+                "latest_commit_sha": app_config.latest_commit_sha,
+                "latest_commit_url": app_config.latest_commit_url,
+                "latest_commit_published_at": (
+                    app_config.latest_commit_published_at.isoformat()
+                    if app_config.latest_commit_published_at
+                    else None
+                ),
+            }
+        )
+
     @app.get("/", response_class=HTMLResponse)
     async def root() -> RedirectResponse:
         return RedirectResponse(url="/entities", status_code=303)
