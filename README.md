@@ -209,6 +209,11 @@ GitHub Actions pipeline (`.github/workflows/ci.yml`) runs:
 - `npm run docs:check` (markdown lint + link checks)
 - `npm run build` (lint, typecheck, tests)
 
+Scheduled smoke workflow (`.github/workflows/smoke-autotest.yml`) runs daily:
+- Builds and starts the app via Docker Compose.
+- Runs the baked Playwright runner preflight.
+- Executes rendered `/config` timestamp validation in required browser mode.
+
 Optional helper for GitHub main branch protection:
 - `scripts/github/configure-main-protection.sh`
 - Configures required check: `build` (plus squash-only merge policy)

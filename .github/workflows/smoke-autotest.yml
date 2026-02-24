@@ -1,0 +1,75 @@
+name: Smoke Auto-Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-autotest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  config-timestamp-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Prepare compose environment
+        run: |
+          cp .env.docker.example .env
+          sed -i 's/^SESSION_SECRET=.*/SESSION_SECRET=smoke-session-secret-for-ci-only/' .env
+          sed -i 's/^HEV_HOST_PORT=.*/HEV_HOST_PORT=28010/' .env
+          docker compose config --quiet
+
+      - name: Start app
+        run: docker compose up -d --build app
+
+      - name: Wait for app health
+        run: |
+          for _ in {1..90}; do
+            if curl -fsS http://127.0.0.1:28010/healthz >/dev/null; then
+              echo "App is healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App did not become healthy in time." >&2
+          docker compose logs app >&2 || true
+          exit 1
+
+      - name: Build runner image
+        run: |
+          PLAYWRIGHT_VERSION="$(node -p "require('./deploy/autotest/package.json').dependencies.playwright")"
+          docker build \
+            -f deploy/autotest/runner.Dockerfile \
+            -t hev-autotest-runner:smoke \
+            --build-arg PLAYWRIGHT_VERSION="${PLAYWRIGHT_VERSION}" \
+            .
+
+      - name: Browser preflight
+        run: docker run --rm hev-autotest-runner:smoke
+
+      - name: Rendered /config timestamp check (required mode)
+        run: |
+          docker run --rm \
+            --network host \
+            -e CONFIG_URL=http://127.0.0.1:28010/config \
+            hev-autotest-runner:smoke \
+            node scripts/assert-config-timestamps.mjs
+
+      - name: App logs on failure
+        if: failure()
+        run: docker compose logs app || true
+
+      - name: Teardown
+        if: always()
+        run: docker compose down --volumes --remove-orphans
