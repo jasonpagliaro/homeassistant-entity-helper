@@ -60,6 +60,21 @@ curl -fsS http://localhost:23010/healthz
 
 Then open `http://localhost:23010`.
 
+Recommended for deploy/update (keeps update-checker local SHA in sync after pulls):
+
+```bash
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+```
+
+Note: Docker Compose loads `.env`, and teams commonly keep/commit that file locally. If `HEV_BUILD_COMMIT_SHA` is pinned in `.env`, the UI `Installed Commit` can stay old after `git pull` unless you also update `.env` and rebuild the image.
+
+If you previously pinned `HEV_BUILD_COMMIT_SHA` in `.env`, remove it (or set it empty), then rebuild/recreate:
+
+```bash
+sed -i '/^HEV_BUILD_COMMIT_SHA=/d' .env
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+```
+
 If you want the previous Docker host-port behavior, set `HEV_HOST_PORT=8000` in `.env` before running Compose.
 
 SQLite data persists in the named Docker volume `hev_data`.
@@ -157,7 +172,7 @@ Template files for local and Docker runs:
 - Auto-check runs only when `/config` loads and the configured interval has elapsed.
 - Manual checks run via `POST /config/check-updates`.
 - Update banner dismissal is deployment-scoped (DB-backed) and reappears automatically when a newer commit is detected.
-- If local SHA cannot be resolved, status becomes `unknown_local_sha`. Set `HEV_BUILD_COMMIT_SHA` for deterministic deployment version tracking.
+- If local SHA cannot be resolved, status becomes `unknown_local_sha`. Recommended for local/self-host deploys: runtime inject `HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD)` when running Compose. You may pin it in `.env` for deterministic builds, but you must update it on each deploy.
 - Deployment metadata endpoints:
   - `GET /version`
   - `GET /update-status`
