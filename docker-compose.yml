@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    args:
-      HEV_BUILD_COMMIT_SHA: ${HEV_BUILD_COMMIT_SHA}
+      args:
+        HEV_BUILD_COMMIT_SHA: ${HEV_BUILD_COMMIT_SHA}
     image: ${HEV_IMAGE_TAG:-ha-entity-vault:local}
     init: true
     env_file:
