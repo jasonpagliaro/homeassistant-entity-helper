@@ -51,6 +51,9 @@ from app.llm_client import (
 from app.llm_presets import LLMPreset, get_llm_preset, get_llm_presets, infer_preset_slug
 from app.models import (
     AppConfig,
+    AutomationAdjustmentAction,
+    AutomationAdjustmentDraft,
+    AutomationAdjustmentRevision,
     AutomationDraft,
     AutomationDraftRun,
     ConfigSnapshot,
@@ -123,6 +126,36 @@ SUGGESTION_GENERATION_STATUSES = {
     "failed",
     "cancelled",
 }
+AUTOMATION_ADJUSTMENT_QUEUE_STATUSES = {
+    "draft",
+    "queued",
+    "applied",
+    "tested",
+    "failed",
+    "archived",
+}
+AUTOMATION_ADJUSTMENT_REVISION_SOURCES = {
+    "initial_import",
+    "manual_edit",
+    "ai_whole",
+    "ai_section",
+    "submit",
+    "test",
+    "revert",
+}
+AUTOMATION_ADJUSTMENT_ACTION_OPERATIONS = {
+    "submit_update",
+    "test_deploy",
+    "revert_test",
+}
+AUTOMATION_ADJUSTMENT_SECTION_KEYS = {
+    "alias",
+    "description",
+    "trigger",
+    "condition",
+    "action",
+    "mode",
+}
 SUGGESTION_IDEA_TYPES = {
     "general",
     "comfort",
@@ -178,6 +211,7 @@ class PrimaryNavLink(TypedDict):
 PRIMARY_NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("Entities", "/entities"),
     ("Config Items", "/config-items"),
+    ("Adjust Automations", "/automation-adjustments"),
     ("Automation Suggestions", "/suggestions"),
     ("Entity Suggestions", "/entity-suggestions"),
     ("Automation Drafts", "/automation-drafts"),
@@ -2022,6 +2056,481 @@ def generation_revision_diff_text(revisions: list[SuggestionGenerationRevision])
         lineterm="",
     )
     return "\n".join(diff)
+
+
+def parse_adjustment_structured_payload(draft: AutomationAdjustmentDraft) -> dict[str, Any]:
+    payload = safe_json_load(draft.working_structured_json, {})
+    if not isinstance(payload, dict):
+        raise ValueError("Stored adjustment payload is invalid JSON.")
+    return normalize_automation_payload(payload)
+
+
+def next_adjustment_revision_index(session: Session, draft_id: int) -> int:
+    last_revision = session.exec(
+        select(AutomationAdjustmentRevision)
+        .where(AutomationAdjustmentRevision.draft_id == draft_id)
+        .order_by(
+            AutomationAdjustmentRevision.revision_index.desc(),
+            AutomationAdjustmentRevision.id.desc(),
+        )
+    ).first()
+    if last_revision is None:
+        return 1
+    return int(last_revision.revision_index) + 1
+
+
+def create_adjustment_revision(
+    session: Session,
+    *,
+    draft_id: int,
+    source: str,
+    section: str | None,
+    prompt_text: str | None,
+    yaml_text: str,
+    structured_payload: dict[str, Any],
+    change_summary: str | None,
+) -> AutomationAdjustmentRevision:
+    source_value = source.strip().lower()
+    if source_value not in AUTOMATION_ADJUSTMENT_REVISION_SOURCES:
+        source_value = "manual_edit"
+    section_value = section.strip().lower() if isinstance(section, str) and section.strip() else None
+    if section_value and section_value not in AUTOMATION_ADJUSTMENT_SECTION_KEYS:
+        section_value = None
+    revision = AutomationAdjustmentRevision(
+        draft_id=draft_id,
+        revision_index=next_adjustment_revision_index(session, draft_id),
+        source=source_value,
+        section=section_value,
+        prompt_text=prompt_text.strip() if isinstance(prompt_text, str) and prompt_text.strip() else None,
+        yaml_text=yaml_text,
+        structured_json=safe_json_dump(structured_payload),
+        change_summary=change_summary.strip() if isinstance(change_summary, str) and change_summary.strip() else None,
+        created_at=utcnow(),
+    )
+    session.add(revision)
+    return revision
+
+
+def derive_config_key_from_entity_id(entity_id: str) -> str | None:
+    if "." not in entity_id:
+        return None
+    object_id = entity_id.split(".", 1)[1].strip().lower()
+    if not object_id:
+        return None
+    return object_id
+
+
+async def fetch_live_automation_rows(
+    profile: Profile,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    token = resolve_profile_token(profile)
+    if not token:
+        return [], [], "No token configured in profile or environment."
+
+    client = HAClient(
+        base_url=profile.base_url,
+        token=token,
+        verify_tls=profile.verify_tls,
+        timeout_seconds=profile.timeout_seconds,
+    )
+    states = await client.fetch_states()
+    registry_metadata = await client.fetch_registry_metadata()
+    lookup = build_registry_lookup(registry_metadata)
+    entities_by_entity_id = lookup.get("entities_by_entity_id")
+    if not isinstance(entities_by_entity_id, dict):
+        entities_by_entity_id = {}
+
+    rows: list[dict[str, Any]] = []
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        entity_id = as_clean_string(state.get("entity_id"))
+        if entity_id is None or not entity_id.startswith("automation."):
+            continue
+        enrichment = enrich_state_snapshot(state, lookup)
+        metadata = safe_json_load(enrichment.get("metadata_json"), {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        labels_payload = safe_json_load(enrichment.get("labels_json"), {})
+        if not isinstance(labels_payload, dict):
+            labels_payload = {}
+        label_ids = normalize_string_list(labels_payload.get("ids"))
+        label_names = normalize_string_list(labels_payload.get("names"))
+        registry_entry_raw = entities_by_entity_id.get(entity_id)
+        registry_entry = registry_entry_raw if isinstance(registry_entry_raw, dict) else None
+        config_key = derive_config_key("automation", entity_id, state, registry_entry)
+        state_value = as_clean_string(state.get("state")) or "unknown"
+        alias = as_clean_string(enrichment.get("friendly_name")) or entity_id
+        hidden_by = as_clean_string(metadata.get("entity_hidden_by"))
+        disabled_by = as_clean_string(metadata.get("entity_disabled_by"))
+        area_id = as_clean_string(enrichment.get("area_id"))
+        area_name = as_clean_string(enrichment.get("area_name"))
+        platform = as_clean_string(metadata.get("entity_platform"))
+        last_updated = parse_ha_datetime(state.get("last_updated"))
+        rows.append(
+            {
+                "entity_id": entity_id,
+                "alias": alias,
+                "state": state_value,
+                "is_enabled": state_value.strip().lower() == "on",
+                "area_id": area_id,
+                "area_name": area_name,
+                "labels": label_names,
+                "label_ids": label_ids,
+                "platform": platform,
+                "hidden_by": hidden_by,
+                "disabled_by": disabled_by,
+                "config_key": config_key,
+                "last_updated": last_updated,
+            }
+        )
+
+    areas: dict[str, dict[str, str]] = {}
+    labels: dict[str, str] = {}
+    for row in rows:
+        area_key = str(row.get("area_id") or row.get("area_name") or "").strip()
+        area_name = str(row.get("area_name") or row.get("area_id") or "").strip()
+        if area_key and area_name:
+            areas[area_key] = {"area_id": area_key, "area_name": area_name}
+        row_label_ids = row.get("label_ids")
+        row_label_names = row.get("labels")
+        if isinstance(row_label_ids, list):
+            for idx, label_id in enumerate(row_label_ids):
+                label_id_clean = str(label_id).strip()
+                if not label_id_clean:
+                    continue
+                label_name = label_id_clean
+                if isinstance(row_label_names, list) and idx < len(row_label_names):
+                    candidate_name = str(row_label_names[idx]).strip()
+                    if candidate_name:
+                        label_name = candidate_name
+                labels[label_id_clean] = label_name
+
+    area_options = sorted(areas.values(), key=lambda item: item["area_name"].lower())
+    label_options = [
+        {"label_id": label_id, "label_name": label_name}
+        for label_id, label_name in sorted(labels.items(), key=lambda item: item[1].lower())
+    ]
+    return rows, area_options, safe_json_dump(label_options)
+
+
+def filter_automation_rows(
+    rows: list[dict[str, Any]],
+    *,
+    q: str,
+    enabled: str,
+    area: str,
+    label: str,
+    platform: str,
+    hidden: str,
+    disabled: str,
+) -> list[dict[str, Any]]:
+    normalized_q = q.strip().lower()
+    normalized_enabled = enabled.strip().lower()
+    normalized_area = area.strip()
+    normalized_label = label.strip()
+    normalized_platform = platform.strip().lower()
+    normalized_hidden = hidden.strip().lower()
+    normalized_disabled = disabled.strip().lower()
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        alias = str(row.get("alias", ""))
+        entity_id = str(row.get("entity_id", ""))
+        area_name = str(row.get("area_name") or "")
+        platform_value = str(row.get("platform") or "")
+        hidden_by = str(row.get("hidden_by") or "")
+        disabled_by = str(row.get("disabled_by") or "")
+        labels = row.get("labels") if isinstance(row.get("labels"), list) else []
+        label_ids = row.get("label_ids") if isinstance(row.get("label_ids"), list) else []
+
+        if normalized_q:
+            search_blob = " ".join(
+                [
+                    alias,
+                    entity_id,
+                    area_name,
+                    platform_value,
+                    " ".join(str(item) for item in labels),
+                ]
+            ).lower()
+            if normalized_q not in search_blob:
+                continue
+
+        is_enabled = bool(row.get("is_enabled"))
+        if normalized_enabled == "on" and not is_enabled:
+            continue
+        if normalized_enabled == "off" and is_enabled:
+            continue
+
+        if normalized_area:
+            area_id = str(row.get("area_id") or "")
+            if normalized_area != area_id and normalized_area != area_name:
+                continue
+
+        if normalized_label:
+            if normalized_label not in label_ids and normalized_label not in labels:
+                continue
+
+        if normalized_platform and normalized_platform != platform_value.lower():
+            continue
+
+        if normalized_hidden == "yes" and not hidden_by:
+            continue
+        if normalized_hidden == "no" and hidden_by:
+            continue
+
+        if normalized_disabled == "yes" and not disabled_by:
+            continue
+        if normalized_disabled == "no" and disabled_by:
+            continue
+
+        filtered.append(row)
+    return filtered
+
+
+def sort_automation_rows(rows: list[dict[str, Any]], sort_key: str) -> list[dict[str, Any]]:
+    normalized_sort = sort_key.strip().lower()
+    if normalized_sort == "alias_desc":
+        return sorted(rows, key=lambda row: str(row.get("alias", "")).lower(), reverse=True)
+    if normalized_sort == "entity_asc":
+        return sorted(rows, key=lambda row: str(row.get("entity_id", "")).lower())
+    if normalized_sort == "entity_desc":
+        return sorted(rows, key=lambda row: str(row.get("entity_id", "")).lower(), reverse=True)
+    if normalized_sort == "updated_asc":
+        return sorted(rows, key=lambda row: str(row.get("last_updated") or ""))
+    if normalized_sort == "updated_desc":
+        return sorted(rows, key=lambda row: str(row.get("last_updated") or ""), reverse=True)
+    return sorted(rows, key=lambda row: str(row.get("alias", "")).lower())
+
+
+def parse_label_options_json(raw_value: str | None) -> list[dict[str, str]]:
+    payload = safe_json_load(raw_value, [])
+    if not isinstance(payload, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        label_id = as_clean_string(item.get("label_id"))
+        label_name = as_clean_string(item.get("label_name"))
+        if label_id is None or label_name is None:
+            continue
+        result.append({"label_id": label_id, "label_name": label_name})
+    return result
+
+
+def parse_optional_int(raw_value: str) -> int | None:
+    cleaned = raw_value.strip()
+    if not cleaned:
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        return None
+
+
+def normalize_adjustment_queue_status(raw_value: str) -> str:
+    normalized = raw_value.strip().lower()
+    if normalized in AUTOMATION_ADJUSTMENT_QUEUE_STATUSES:
+        return normalized
+    return "draft"
+
+
+def list_adjustment_revisions(
+    session: Session,
+    draft_id: int,
+) -> list[AutomationAdjustmentRevision]:
+    return list(
+        session.exec(
+            select(AutomationAdjustmentRevision)
+            .where(AutomationAdjustmentRevision.draft_id == draft_id)
+            .order_by(
+                AutomationAdjustmentRevision.revision_index.desc(),
+                AutomationAdjustmentRevision.id.desc(),
+            )
+        ).all()
+    )
+
+
+def list_adjustment_actions(
+    session: Session,
+    draft_id: int,
+) -> list[AutomationAdjustmentAction]:
+    return list(
+        session.exec(
+            select(AutomationAdjustmentAction)
+            .where(AutomationAdjustmentAction.draft_id == draft_id)
+            .order_by(
+                AutomationAdjustmentAction.created_at.desc(),
+                AutomationAdjustmentAction.id.desc(),
+            )
+        ).all()
+    )
+
+
+def latest_successful_adjustment_test_action(
+    session: Session,
+    draft_id: int,
+) -> AutomationAdjustmentAction | None:
+    return session.exec(
+        select(AutomationAdjustmentAction)
+        .where(
+            AutomationAdjustmentAction.draft_id == draft_id,
+            AutomationAdjustmentAction.operation == "test_deploy",
+            AutomationAdjustmentAction.status == "success",
+        )
+        .order_by(AutomationAdjustmentAction.created_at.desc(), AutomationAdjustmentAction.id.desc())
+    ).first()
+
+
+def create_adjustment_action(
+    session: Session,
+    *,
+    draft_id: int,
+    profile_id: int,
+    operation: str,
+    status: str,
+    request_payload: dict[str, Any] | None = None,
+    response_payload: dict[str, Any] | None = None,
+    error: str | None = None,
+    old_entity_id: str | None = None,
+    old_config_key: str | None = None,
+    new_entity_id: str | None = None,
+    new_config_key: str | None = None,
+    new_alias: str | None = None,
+) -> AutomationAdjustmentAction:
+    normalized_operation = operation.strip().lower()
+    if normalized_operation not in AUTOMATION_ADJUSTMENT_ACTION_OPERATIONS:
+        normalized_operation = "submit_update"
+
+    normalized_status = status.strip().lower()
+    if normalized_status not in {"success", "failed"}:
+        normalized_status = "failed"
+
+    action = AutomationAdjustmentAction(
+        draft_id=draft_id,
+        profile_id=profile_id,
+        operation=normalized_operation,
+        status=normalized_status,
+        request_payload_json=safe_json_dump(request_payload) if request_payload else None,
+        response_payload_json=safe_json_dump(response_payload) if response_payload else None,
+        error=error.strip() if isinstance(error, str) and error.strip() else None,
+        old_entity_id=as_clean_string(old_entity_id),
+        old_config_key=as_clean_string(old_config_key),
+        new_entity_id=as_clean_string(new_entity_id),
+        new_config_key=as_clean_string(new_config_key),
+        new_alias=as_clean_string(new_alias),
+        created_at=utcnow(),
+    )
+    session.add(action)
+    return action
+
+
+def apply_adjustment_payload_update(
+    session: Session,
+    *,
+    draft: AutomationAdjustmentDraft,
+    structured_payload: dict[str, Any],
+    source: str,
+    section: str | None,
+    prompt_text: str | None,
+    change_summary: str | None,
+) -> tuple[dict[str, Any], str]:
+    normalized_payload = normalize_automation_payload(structured_payload)
+    normalized_yaml = yaml_from_automation_payload(normalized_payload)
+    draft.working_structured_json = safe_json_dump(normalized_payload)
+    draft.working_yaml_text = normalized_yaml
+    draft.source_alias = normalized_payload.get("alias")
+    draft.last_error = None
+    draft.updated_at = utcnow()
+    session.add(draft)
+    create_adjustment_revision(
+        session,
+        draft_id=draft.id if draft.id is not None else 0,
+        source=source,
+        section=section,
+        prompt_text=prompt_text,
+        yaml_text=normalized_yaml,
+        structured_payload=normalized_payload,
+        change_summary=change_summary,
+    )
+    return normalized_payload, normalized_yaml
+
+
+def build_profile_ha_client(profile: Profile) -> HAClient:
+    token = resolve_profile_token(profile)
+    if not token:
+        raise HAClientError("No token configured in profile or environment.")
+    return HAClient(
+        base_url=profile.base_url,
+        token=token,
+        verify_tls=profile.verify_tls,
+        timeout_seconds=profile.timeout_seconds,
+    )
+
+
+def build_adjustment_test_alias(alias: str, suffix: str) -> str:
+    normalized_suffix = suffix.strip()
+    if not normalized_suffix:
+        normalized_suffix = " (Test)"
+    return f"{alias}{normalized_suffix}"
+
+
+def build_adjustment_test_config_key(alias: str) -> str:
+    base = slugify_config_key(alias)
+    unique_suffix = secrets.token_hex(3)
+    return f"{base}_{unique_suffix}"
+
+
+def adjustment_ai_whole_system_prompt() -> str:
+    return (
+        "You are a Home Assistant automation editor. "
+        "Return JSON only. "
+        "Output either the automation fields directly or an object containing key 'automation'. "
+        "Required automation keys: alias, description, trigger, condition, action, mode. "
+        "trigger/condition/action must be arrays."
+    )
+
+
+def adjustment_ai_section_system_prompt(section: str) -> str:
+    return (
+        "You are a Home Assistant automation section editor. "
+        "Return JSON only. "
+        f"Update section '{section}' only. "
+        "Return either {'value': ...} or {'"
+        + section
+        + "': ...}. "
+        "For alias/description/mode return string; for trigger/condition/action return array."
+    )
+
+
+def merge_adjustment_section_payload(
+    *,
+    payload: dict[str, Any],
+    section: str,
+    section_value: Any,
+) -> dict[str, Any]:
+    merged = dict(payload)
+    if section in {"alias", "description", "mode"}:
+        if not isinstance(section_value, str):
+            raise ValueError(f"Section '{section}' must be a string.")
+        merged[section] = section_value.strip()
+    else:
+        if not isinstance(section_value, list):
+            raise ValueError(f"Section '{section}' must be a list.")
+        merged[section] = section_value
+    return merged
+
+
+def extract_adjustment_section_value(section: str, payload: dict[str, Any]) -> Any:
+    if section in payload:
+        return payload[section]
+    if "value" in payload:
+        return payload["value"]
+    if len(payload) == 1:
+        return next(iter(payload.values()))
+    raise ValueError(f"LLM response did not include section '{section}'.")
 
 
 def build_suggestion_targets_for_run(
@@ -4888,6 +5397,1198 @@ def create_app() -> FastAPI:
             )
 
         return RedirectResponse(url=with_profile_id(next_url, profile_id_value), status_code=303)
+
+    @app.get("/automation-adjustments", response_class=HTMLResponse)
+    async def list_automation_adjustments(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        enabled: str = Query(default=""),
+        area: str = Query(default=""),
+        label: str = Query(default=""),
+        platform: str = Query(default=""),
+        hidden: str = Query(default=""),
+        disabled: str = Query(default=""),
+        sort: str = Query(default="alias_asc"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
+
+        live_rows: list[dict[str, Any]] = []
+        area_options: list[dict[str, str]] = []
+        label_options: list[dict[str, str]] = []
+        platform_options: list[str] = []
+        fetch_error: str | None = None
+        filtered_rows: list[dict[str, Any]] = []
+        paged_rows: list[dict[str, Any]] = []
+        total = 0
+        total_pages = 1
+
+        queued_drafts: list[AutomationAdjustmentDraft] = []
+        if active_profile is not None:
+            queued_drafts = list(
+                session.exec(
+                    select(AutomationAdjustmentDraft)
+                    .where(
+                        AutomationAdjustmentDraft.profile_id == active_profile.id,
+                        AutomationAdjustmentDraft.queue_status == "queued",
+                    )
+                    .order_by(
+                        AutomationAdjustmentDraft.updated_at.desc(),
+                        AutomationAdjustmentDraft.id.desc(),
+                    )
+                ).all()
+            )
+            try:
+                live_rows, area_options, label_options_json = await fetch_live_automation_rows(active_profile)
+                label_options = parse_label_options_json(label_options_json)
+            except HAClientError as exc:
+                fetch_error = str(exc)
+            except Exception as exc:  # pragma: no cover - defensive
+                fetch_error = str(exc)
+
+            platform_options = sorted(
+                {
+                    str(item.get("platform")).strip()
+                    for item in live_rows
+                    if str(item.get("platform") or "").strip()
+                }
+            )
+            filtered_rows = filter_automation_rows(
+                live_rows,
+                q=q,
+                enabled=enabled,
+                area=area,
+                label=label,
+                platform=platform,
+                hidden=hidden,
+                disabled=disabled,
+            )
+            sorted_rows = sort_automation_rows(filtered_rows, sort)
+
+            total = len(sorted_rows)
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            offset = (page - 1) * page_size
+            paged_rows = sorted_rows[offset : offset + page_size]
+
+        next_query = build_query(
+            profile_id=active_profile.id if active_profile else None,
+            q=q,
+            enabled=enabled,
+            area=area,
+            label=label,
+            platform=platform,
+            hidden=hidden,
+            disabled=disabled,
+            sort=sort,
+            page=page,
+            page_size=page_size,
+        )
+        next_url = f"/automation-adjustments?{next_query}" if next_query else "/automation-adjustments"
+
+        return render_template(
+            request,
+            "automation_adjustments.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "profiles": get_enabled_profiles(session),
+                    "profile_count": profile_count,
+                    "rows": paged_rows,
+                    "queued_drafts": queued_drafts,
+                    "q": q,
+                    "enabled": enabled.strip().lower(),
+                    "area": area,
+                    "label": label,
+                    "platform": platform,
+                    "hidden": hidden.strip().lower(),
+                    "disabled": disabled.strip().lower(),
+                    "sort": sort.strip().lower(),
+                    "areas": area_options,
+                    "labels": label_options,
+                    "platforms": platform_options,
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": total_pages,
+                    "next_url": next_url,
+                    "fetch_error": fetch_error,
+                },
+                active_profile,
+            ),
+        )
+
+    @app.post("/automation-adjustments/start")
+    async def start_automation_adjustment_draft(
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        entity_id: str = Form(default=""),
+        next_url: str = Form(default="/automation-adjustments"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        resolved_profile_id = parse_optional_int(profile_id)
+        active_profile = choose_active_profile(session, request, resolved_profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profiles found")
+        if not require_enabled_profile(active_profile, request):
+            return RedirectResponse(
+                url=with_profile_id(next_url, active_profile.id),
+                status_code=303,
+            )
+
+        selected_entity_id = entity_id.strip().lower()
+        if not selected_entity_id.startswith("automation."):
+            set_flash(request, "error", "Select an automation entity to adjust.")
+            return RedirectResponse(
+                url=with_profile_id("/automation-adjustments", active_profile.id),
+                status_code=303,
+            )
+
+        existing_draft = session.exec(
+            select(AutomationAdjustmentDraft)
+            .where(
+                AutomationAdjustmentDraft.profile_id == active_profile.id,
+                AutomationAdjustmentDraft.source_entity_id == selected_entity_id,
+                AutomationAdjustmentDraft.queue_status != "archived",
+            )
+            .order_by(
+                AutomationAdjustmentDraft.updated_at.desc(),
+                AutomationAdjustmentDraft.id.desc(),
+            )
+        ).first()
+        if existing_draft is not None and existing_draft.id is not None:
+            set_flash(request, "success", "Reopened existing automation adjustment draft.")
+            return RedirectResponse(
+                url=f"/automation-adjustments/drafts/{existing_draft.id}?{build_query(profile_id=active_profile.id)}",
+                status_code=303,
+            )
+
+        try:
+            live_rows, _, _ = await fetch_live_automation_rows(active_profile)
+        except HAClientError:
+            live_rows = []
+        selected_row = next(
+            (
+                item
+                for item in live_rows
+                if str(item.get("entity_id", "")).strip().lower() == selected_entity_id
+            ),
+            None,
+        )
+
+        source_config_key = as_clean_string(selected_row.get("config_key")) if selected_row else None
+        source_alias = as_clean_string(selected_row.get("alias")) if selected_row else None
+        derived_config_key = derive_config_key_from_entity_id(selected_entity_id)
+        if source_config_key is None:
+            source_config_key = derived_config_key
+
+        try:
+            client = build_profile_ha_client(active_profile)
+        except HAClientError as exc:
+            set_flash(request, "error", str(exc))
+            return RedirectResponse(
+                url=with_profile_id("/automation-adjustments", active_profile.id),
+                status_code=303,
+            )
+
+        raw_config: dict[str, Any] | None = None
+        config_errors: list[str] = []
+        try:
+            raw_config = await client.fetch_automation_config_ws(selected_entity_id)
+        except HAClientError as exc:
+            config_errors.append(str(exc))
+
+        if raw_config is None:
+            candidate_keys: list[str] = []
+            for candidate in [source_config_key, derived_config_key]:
+                cleaned = as_clean_string(candidate)
+                if cleaned and cleaned not in candidate_keys:
+                    candidate_keys.append(cleaned)
+            for config_key in candidate_keys:
+                try:
+                    raw_config = await client.fetch_automation_config(config_key)
+                    source_config_key = config_key
+                    break
+                except HAClientError as exc:
+                    config_errors.append(str(exc))
+
+        if raw_config is None:
+            detail = config_errors[-1] if config_errors else "Unable to load automation config."
+            set_flash(request, "error", detail)
+            return RedirectResponse(
+                url=with_profile_id("/automation-adjustments", active_profile.id),
+                status_code=303,
+            )
+
+        try:
+            normalized_payload = normalize_automation_payload(raw_config)
+            yaml_text = yaml_from_automation_payload(normalized_payload)
+        except ValueError as exc:
+            set_flash(request, "error", f"Automation config is not editable in this workflow: {exc}")
+            return RedirectResponse(
+                url=with_profile_id("/automation-adjustments", active_profile.id),
+                status_code=303,
+            )
+
+        draft = AutomationAdjustmentDraft(
+            profile_id=active_profile.id if active_profile.id is not None else 0,
+            source_entity_id=selected_entity_id,
+            source_config_key=source_config_key,
+            source_alias=normalized_payload.get("alias") or source_alias,
+            working_yaml_text=yaml_text,
+            working_structured_json=safe_json_dump(normalized_payload),
+            queue_status="draft",
+            last_error=None,
+            last_test_action_id=None,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        session.add(draft)
+        session.commit()
+        session.refresh(draft)
+
+        create_adjustment_revision(
+            session,
+            draft_id=draft.id if draft.id is not None else 0,
+            source="initial_import",
+            section=None,
+            prompt_text=None,
+            yaml_text=yaml_text,
+            structured_payload=normalized_payload,
+            change_summary="Imported automation from Home Assistant.",
+        )
+        session.commit()
+
+        set_flash(request, "success", "Started automation adjustment draft.")
+        return RedirectResponse(
+            url=f"/automation-adjustments/drafts/{draft.id}?{build_query(profile_id=active_profile.id)}",
+            status_code=303,
+        )
+
+    @app.get("/automation-adjustments/drafts/{draft_id}", response_class=HTMLResponse)
+    async def automation_adjustment_detail(
+        draft_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profiles found")
+
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        revisions = list_adjustment_revisions(session, draft_id)
+        actions = list_adjustment_actions(session, draft_id)
+        latest_test_action = latest_successful_adjustment_test_action(session, draft_id)
+        can_revert_test = bool(
+            latest_test_action
+            and latest_test_action.new_entity_id
+            and latest_test_action.old_entity_id
+        )
+
+        back_url = f"/automation-adjustments?{build_query(profile_id=draft.profile_id)}"
+        return render_template(
+            request,
+            "automation_adjustment_detail.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "draft": draft,
+                    "revisions": revisions,
+                    "actions": actions,
+                    "structured_pretty": safe_pretty_json(draft.working_structured_json),
+                    "back_url": back_url,
+                    "default_next_url": f"/automation-adjustments/drafts/{draft.id}",
+                    "sections": ["alias", "description", "trigger", "condition", "action", "mode"],
+                    "can_revert_test": can_revert_test,
+                    "latest_test_action": latest_test_action,
+                },
+                active_profile,
+            ),
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/manual-edit")
+    async def manual_edit_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        yaml_text: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
+        raw_yaml = yaml_text.strip()
+        if not raw_yaml:
+            set_flash(request, "error", "YAML cannot be empty.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        try:
+            normalized_payload = parse_automation_yaml(raw_yaml)
+            apply_adjustment_payload_update(
+                session,
+                draft=draft,
+                structured_payload=normalized_payload,
+                source="manual_edit",
+                section=None,
+                prompt_text=None,
+                change_summary="Manual YAML edit.",
+            )
+            draft.queue_status = normalize_adjustment_queue_status(draft.queue_status)
+            session.add(draft)
+            session.commit()
+            set_flash(request, "success", "Manual YAML edit saved.")
+        except ValueError as exc:
+            set_flash(request, "error", str(exc))
+
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/ai-whole")
+    async def ai_edit_whole_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        instruction: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
+        prompt = instruction.strip()
+        if not prompt:
+            set_flash(request, "error", "AI instruction cannot be empty.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        profile = session.get(Profile, draft.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        connection = get_default_llm_connection(session, profile.id)
+        if connection is None:
+            set_flash(request, "error", "No enabled default LLM connection configured for this profile.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        current_payload = parse_adjustment_structured_payload(draft)
+        api_key = resolve_llm_api_key(connection)
+        llm_settings = build_llm_settings_from_connection(connection, api_key)
+        llm_payload = {
+            "schema_version": "haev.automation.adjustment.whole.v1",
+            "instruction": prompt,
+            "current_automation": current_payload,
+            "output_contract": {
+                "alias": "string",
+                "description": "string",
+                "trigger": "array",
+                "condition": "array",
+                "action": "array",
+                "mode": "string",
+            },
+        }
+        adjust_llm_timeout_for_payload(llm_settings, llm_payload)
+        llm_client = OpenAICompatibleLLMClient(llm_settings)
+        debug_context = {
+            "feature": "automation_adjustment_ai_whole",
+            "draft_id": draft.id,
+        }
+
+        try:
+            llm_response = await chat_json_with_optional_debug_context(
+                llm_client,
+                adjustment_ai_whole_system_prompt(),
+                llm_payload,
+                debug_context,
+            )
+            candidate_payload: Any = llm_response
+            nested_payload = llm_response.get("automation")
+            if isinstance(nested_payload, dict):
+                candidate_payload = nested_payload
+            if not isinstance(candidate_payload, dict):
+                raise ValueError("LLM response must contain an automation object.")
+
+            apply_adjustment_payload_update(
+                session,
+                draft=draft,
+                structured_payload=candidate_payload,
+                source="ai_whole",
+                section=None,
+                prompt_text=prompt,
+                change_summary="AI whole-automation edit.",
+            )
+            draft.queue_status = normalize_adjustment_queue_status(draft.queue_status)
+            session.add(draft)
+            session.commit()
+            set_flash(request, "success", "AI whole-automation edit applied.")
+        except (LLMClientError, ValueError) as exc:
+            draft.last_error = str(exc)
+            draft.updated_at = utcnow()
+            session.add(draft)
+            session.commit()
+            set_flash(request, "error", f"AI edit failed: {exc}")
+
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/ai-section")
+    async def ai_edit_section_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        section: str = Form(default=""),
+        instruction: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
+        selected_section = section.strip().lower()
+        if selected_section not in AUTOMATION_ADJUSTMENT_SECTION_KEYS:
+            set_flash(request, "error", "Choose a valid section for AI editing.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+        prompt = instruction.strip()
+        if not prompt:
+            set_flash(request, "error", "AI instruction cannot be empty.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        profile = session.get(Profile, draft.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        connection = get_default_llm_connection(session, profile.id)
+        if connection is None:
+            set_flash(request, "error", "No enabled default LLM connection configured for this profile.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        current_payload = parse_adjustment_structured_payload(draft)
+        api_key = resolve_llm_api_key(connection)
+        llm_settings = build_llm_settings_from_connection(connection, api_key)
+        llm_payload = {
+            "schema_version": "haev.automation.adjustment.section.v1",
+            "section": selected_section,
+            "instruction": prompt,
+            "current_automation": current_payload,
+            "current_section_value": current_payload.get(selected_section),
+        }
+        adjust_llm_timeout_for_payload(llm_settings, llm_payload)
+        llm_client = OpenAICompatibleLLMClient(llm_settings)
+        debug_context = {
+            "feature": "automation_adjustment_ai_section",
+            "draft_id": draft.id,
+            "section": selected_section,
+        }
+
+        try:
+            llm_response = await chat_json_with_optional_debug_context(
+                llm_client,
+                adjustment_ai_section_system_prompt(selected_section),
+                llm_payload,
+                debug_context,
+            )
+            if not isinstance(llm_response, dict):
+                raise ValueError("LLM response must be a JSON object.")
+            section_value = extract_adjustment_section_value(selected_section, llm_response)
+            merged_payload = merge_adjustment_section_payload(
+                payload=current_payload,
+                section=selected_section,
+                section_value=section_value,
+            )
+            apply_adjustment_payload_update(
+                session,
+                draft=draft,
+                structured_payload=merged_payload,
+                source="ai_section",
+                section=selected_section,
+                prompt_text=prompt,
+                change_summary=f"AI section edit: {selected_section}.",
+            )
+            draft.queue_status = normalize_adjustment_queue_status(draft.queue_status)
+            session.add(draft)
+            session.commit()
+            set_flash(request, "success", f"AI {selected_section} section edit applied.")
+        except (LLMClientError, ValueError) as exc:
+            draft.last_error = str(exc)
+            draft.updated_at = utcnow()
+            session.add(draft)
+            session.commit()
+            set_flash(request, "error", f"AI section edit failed: {exc}")
+
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/queue")
+    async def queue_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        draft.queue_status = "queued"
+        draft.last_error = None
+        draft.updated_at = utcnow()
+        session.add(draft)
+        session.commit()
+        set_flash(request, "success", "Draft queued.")
+        redirect_target = next_url.strip() or "/automation-adjustments"
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/unqueue")
+    async def unqueue_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        draft.queue_status = "draft"
+        draft.updated_at = utcnow()
+        session.add(draft)
+        session.commit()
+        set_flash(request, "success", "Draft removed from queue.")
+        redirect_target = next_url.strip() or "/automation-adjustments"
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/submit")
+    async def submit_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        confirm_submit: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
+        if not parse_checkbox_value(confirm_submit):
+            set_flash(request, "error", "Confirm submit before pushing changes.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        profile = session.get(Profile, draft.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        try:
+            payload = parse_adjustment_structured_payload(draft)
+            config_key = as_clean_string(draft.source_config_key) or derive_config_key_from_entity_id(
+                draft.source_entity_id
+            )
+            if not config_key:
+                raise ValueError("Unable to resolve automation config key for submit.")
+
+            request_payload = {"config_key": config_key, "payload": payload}
+            client = build_profile_ha_client(profile)
+            upsert_response = await client.upsert_automation_config(config_key, payload)
+
+            create_adjustment_action(
+                session,
+                draft_id=draft.id if draft.id is not None else 0,
+                profile_id=draft.profile_id,
+                operation="submit_update",
+                status="success",
+                request_payload=request_payload,
+                response_payload={"upsert": upsert_response},
+                old_entity_id=draft.source_entity_id,
+                old_config_key=config_key,
+            )
+            draft.source_config_key = config_key
+            draft.queue_status = "applied"
+            draft.last_error = None
+            draft.updated_at = utcnow()
+            session.add(draft)
+            create_adjustment_revision(
+                session,
+                draft_id=draft.id if draft.id is not None else 0,
+                source="submit",
+                section=None,
+                prompt_text=None,
+                yaml_text=draft.working_yaml_text,
+                structured_payload=payload,
+                change_summary="Submitted update to Home Assistant.",
+            )
+            session.commit()
+            set_flash(request, "success", "Automation update submitted.")
+        except (HAClientError, ValueError) as exc:
+            create_adjustment_action(
+                session,
+                draft_id=draft.id if draft.id is not None else 0,
+                profile_id=draft.profile_id,
+                operation="submit_update",
+                status="failed",
+                request_payload={"draft_id": draft.id},
+                error=str(exc),
+                old_entity_id=draft.source_entity_id,
+                old_config_key=draft.source_config_key,
+            )
+            draft.queue_status = "failed"
+            draft.last_error = str(exc)
+            draft.updated_at = utcnow()
+            session.add(draft)
+            session.commit()
+            set_flash(request, "error", f"Submit failed: {exc}")
+
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/test")
+    async def test_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        test_alias_suffix: str = Form(default=" (Test)"),
+        confirm_test: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
+        if not parse_checkbox_value(confirm_test):
+            set_flash(request, "error", "Confirm test deployment before running.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        profile = session.get(Profile, draft.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        payload = parse_adjustment_structured_payload(draft)
+        old_entity_id = draft.source_entity_id
+        old_config_key = as_clean_string(draft.source_config_key) or derive_config_key_from_entity_id(
+            draft.source_entity_id
+        )
+        if not old_config_key:
+            old_config_key = derive_config_key_from_entity_id(old_entity_id)
+        if not old_config_key:
+            set_flash(request, "error", "Unable to resolve original automation config key.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        new_alias = build_adjustment_test_alias(payload.get("alias", "Automation"), test_alias_suffix)
+        new_payload = dict(payload)
+        new_payload["alias"] = new_alias
+        new_config_key = build_adjustment_test_config_key(new_alias)
+        new_entity_id = f"automation.{new_config_key}"
+
+        request_payload = {
+            "old_entity_id": old_entity_id,
+            "old_config_key": old_config_key,
+            "new_entity_id": new_entity_id,
+            "new_config_key": new_config_key,
+            "new_alias": new_alias,
+            "payload": new_payload,
+        }
+        response_payload: dict[str, Any] = {"steps": []}
+        action_error: str | None = None
+        action_status = "failed"
+
+        try:
+            client = build_profile_ha_client(profile)
+            upsert_response = await client.upsert_automation_config(new_config_key, new_payload)
+            response_payload["upsert_test_config"] = upsert_response
+            response_payload["steps"].append("upsert_test_config")
+
+            turn_on_response = await client.automation_turn_on(new_entity_id)
+            response_payload["enable_test_automation"] = turn_on_response
+            response_payload["steps"].append("enable_test_automation")
+
+            turn_off_response = await client.automation_turn_off(old_entity_id)
+            response_payload["disable_original_automation"] = turn_off_response
+            response_payload["steps"].append("disable_original_automation")
+
+            action_status = "success"
+        except (HAClientError, ValueError) as exc:
+            action_error = str(exc)
+            response_payload["error_step"] = response_payload.get("steps", [])[-1] if response_payload.get("steps") else None
+
+        action = create_adjustment_action(
+            session,
+            draft_id=draft.id if draft.id is not None else 0,
+            profile_id=draft.profile_id,
+            operation="test_deploy",
+            status=action_status,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            error=action_error,
+            old_entity_id=old_entity_id,
+            old_config_key=old_config_key,
+            new_entity_id=new_entity_id,
+            new_config_key=new_config_key,
+            new_alias=new_alias,
+        )
+        session.flush()
+
+        if action_status == "success":
+            draft.queue_status = "tested"
+            draft.last_error = None
+            draft.last_test_action_id = action.id
+            draft.updated_at = utcnow()
+            session.add(draft)
+            create_adjustment_revision(
+                session,
+                draft_id=draft.id if draft.id is not None else 0,
+                source="test",
+                section=None,
+                prompt_text=None,
+                yaml_text=draft.working_yaml_text,
+                structured_payload=payload,
+                change_summary=f"Test deployed as {new_entity_id} and disabled {old_entity_id}.",
+            )
+            session.commit()
+            set_flash(request, "success", "Test deployment succeeded.")
+        else:
+            draft.queue_status = "failed"
+            draft.last_error = action_error or "Test deployment failed."
+            draft.updated_at = utcnow()
+            session.add(draft)
+            session.commit()
+            set_flash(request, "error", f"Test deployment failed: {draft.last_error}")
+
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.post("/automation-adjustments/drafts/{draft_id}/revert-test")
+    async def revert_test_automation_adjustment_draft(
+        draft_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        profile_id: str = Form(default=""),
+        confirm_revert: str = Form(default=""),
+        next_url: str = Form(default=""),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        active_profile = choose_active_profile(session, request, parse_optional_int(profile_id))
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if active_profile is None or draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
+        if not parse_checkbox_value(confirm_revert):
+            set_flash(request, "error", "Confirm revert before running.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        profile = session.get(Profile, draft.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+
+        test_action: AutomationAdjustmentAction | None = None
+        if draft.last_test_action_id is not None:
+            candidate = session.get(AutomationAdjustmentAction, draft.last_test_action_id)
+            if (
+                candidate is not None
+                and candidate.draft_id == draft.id
+                and candidate.operation == "test_deploy"
+                and candidate.status == "success"
+            ):
+                test_action = candidate
+        if test_action is None:
+            test_action = latest_successful_adjustment_test_action(session, draft_id)
+        if test_action is None:
+            set_flash(request, "error", "No successful test deployment found to revert.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        new_entity_id = as_clean_string(test_action.new_entity_id)
+        old_entity_id = as_clean_string(test_action.old_entity_id)
+        if not new_entity_id or not old_entity_id:
+            set_flash(request, "error", "Stored test linkage is incomplete; cannot revert.")
+            return RedirectResponse(
+                url=with_profile_id(redirect_target, draft.profile_id),
+                status_code=303,
+            )
+
+        request_payload = {
+            "new_entity_id": new_entity_id,
+            "old_entity_id": old_entity_id,
+        }
+        response_payload: dict[str, Any] = {"steps": []}
+        action_status = "failed"
+        action_error: str | None = None
+        try:
+            client = build_profile_ha_client(profile)
+            disable_test_response = await client.automation_turn_off(new_entity_id)
+            response_payload["disable_test_automation"] = disable_test_response
+            response_payload["steps"].append("disable_test_automation")
+
+            enable_old_response = await client.automation_turn_on(old_entity_id)
+            response_payload["enable_original_automation"] = enable_old_response
+            response_payload["steps"].append("enable_original_automation")
+
+            action_status = "success"
+        except (HAClientError, ValueError) as exc:
+            action_error = str(exc)
+
+        create_adjustment_action(
+            session,
+            draft_id=draft.id if draft.id is not None else 0,
+            profile_id=draft.profile_id,
+            operation="revert_test",
+            status=action_status,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            error=action_error,
+            old_entity_id=old_entity_id,
+            old_config_key=test_action.old_config_key,
+            new_entity_id=new_entity_id,
+            new_config_key=test_action.new_config_key,
+            new_alias=test_action.new_alias,
+        )
+
+        if action_status == "success":
+            draft.queue_status = "applied"
+            draft.last_error = None
+            draft.updated_at = utcnow()
+            session.add(draft)
+            create_adjustment_revision(
+                session,
+                draft_id=draft.id if draft.id is not None else 0,
+                source="revert",
+                section=None,
+                prompt_text=None,
+                yaml_text=draft.working_yaml_text,
+                structured_payload=parse_adjustment_structured_payload(draft),
+                change_summary=f"Reverted test deployment; re-enabled {old_entity_id}.",
+            )
+            session.commit()
+            set_flash(request, "success", "Test deployment reverted.")
+        else:
+            draft.queue_status = "failed"
+            draft.last_error = action_error or "Revert failed."
+            draft.updated_at = utcnow()
+            session.add(draft)
+            session.commit()
+            set_flash(request, "error", f"Revert failed: {draft.last_error}")
+
+        return RedirectResponse(
+            url=with_profile_id(redirect_target, draft.profile_id),
+            status_code=303,
+        )
+
+    @app.get("/automation-adjustments/drafts/{draft_id}/export.yaml")
+    async def export_automation_adjustment_yaml(
+        draft_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> Response:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profiles found")
+
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        export_name = slugify_config_key(draft.source_alias or draft.source_entity_id or "automation_adjustment")
+        headers = {
+            "Content-Disposition": f'attachment; filename="{export_name}_{draft.id}.yaml"'
+        }
+        return Response(content=draft.working_yaml_text, media_type="text/yaml", headers=headers)
+
+    @app.get("/api/automation-adjustments")
+    async def api_automation_adjustments(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        enabled: str = Query(default=""),
+        area: str = Query(default=""),
+        label: str = Query(default=""),
+        platform: str = Query(default=""),
+        hidden: str = Query(default=""),
+        disabled: str = Query(default=""),
+        sort: str = Query(default="alias_asc"),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> JSONResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profile found")
+
+        try:
+            live_rows, area_options, label_options_json = await fetch_live_automation_rows(active_profile)
+        except HAClientError as exc:
+            return JSONResponse(
+                {
+                    "profile_id": active_profile.id,
+                    "profile_name": active_profile.name,
+                    "error": str(exc),
+                    "total": 0,
+                    "items": [],
+                    "queue": [],
+                },
+                status_code=200,
+            )
+
+        label_options = parse_label_options_json(label_options_json)
+        platform_options = sorted(
+            {
+                str(item.get("platform")).strip()
+                for item in live_rows
+                if str(item.get("platform") or "").strip()
+            }
+        )
+        filtered_rows = filter_automation_rows(
+            live_rows,
+            q=q,
+            enabled=enabled,
+            area=area,
+            label=label,
+            platform=platform,
+            hidden=hidden,
+            disabled=disabled,
+        )
+        sorted_rows = sort_automation_rows(filtered_rows, sort)
+        total = len(sorted_rows)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        offset = (page - 1) * page_size
+        paged_rows = sorted_rows[offset : offset + page_size]
+
+        queue_drafts = list(
+            session.exec(
+                select(AutomationAdjustmentDraft)
+                .where(
+                    AutomationAdjustmentDraft.profile_id == active_profile.id,
+                    AutomationAdjustmentDraft.queue_status == "queued",
+                )
+                .order_by(
+                    AutomationAdjustmentDraft.updated_at.desc(),
+                    AutomationAdjustmentDraft.id.desc(),
+                )
+            ).all()
+        )
+
+        return JSONResponse(
+            {
+                "profile_id": active_profile.id,
+                "profile_name": active_profile.name,
+                "filters": {
+                    "q": q,
+                    "enabled": enabled,
+                    "area": area,
+                    "label": label,
+                    "platform": platform,
+                    "hidden": hidden,
+                    "disabled": disabled,
+                    "sort": sort,
+                },
+                "areas": area_options,
+                "labels": label_options,
+                "platforms": platform_options,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "items": [
+                    {
+                        "entity_id": row.get("entity_id"),
+                        "alias": row.get("alias"),
+                        "state": row.get("state"),
+                        "is_enabled": bool(row.get("is_enabled")),
+                        "area_id": row.get("area_id"),
+                        "area_name": row.get("area_name"),
+                        "labels": row.get("labels", []),
+                        "label_ids": row.get("label_ids", []),
+                        "platform": row.get("platform"),
+                        "hidden_by": row.get("hidden_by"),
+                        "disabled_by": row.get("disabled_by"),
+                        "config_key": row.get("config_key"),
+                        "last_updated": (
+                            row.get("last_updated").isoformat()
+                            if isinstance(row.get("last_updated"), datetime)
+                            else None
+                        ),
+                    }
+                    for row in paged_rows
+                ],
+                "queue": [
+                    {
+                        "id": draft.id,
+                        "source_entity_id": draft.source_entity_id,
+                        "source_alias": draft.source_alias,
+                        "queue_status": draft.queue_status,
+                        "updated_at": draft.updated_at.isoformat(),
+                    }
+                    for draft in queue_drafts
+                ],
+            }
+        )
+
+    @app.get("/api/automation-adjustments/drafts/{draft_id}")
+    async def api_automation_adjustment_draft_detail(
+        draft_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> JSONResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profile found")
+
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        if draft is None or draft.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Adjustment draft not found")
+
+        revisions = list_adjustment_revisions(session, draft_id)
+        actions = list_adjustment_actions(session, draft_id)
+        return JSONResponse(
+            {
+                "draft": {
+                    "id": draft.id,
+                    "profile_id": draft.profile_id,
+                    "source_entity_id": draft.source_entity_id,
+                    "source_config_key": draft.source_config_key,
+                    "source_alias": draft.source_alias,
+                    "queue_status": draft.queue_status,
+                    "last_error": draft.last_error,
+                    "last_test_action_id": draft.last_test_action_id,
+                    "working_yaml_text": draft.working_yaml_text,
+                    "working_structured": safe_json_load(draft.working_structured_json, {}),
+                    "created_at": draft.created_at.isoformat(),
+                    "updated_at": draft.updated_at.isoformat(),
+                },
+                "revisions": [
+                    {
+                        "id": item.id,
+                        "revision_index": item.revision_index,
+                        "source": item.source,
+                        "section": item.section,
+                        "prompt_text": item.prompt_text,
+                        "change_summary": item.change_summary,
+                        "yaml_text": item.yaml_text,
+                        "structured": safe_json_load(item.structured_json, {}),
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in revisions
+                ],
+                "actions": [
+                    {
+                        "id": item.id,
+                        "operation": item.operation,
+                        "status": item.status,
+                        "request_payload": safe_json_load(item.request_payload_json, {}),
+                        "response_payload": safe_json_load(item.response_payload_json, {}),
+                        "error": item.error,
+                        "old_entity_id": item.old_entity_id,
+                        "old_config_key": item.old_config_key,
+                        "new_entity_id": item.new_entity_id,
+                        "new_config_key": item.new_config_key,
+                        "new_alias": item.new_alias,
+                        "created_at": item.created_at.isoformat(),
+                    }
+                    for item in actions
+                ],
+            }
+        )
 
     @app.post("/profiles/{profile_id}/suggestions/runs")
     async def queue_automation_suggestions_run(

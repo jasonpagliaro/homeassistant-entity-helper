@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Adjust Current Automations</h2>
+  <p>Browse live Home Assistant automations, open a draft, edit YAML or use AI assist, then submit or test.</p>
+
+  {% if fetch_error %}
+    <div class="flash flash-error">Unable to fetch live automation data: {{ fetch_error }}</div>
+  {% endif %}
+
+  <form method="get" action="/automation-adjustments" class="grid-form compact">
+    {% if active_profile %}
+      <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    {% endif %}
+    <label>
+      Search
+      <input type="text" name="q" value="{{ q }}" placeholder="entity/alias/area/label..." />
+    </label>
+    <label>
+      Enabled
+      <select name="enabled">
+        <option value="">All</option>
+        <option value="on" {% if enabled == "on" %}selected{% endif %}>On</option>
+        <option value="off" {% if enabled == "off" %}selected{% endif %}>Off</option>
+      </select>
+    </label>
+    <label>
+      Area
+      <select name="area">
+        <option value="">All</option>
+        {% for item in areas %}
+          <option value="{{ item.area_id }}" {% if area == item.area_id or area == item.area_name %}selected{% endif %}>{{ item.area_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Label
+      <select name="label">
+        <option value="">All</option>
+        {% for item in labels %}
+          <option value="{{ item.label_id }}" {% if label == item.label_id or label == item.label_name %}selected{% endif %}>{{ item.label_name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Platform
+      <select name="platform">
+        <option value="">All</option>
+        {% for item in platforms %}
+          <option value="{{ item }}" {% if platform == item %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Hidden
+      <select name="hidden">
+        <option value="">All</option>
+        <option value="no" {% if hidden == "no" %}selected{% endif %}>No</option>
+        <option value="yes" {% if hidden == "yes" %}selected{% endif %}>Yes</option>
+      </select>
+    </label>
+    <label>
+      Disabled
+      <select name="disabled">
+        <option value="">All</option>
+        <option value="no" {% if disabled == "no" %}selected{% endif %}>No</option>
+        <option value="yes" {% if disabled == "yes" %}selected{% endif %}>Yes</option>
+      </select>
+    </label>
+    <label>
+      Sort
+      <select name="sort">
+        <option value="alias_asc" {% if sort == "alias_asc" %}selected{% endif %}>Alias (A-Z)</option>
+        <option value="alias_desc" {% if sort == "alias_desc" %}selected{% endif %}>Alias (Z-A)</option>
+        <option value="entity_asc" {% if sort == "entity_asc" %}selected{% endif %}>Entity (A-Z)</option>
+        <option value="entity_desc" {% if sort == "entity_desc" %}selected{% endif %}>Entity (Z-A)</option>
+        <option value="updated_desc" {% if sort == "updated_desc" %}selected{% endif %}>Updated (Newest)</option>
+        <option value="updated_asc" {% if sort == "updated_asc" %}selected{% endif %}>Updated (Oldest)</option>
+      </select>
+    </label>
+    <label>
+      Page Size
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </label>
+    <div class="row gap-sm align-end">
+      <button type="submit">Apply Filters</button>
+      <a class="button" href="/automation-adjustments?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
+  </form>
+
+  {% if active_profile and rows %}
+    <p>{{ total }} automation rows match filters.</p>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Entity ID</th>
+            <th>Alias</th>
+            <th>Enabled</th>
+            <th>Area</th>
+            <th>Labels</th>
+            <th>Platform</th>
+            <th>Hidden</th>
+            <th>Disabled</th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td data-label="Entity ID"><code>{{ row.entity_id }}</code></td>
+              <td data-label="Alias">{{ row.alias }}</td>
+              <td data-label="Enabled">
+                <span class="status-chip status-{{ 'success' if row.is_enabled else 'failed' }}">
+                  {{ "on" if row.is_enabled else "off" }}
+                </span>
+              </td>
+              <td data-label="Area">{{ row.area_name or "" }}</td>
+              <td data-label="Labels">{{ (row.labels or [])|join(", ") }}</td>
+              <td data-label="Platform">{{ row.platform or "" }}</td>
+              <td data-label="Hidden">{{ row.hidden_by or "" }}</td>
+              <td data-label="Disabled">{{ row.disabled_by or "" }}</td>
+              <td data-label="Updated">{{ row.last_updated|utc_iso if row.last_updated else "" }}</td>
+              <td data-label="Actions">
+                <form method="post" action="/automation-adjustments/start" class="inline-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+                  <input type="hidden" name="entity_id" value="{{ row.entity_id }}" />
+                  <input type="hidden" name="next_url" value="{{ next_url }}" />
+                  <button
+                    type="submit"
+                    data-tooltip="Open this automation in an adjustment draft workflow."
+                  >
+                    Adjust
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }}</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a
+            class="button"
+            href="/automation-adjustments?{{ build_query(profile_id=active_profile.id, q=q, enabled=enabled, area=area, label=label, platform=platform, hidden=hidden, disabled=disabled, sort=sort, page=page-1, page_size=page_size) }}"
+          >
+            Previous
+          </a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a
+            class="button"
+            href="/automation-adjustments?{{ build_query(profile_id=active_profile.id, q=q, enabled=enabled, area=area, label=label, platform=platform, hidden=hidden, disabled=disabled, sort=sort, page=page+1, page_size=page_size) }}"
+          >
+            Next
+          </a>
+        {% endif %}
+      </div>
+    </div>
+  {% elif active_profile %}
+    <p>No automations matched the current filter set.</p>
+  {% elif profile_count > 0 %}
+    <p>No enabled profiles are available. Enable one in <a href="/settings">Profiles</a>.</p>
+  {% else %}
+    <p>No profiles configured yet. Add one in <a href="/settings">Profiles</a>.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>Adjustment Queue</h3>
+  {% if active_profile and queued_drafts %}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Source Entity</th>
+            <th>Alias</th>
+            <th>Status</th>
+            <th>Updated</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for draft in queued_drafts %}
+            <tr>
+              <td data-label="ID">#{{ draft.id }}</td>
+              <td data-label="Source Entity"><code>{{ draft.source_entity_id }}</code></td>
+              <td data-label="Alias">{{ draft.source_alias or "" }}</td>
+              <td data-label="Status"><span class="status-chip status-{{ draft.queue_status }}">{{ draft.queue_status }}</span></td>
+              <td data-label="Updated">{{ draft.updated_at }}</td>
+              <td data-label="Actions">
+                <div class="row gap-sm wrap">
+                  <a class="button" href="/automation-adjustments/drafts/{{ draft.id }}?{{ build_query(profile_id=active_profile.id) }}">Open</a>
+                  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/submit" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                    <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+                    <input type="hidden" name="confirm_submit" value="on" />
+                    <input type="hidden" name="next_url" value="/automation-adjustments?{{ build_query(profile_id=active_profile.id) }}" />
+                    <button type="submit" data-tooltip="Submit this queued draft to Home Assistant.">Submit</button>
+                  </form>
+                  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/test" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                    <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+                    <input type="hidden" name="next_url" value="/automation-adjustments?{{ build_query(profile_id=active_profile.id) }}" />
+                    <input type="hidden" name="test_alias_suffix" value=" (Test)" />
+                    <label>
+                      <input type="checkbox" name="confirm_test" value="on" />
+                      Confirm Test
+                    </label>
+                    <button type="submit" data-tooltip="Run a test deployment: create and enable a test automation, then disable the original.">Test</button>
+                  </form>
+                  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/unqueue" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                    <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+                    <input type="hidden" name="next_url" value="/automation-adjustments?{{ build_query(profile_id=active_profile.id) }}" />
+                    <button type="submit" class="danger" data-tooltip="Remove this draft from the adjustment queue.">Remove</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% elif active_profile %}
+    <p>No queued adjustment drafts.</p>
+  {% endif %}
+</section>
+{% endblock %}

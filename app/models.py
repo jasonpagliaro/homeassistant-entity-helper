@@ -472,3 +472,70 @@ class SuggestionSubmissionEvent(SQLModel, table=True):
         default_factory=utcnow,
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+
+
+class AutomationAdjustmentDraft(SQLModel, table=True):
+    __tablename__ = "automation_adjustment_drafts"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    source_entity_id: str = Field(index=True, max_length=255)
+    source_config_key: Optional[str] = Field(default=None, max_length=255, index=True)
+    source_alias: Optional[str] = Field(default=None, max_length=255)
+    working_yaml_text: str = Field(sa_column=Column(Text, nullable=False))
+    working_structured_json: str = Field(sa_column=Column(Text, nullable=False))
+    queue_status: str = Field(default="draft", max_length=32, index=True)
+    last_error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    last_test_action_id: Optional[int] = Field(
+        default=None,
+        foreign_key="automation_adjustment_actions.id",
+        index=True,
+    )
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AutomationAdjustmentRevision(SQLModel, table=True):
+    __tablename__ = "automation_adjustment_revisions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    draft_id: int = Field(foreign_key="automation_adjustment_drafts.id", index=True)
+    revision_index: int = Field(default=0, ge=0, index=True)
+    source: str = Field(default="manual_edit", max_length=32, index=True)
+    section: Optional[str] = Field(default=None, max_length=32, index=True)
+    prompt_text: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    yaml_text: str = Field(sa_column=Column(Text, nullable=False))
+    structured_json: str = Field(sa_column=Column(Text, nullable=False))
+    change_summary: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AutomationAdjustmentAction(SQLModel, table=True):
+    __tablename__ = "automation_adjustment_actions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    draft_id: int = Field(foreign_key="automation_adjustment_drafts.id", index=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    operation: str = Field(default="submit_update", max_length=32, index=True)
+    status: str = Field(default="failed", max_length=32, index=True)
+    request_payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    response_payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    old_entity_id: Optional[str] = Field(default=None, max_length=255, index=True)
+    old_config_key: Optional[str] = Field(default=None, max_length=255, index=True)
+    new_entity_id: Optional[str] = Field(default=None, max_length=255, index=True)
+    new_config_key: Optional[str] = Field(default=None, max_length=255, index=True)
+    new_alias: Optional[str] = Field(default=None, max_length=255)
+    created_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )

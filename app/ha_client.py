@@ -139,6 +139,21 @@ class HAClient:
                 normalized.append(item)
         return normalized
 
+    async def call_service(
+        self,
+        domain: str,
+        service: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        cleaned_domain = domain.strip().lower()
+        cleaned_service = service.strip().lower()
+        if not cleaned_domain:
+            raise HAClientError("Service domain is required.")
+        if not cleaned_service:
+            raise HAClientError("Service name is required.")
+        request_payload = payload if isinstance(payload, dict) else {}
+        return await self._post_json(f"/api/services/{cleaned_domain}/{cleaned_service}", request_payload)
+
     async def _run_ws_commands(self, commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             import websockets
@@ -266,6 +281,22 @@ class HAClient:
         if not isinstance(response, dict):
             raise HAClientError("Unexpected response format from automation upsert endpoint.")
         return response
+
+    async def automation_turn_on(self, entity_id: str) -> Any:
+        cleaned_entity_id = self._clean_entity_id(entity_id)
+        return await self.call_service(
+            "automation",
+            "turn_on",
+            {"entity_id": cleaned_entity_id},
+        )
+
+    async def automation_turn_off(self, entity_id: str, stop_actions: bool = False) -> Any:
+        cleaned_entity_id = self._clean_entity_id(entity_id)
+        return await self.call_service(
+            "automation",
+            "turn_off",
+            {"entity_id": cleaned_entity_id, "stop_actions": bool(stop_actions)},
+        )
 
     async def fetch_script_config(self, config_key: str) -> dict[str, Any]:
         return await self._fetch_config("script", config_key)

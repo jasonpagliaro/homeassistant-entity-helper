@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Automation Adjustment Draft</h2>
+  <p><a href="{{ back_url }}">Back to Adjust Automations</a></p>
+
+  <div class="detail-grid">
+    <div><strong>Draft ID</strong></div><div>#{{ draft.id }}</div>
+    <div><strong>Source Entity</strong></div><div><code>{{ draft.source_entity_id }}</code></div>
+    <div><strong>Source Config Key</strong></div><div><code>{{ draft.source_config_key or "" }}</code></div>
+    <div><strong>Source Alias</strong></div><div>{{ draft.source_alias or "" }}</div>
+    <div><strong>Queue Status</strong></div><div><span class="status-chip status-{{ draft.queue_status }}">{{ draft.queue_status }}</span></div>
+    <div><strong>Last Error</strong></div><div>{{ draft.last_error or "" }}</div>
+    <div><strong>Updated</strong></div><div>{{ draft.updated_at }}</div>
+  </div>
+
+  <div class="row gap-sm wrap">
+    {% if draft.queue_status == "queued" %}
+      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/unqueue">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+        <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+        <button type="submit" data-tooltip="Remove this draft from queue.">Unqueue</button>
+      </form>
+    {% else %}
+      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/queue">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+        <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+        <button type="submit" data-tooltip="Add this draft to queue.">Queue</button>
+      </form>
+    {% endif %}
+
+    <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/submit">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+      <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+      <label>
+        <input type="checkbox" name="confirm_submit" value="on" />
+        Confirm Submit
+      </label>
+      <button type="submit" data-tooltip="Submit this draft as an update to the original automation.">Submit Update</button>
+    </form>
+
+    <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/test">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+      <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+      <label>
+        Test Alias Suffix
+        <input type="text" name="test_alias_suffix" value=" (Test)" />
+      </label>
+      <label>
+        <input type="checkbox" name="confirm_test" value="on" />
+        Confirm Test
+      </label>
+      <button type="submit" data-tooltip="Create and enable a test automation, then disable the original automation.">Run Test Deploy</button>
+    </form>
+
+    {% if can_revert_test %}
+      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/revert-test">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+        <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+        <label>
+          <input type="checkbox" name="confirm_revert" value="on" />
+          Confirm Revert
+        </label>
+        <button type="submit" class="danger" data-tooltip="Disable test automation and re-enable the original automation.">Revert Test</button>
+      </form>
+    {% endif %}
+
+    <a class="button" href="/automation-adjustments/drafts/{{ draft.id }}/export.yaml?{{ build_query(profile_id=draft.profile_id) }}">Export YAML</a>
+  </div>
+</section>
+
+<section class="panel">
+  <h3>Manual YAML Edit</h3>
+  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/manual-edit" class="grid-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+    <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+    <label>
+      YAML
+      <textarea name="yaml_text" rows="18">{{ draft.working_yaml_text }}</textarea>
+    </label>
+    <button type="submit" data-tooltip="Validate and save manual YAML edits to this draft.">Save Manual Edit</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>AI Assist</h3>
+  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/ai-whole" class="grid-form compact">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+    <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+    <label>
+      Whole Automation Instruction
+      <textarea name="instruction" rows="4" placeholder="Describe the full automation changes you want."></textarea>
+    </label>
+    <button type="submit" data-tooltip="Ask AI to edit the entire automation payload.">Apply AI Whole Edit</button>
+  </form>
+
+  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/ai-section" class="grid-form compact">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
+    <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+    <label>
+      Section
+      <select name="section">
+        {% for section in sections %}
+          <option value="{{ section }}">{{ section }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Section Instruction
+      <textarea name="instruction" rows="3" placeholder="Describe the change for this section only."></textarea>
+    </label>
+    <button type="submit" data-tooltip="Ask AI to edit only one automation section.">Apply AI Section Edit</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>Structured JSON</h3>
+  <pre>{{ structured_pretty }}</pre>
+</section>
+
+<section class="panel">
+  <h3>Revision History</h3>
+  {% if revisions %}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Revision</th>
+            <th>Source</th>
+            <th>Section</th>
+            <th>Summary</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in revisions %}
+            <tr>
+              <td data-label="Revision">#{{ item.revision_index }}</td>
+              <td data-label="Source">{{ item.source }}</td>
+              <td data-label="Section">{{ item.section or "" }}</td>
+              <td data-label="Summary">{{ item.change_summary or "" }}</td>
+              <td data-label="Created">{{ item.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p>No revisions yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>Action Audit</h3>
+  {% if actions %}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Operation</th>
+            <th>Status</th>
+            <th>Error</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in actions %}
+            <tr>
+              <td data-label="ID">#{{ item.id }}</td>
+              <td data-label="Operation">{{ item.operation }}</td>
+              <td data-label="Status"><span class="status-chip status-{{ item.status }}">{{ item.status }}</span></td>
+              <td data-label="Error">{{ item.error or "" }}</td>
+              <td data-label="Created">{{ item.created_at }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p>No submit/test/revert actions recorded yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
