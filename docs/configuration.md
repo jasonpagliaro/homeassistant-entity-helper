@@ -29,6 +29,24 @@ This is the canonical environment configuration reference for HA Entity Vault.
 | `HEV_LLM_EXTRA_HEADERS_JSON` | No | empty | Optional JSON object of extra outbound LLM HTTP headers. |
 | `HEV_AUTOMATION_DRAFT_MAX_ITEMS` | No | `50` | Max entities considered in one automation draft run. |
 | `HEV_BUILD_COMMIT_SHA` | No | empty | Build SHA override for update-checker version detection when `.git` metadata is unavailable. |
+| `HEV_IMAGE_TAG` | No | `ha-entity-vault:local` | Compose runtime image selector used by host-side update manager deployments. |
+| `AUTO_UPDATE_ENABLED` | No | `true` | Enables host-side update manager runs. |
+| `AUTO_UPDATE_SCHEDULE` | No | `04:00` | Local-time daily schedule gate applied by update manager. |
+| `UPDATE_TIMEOUT_SECONDS` | No | `120` | Maximum wait for service health during deploy/rollback. |
+| `BACKUP_RETENTION_DAYS` | No | `7` | Backup prune window for SQLite snapshots. |
+| `UPDATE_BRANCH` | No | `main` | Git branch tracked by update manager for fast-forward updates. |
+| `AUTO_UPDATE_LOG_FILE` | No | `/var/log/ha-entity-vault-update.log` | Structured JSON update-manager log path. |
+| `AUTO_UPDATE_BACKUP_DIR` | No | `/var/backups/ha-entity-vault` | Host backup directory for timestamped SQLite snapshots. |
+| `AUTO_UPDATE_STATE_DIR` | No | `/var/lib/ha-entity-vault-update` | Metadata/state directory for update manager run state. |
+| `AUTO_UPDATE_LOCK_FILE` | No | `/var/lock/ha-entity-vault-update.lock` | Lock file path used to prevent concurrent updates. |
+| `AUTO_UPDATE_MIN_FREE_MB` | No | `1024` | Minimum required free disk (MB) before backup/deploy. |
+| `UPDATE_POLL_SECONDS` | No | `3` | Poll interval used for health/restart checks. |
+| `UPDATE_EXPECTED_ORIGIN` | No | `https://github.com/jasonpagliaro/homeassistant-entity-helper.git` | Git origin validation target for supply-chain safety check. |
+| `COMPOSE_SERVICE` | No | `app` | Compose service name controlled by update manager. |
+| `SQLITE_VOLUME` | No | `hev_data` | Docker volume name containing SQLite data file. |
+| `SQLITE_DB_PATH` | No | `/data/ha_entity_vault.db` | SQLite file path inside mounted data volume. |
+| `POST_DEPLOY_MONITOR_SECONDS` | No | `600` | Post-deploy crash monitoring window duration. |
+| `POST_DEPLOY_CRASH_THRESHOLD` | No | `3` | Restart-count increase threshold that triggers rollback and pause. |
 
 ## Provider API Key Environment Variables
 
@@ -73,3 +91,4 @@ For global LLM settings, `HEV_LLM_API_KEY` is used with `HEV_LLM_BASE_URL`/`HEV_
 - Docker Compose publishes `HEV_HOST_PORT` on the host (default `23010`); set `HEV_HOST_PORT=8000` for legacy behavior.
 - For Compose Postgres overlay, use `docker-compose.postgres.yml` and `HEV_POSTGRES_*` variables from `.env.docker.example`.
 - For deterministic version tracking in container builds, pass `HEV_BUILD_COMMIT_SHA` at build or runtime.
+- For host-side automatic updates with rollback, configure `AUTO_UPDATE_*`, `UPDATE_*`, and `POST_DEPLOY_*` variables plus systemd units from `deploy/systemd/`.

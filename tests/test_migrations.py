@@ -57,5 +57,7 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
     assert "latest_commit_published_at" in app_config_column_names
     assert "dismissed_commit_sha" in app_config_column_names
     assert "dismissed_at" in app_config_column_names
+    assert "last_update_attempt_at" in app_config_column_names
+    assert "last_update_result" in app_config_column_names
 
     db.reset_engine_for_tests()

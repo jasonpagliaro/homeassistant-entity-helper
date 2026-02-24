@@ -151,6 +151,12 @@ The table below only lists Docker deployment specifics.
 | `HEV_POSTGRES_USER` | No | `hev` | Username used by the Postgres overlay service. |
 | `HEV_POSTGRES_PASSWORD` | No | `hev_change_me` | Password used by the Postgres overlay service. Change before production use. |
 | `HEV_BUILD_COMMIT_SHA` | No | empty | Optional local build SHA used by `/config` update checker when `.git` metadata is unavailable in runtime containers. |
+| `HEV_IMAGE_TAG` | No | `ha-entity-vault:local` | Compose runtime image tag used by update-manager rollouts. |
+| `AUTO_UPDATE_ENABLED` | No | `true` | Enables/disables host-side update-manager runs. |
+| `AUTO_UPDATE_SCHEDULE` | No | `04:00` | Local-time daily schedule gate for update manager. |
+| `UPDATE_TIMEOUT_SECONDS` | No | `120` | Health timeout for deploy/rollback in update manager. |
+| `BACKUP_RETENTION_DAYS` | No | `7` | SQLite backup retention window used by update manager. |
+| `UPDATE_BRANCH` | No | `main` | Git branch tracked by update manager. |
 
 To provide deterministic update-checker local version info in containers:
 
@@ -202,6 +208,54 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 
 Upgrade note: Docker defaults now publish on host port `23010`.  
 If existing scripts/bookmarks expect `8000`, set `HEV_HOST_PORT=8000` in `.env` before `docker compose up -d --build`.
+
+## Automated Self-Update (systemd Timer)
+
+This deployment includes a host-side update manager script:
+
+- `scripts/update-manager.sh`
+- `deploy/systemd/ha-entity-vault-update.service`
+- `deploy/systemd/ha-entity-vault-update.timer`
+
+Behavior:
+- Uses `git fetch` + `git pull --ff-only` on `UPDATE_BRANCH`.
+- Refuses update on failed safety checks (Docker, git origin, healthy container, disk, volume/db checks, root-user container).
+- Creates timestamped SQLite backups before deploy and prunes old backups.
+- Builds candidate image before replacing running container.
+- Uses health-gated `docker compose up --no-deps --no-build`.
+- Auto-rolls back to `ha-entity-vault:last-known-good` on deploy failure.
+- Monitors for crash loops for 10 minutes after deploy and auto-rolls back + pauses updates if threshold is hit.
+
+Install on Ubuntu host (`/opt/homeassistant-entity-helper`):
+
+```bash
+sudo cp deploy/systemd/ha-entity-vault-update.service /etc/systemd/system/
+sudo cp deploy/systemd/ha-entity-vault-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ha-entity-vault-update.timer
+sudo systemctl status ha-entity-vault-update.timer
+```
+
+Manual operations:
+
+```bash
+# Force one immediate run (ignores schedule gate, respects safety checks/locks)
+sudo /opt/homeassistant-entity-helper/scripts/update-manager.sh run --force
+
+# Inspect updater state
+sudo /opt/homeassistant-entity-helper/scripts/update-manager.sh status
+
+# Manual rollback to last known good image
+sudo /opt/homeassistant-entity-helper/scripts/update-manager.sh rollback --reason "manual rollback"
+
+# Re-enable updates after a paused/crash-loop state
+sudo /opt/homeassistant-entity-helper/scripts/update-manager.sh resume-updates
+```
+
+Log and state paths:
+- Log: `/var/log/ha-entity-vault-update.log`
+- Backups: `/var/backups/ha-entity-vault/`
+- State metadata: `/var/lib/ha-entity-vault-update/metadata.env`
 
 ## Reverse Proxy and TLS Notes
 - Terminate TLS at your reverse proxy (for example Nginx, Caddy, Traefik).

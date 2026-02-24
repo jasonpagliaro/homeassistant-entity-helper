@@ -3,12 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ha-entity-vault:local
+    image: ${HEV_IMAGE_TAG:-ha-entity-vault:local}
     init: true
     env_file:
       - .env
     environment:
       HEV_DATA_DIR: /data
+      HEV_BUILD_COMMIT_SHA: ${HEV_BUILD_COMMIT_SHA:-}
     ports:
       - "${HEV_HOST_PORT:-23010}:8000"
     volumes:

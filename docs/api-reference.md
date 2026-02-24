@@ -11,6 +11,8 @@ This page documents stable/public routes for HA Entity Vault.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/healthz` | Liveness and readiness health check used by deployments and probes. |
+| `GET` | `/version` | Resolved app commit metadata for deployed build tracking. |
+| `GET` | `/update-status` | Runtime auto-update state and DB-backed update/check status summary. |
 
 ## User-Facing HTML Routes
 
