@@ -17,6 +17,9 @@ from app.llm_client import LLMClientError
 from app.main import create_app
 from app.models import (
     AppConfig,
+    AutomationAdjustmentAction,
+    AutomationAdjustmentDraft,
+    AutomationAdjustmentRevision,
     ConfigSnapshot,
     ConfigSyncRun,
     EntitySuggestion,
@@ -195,6 +198,70 @@ def seed_config_snapshot(
         session.refresh(snapshot)
         assert snapshot.id is not None
         return config_run.id, snapshot.id
+
+
+def seed_adjustment_draft(
+    profile_id: int,
+    *,
+    source_entity_id: str = "automation.evening_mode",
+    source_config_key: str = "evening_mode",
+    alias: str = "Evening Mode",
+) -> int:
+    now = utcnow()
+    payload = {
+        "alias": alias,
+        "description": "Initial draft",
+        "trigger": [{"platform": "time", "at": "19:00:00"}],
+        "condition": [],
+        "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+        "mode": "single",
+    }
+    yaml_text = (
+        f"alias: {alias}\n"
+        "description: Initial draft\n"
+        "trigger:\n"
+        "  - platform: time\n"
+        "    at: '19:00:00'\n"
+        "condition: []\n"
+        "action:\n"
+        "  - service: light.turn_on\n"
+        "    target:\n"
+        "      entity_id: light.kitchen\n"
+        "mode: single\n"
+    )
+    with Session(db.get_engine()) as session:
+        draft = AutomationAdjustmentDraft(
+            profile_id=profile_id,
+            source_entity_id=source_entity_id,
+            source_config_key=source_config_key,
+            source_alias=alias,
+            working_yaml_text=yaml_text,
+            working_structured_json=json.dumps(payload),
+            queue_status="draft",
+            last_error=None,
+            last_test_action_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(draft)
+        session.commit()
+        session.refresh(draft)
+        assert draft.id is not None
+
+        revision = AutomationAdjustmentRevision(
+            draft_id=draft.id,
+            revision_index=1,
+            source="initial_import",
+            section=None,
+            prompt_text=None,
+            yaml_text=yaml_text,
+            structured_json=json.dumps(payload),
+            change_summary="Imported automation from Home Assistant.",
+            created_at=now,
+        )
+        session.add(revision)
+        session.commit()
+        return draft.id
 
 
 def seed_suggestion_run_with_proposals(
@@ -522,6 +589,7 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     [
         ("/entities", "/entities", "Entities"),
         ("/config-items", "/config-items", "Config Items"),
+        ("/automation-adjustments", "/automation-adjustments", "Adjust Automations"),
         ("/suggestions", "/suggestions", "Automation Suggestions"),
         ("/entity-suggestions", "/entity-suggestions", "Entity Suggestions"),
         ("/automation-drafts", "/automation-drafts", "Automation Drafts"),
@@ -1431,6 +1499,636 @@ def test_llm_connection_and_automation_suggestion_run_flow(
     )
     assert delete_response.status_code == 200
     assert "Primary LLM" not in delete_response.text
+
+
+def test_automation_adjustments_list_filters_live_rows(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-list")
+
+    live_rows = [
+        {
+            "entity_id": "automation.evening_mode",
+            "alias": "Evening Mode",
+            "state": "on",
+            "is_enabled": True,
+            "area_id": "kitchen",
+            "area_name": "Kitchen",
+            "labels": ["Lighting"],
+            "label_ids": ["label_lighting"],
+            "platform": "automation",
+            "hidden_by": None,
+            "disabled_by": None,
+            "config_key": "evening_mode",
+            "last_updated": datetime(2026, 2, 24, 10, 0, tzinfo=timezone.utc),
+        },
+        {
+            "entity_id": "automation.entry_alert",
+            "alias": "Entry Alert",
+            "state": "off",
+            "is_enabled": False,
+            "area_id": "entry",
+            "area_name": "Entry",
+            "labels": ["Security"],
+            "label_ids": ["label_security"],
+            "platform": "automation",
+            "hidden_by": None,
+            "disabled_by": "user",
+            "config_key": "entry_alert",
+            "last_updated": datetime(2026, 2, 24, 9, 30, tzinfo=timezone.utc),
+        },
+    ]
+
+    async def fake_fetch_live_automation_rows(_: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        return (
+            live_rows,
+            [
+                {"area_id": "entry", "area_name": "Entry"},
+                {"area_id": "kitchen", "area_name": "Kitchen"},
+            ],
+            json.dumps(
+                [
+                    {"label_id": "label_lighting", "label_name": "Lighting"},
+                    {"label_id": "label_security", "label_name": "Security"},
+                ]
+            ),
+        )
+
+    monkeypatch.setattr("app.main.fetch_live_automation_rows", fake_fetch_live_automation_rows)
+
+    page_response = client.get(f"/automation-adjustments?profile_id={profile_id}&enabled=on")
+    assert page_response.status_code == 200
+    assert "Evening Mode" in page_response.text
+    assert "Entry Alert" not in page_response.text
+
+    api_response = client.get(
+        f"/api/automation-adjustments?profile_id={profile_id}&enabled=off&label=label_security"
+    )
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["entity_id"] == "automation.entry_alert"
+    assert payload["items"][0]["is_enabled"] is False
+
+
+def test_automation_adjustments_missing_token_surfaces_error(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-missing-token")
+
+    with Session(db.get_engine()) as session:
+        profile = session.get(Profile, profile_id)
+        assert profile is not None
+        profile.token = ""
+        profile.token_env_var = ""
+        session.add(profile)
+        session.commit()
+
+    page_response = client.get(f"/automation-adjustments?profile_id={profile_id}")
+    assert page_response.status_code == 200
+    assert "Unable to fetch live automation data: No token configured in profile or environment." in page_response.text
+
+    api_response = client.get(f"/api/automation-adjustments?profile_id={profile_id}")
+    assert api_response.status_code == 200
+    payload = api_response.json()
+    assert payload["error"] == "No token configured in profile or environment."
+    assert payload["items"] == []
+
+
+def test_start_adjustment_draft_creates_initial_revision(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-start")
+
+    async def fake_fetch_live_automation_rows(_: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        return (
+            [
+                {
+                    "entity_id": "automation.evening_mode",
+                    "alias": "Evening Mode",
+                    "state": "on",
+                    "is_enabled": True,
+                    "area_id": None,
+                    "area_name": None,
+                    "labels": [],
+                    "label_ids": [],
+                    "platform": "automation",
+                    "hidden_by": None,
+                    "disabled_by": None,
+                    "config_key": "evening_mode",
+                    "last_updated": None,
+                }
+            ],
+            [],
+            "[]",
+        )
+
+    async def fake_fetch_automation_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "automation.evening_mode"
+        return {
+            "alias": "Evening Mode",
+            "description": "From HA",
+            "trigger": [{"platform": "time", "at": "19:00:00"}],
+            "condition": [],
+            "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+            "mode": "single",
+        }
+
+    monkeypatch.setattr("app.main.fetch_live_automation_rows", fake_fetch_live_automation_rows)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_automation_config_ws",
+        fake_fetch_automation_config_ws,
+    )
+
+    start_response = client.post(
+        "/automation-adjustments/start",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "entity_id": "automation.evening_mode",
+            "next_url": f"/automation-adjustments?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert start_response.status_code == 303
+    location = start_response.headers.get("location", "")
+    match = re.search(r"/automation-adjustments/drafts/(\d+)\?", location)
+    assert match is not None
+    draft_id = int(match.group(1))
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.source_entity_id == "automation.evening_mode"
+        assert draft.source_config_key == "evening_mode"
+        assert draft.queue_status == "draft"
+        assert "alias: Evening Mode" in draft.working_yaml_text
+
+        revisions = list(
+            session.exec(
+                select(AutomationAdjustmentRevision).where(
+                    AutomationAdjustmentRevision.draft_id == draft_id
+                )
+            ).all()
+        )
+        assert len(revisions) == 1
+        assert revisions[0].source == "initial_import"
+
+
+def test_adjustment_draft_manual_edit_and_queue_transitions(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-manual")
+    draft_id = seed_adjustment_draft(profile_id)
+
+    edit_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/manual-edit",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+            "yaml_text": (
+                "alias: Evening Mode Updated\n"
+                "description: Updated\n"
+                "trigger:\n"
+                "  - platform: time\n"
+                "    at: '20:00:00'\n"
+                "condition: []\n"
+                "action:\n"
+                "  - service: light.turn_on\n"
+                "    target:\n"
+                "      entity_id: light.kitchen\n"
+                "mode: single\n"
+            ),
+        },
+        follow_redirects=False,
+    )
+    assert edit_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert "Evening Mode Updated" in draft.working_yaml_text
+        assert draft.source_alias == "Evening Mode Updated"
+        revision_sources = list(
+            session.exec(
+                select(AutomationAdjustmentRevision.source).where(
+                    AutomationAdjustmentRevision.draft_id == draft_id
+                )
+            ).all()
+        )
+        assert "manual_edit" in revision_sources
+
+    queue_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/queue",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/automation-adjustments?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert queue_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.queue_status == "queued"
+
+    unqueue_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/unqueue",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/automation-adjustments?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert unqueue_response.status_code == 303
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.queue_status == "draft"
+
+
+def test_adjustment_ai_whole_and_section_updates_draft(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-ai")
+    seed_default_llm_connection(profile_id, name="Adjust AI LLM")
+    draft_id = seed_adjustment_draft(profile_id)
+    monkeypatch.setenv("TEST_LLM_KEY", "key-123")
+
+    async def fake_chat_json(_: Any, __: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        if payload.get("schema_version") == "haev.automation.adjustment.whole.v1":
+            return {
+                "automation": {
+                    "alias": "Evening Mode AI",
+                    "description": "Whole edit",
+                    "trigger": [{"platform": "time", "at": "21:00:00"}],
+                    "condition": [],
+                    "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+                    "mode": "single",
+                }
+            }
+        return {"value": "restart"}
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.chat_json", fake_chat_json)
+
+    ai_whole_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/ai-whole",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "instruction": "Rework this automation for later evening usage.",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert ai_whole_response.status_code == 303
+
+    ai_section_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/ai-section",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "section": "mode",
+            "instruction": "Use restart mode.",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert ai_section_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        structured_payload = json.loads(draft.working_structured_json)
+        assert structured_payload["alias"] == "Evening Mode AI"
+        assert structured_payload["mode"] == "restart"
+
+        revision_sources = list(
+            session.exec(
+                select(AutomationAdjustmentRevision.source).where(
+                    AutomationAdjustmentRevision.draft_id == draft_id
+                )
+            ).all()
+        )
+        assert "ai_whole" in revision_sources
+        assert "ai_section" in revision_sources
+
+
+def test_adjustment_submit_records_success_action(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-submit")
+    draft_id = seed_adjustment_draft(profile_id)
+
+    async def fake_upsert(_: Any, config_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert config_key == "evening_mode"
+        assert payload["alias"]
+        return {"result": "ok"}
+
+    monkeypatch.setattr("app.main.HAClient.upsert_automation_config", fake_upsert)
+
+    submit_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/submit",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "confirm_submit": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert submit_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.queue_status == "applied"
+
+        actions = list(
+            session.exec(
+                select(AutomationAdjustmentAction).where(
+                    AutomationAdjustmentAction.draft_id == draft_id
+                )
+            ).all()
+        )
+        assert len(actions) == 1
+        assert actions[0].operation == "submit_update"
+        assert actions[0].status == "success"
+
+        revision_sources = list(
+            session.exec(
+                select(AutomationAdjustmentRevision.source).where(
+                    AutomationAdjustmentRevision.draft_id == draft_id
+                )
+            ).all()
+        )
+        assert "submit" in revision_sources
+
+
+def test_adjustment_test_and_revert_actions(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-test")
+    draft_id = seed_adjustment_draft(profile_id)
+
+    call_log: list[tuple[str, str]] = []
+
+    async def fake_upsert(_: Any, config_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        call_log.append(("upsert", config_key))
+        assert payload["alias"].endswith("(Canary)")
+        return {"result": "ok"}
+
+    async def fake_turn_on(_: Any, entity_id: str) -> list[dict[str, Any]]:
+        call_log.append(("turn_on", entity_id))
+        return [{"entity_id": entity_id, "state": "on"}]
+
+    async def fake_turn_off(_: Any, entity_id: str, stop_actions: bool = False) -> list[dict[str, Any]]:
+        call_log.append(("turn_off", entity_id))
+        return [{"entity_id": entity_id, "state": "off", "stop_actions": stop_actions}]
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [{"entity_id": "automation.evening_mode", "state": "on"}]
+
+    monkeypatch.setattr("app.main.HAClient.upsert_automation_config", fake_upsert)
+    monkeypatch.setattr("app.main.HAClient.automation_turn_on", fake_turn_on)
+    monkeypatch.setattr("app.main.HAClient.automation_turn_off", fake_turn_off)
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+
+    test_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/test",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "test_alias_suffix": " (Canary)",
+            "confirm_test": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert test_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.queue_status == "tested"
+        assert draft.last_test_action_id is not None
+
+        test_action = session.get(AutomationAdjustmentAction, draft.last_test_action_id)
+        assert test_action is not None
+        assert test_action.operation == "test_deploy"
+        assert test_action.status == "success"
+        assert test_action.old_entity_id == "automation.evening_mode"
+        assert test_action.new_entity_id is not None
+        request_payload = json.loads(test_action.request_payload_json or "{}")
+        assert request_payload["old_was_enabled"] is True
+
+    revert_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/revert-test",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "confirm_revert": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert revert_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.queue_status == "applied"
+
+        revert_actions = list(
+            session.exec(
+                select(AutomationAdjustmentAction).where(
+                    AutomationAdjustmentAction.draft_id == draft_id,
+                    AutomationAdjustmentAction.operation == "revert_test",
+                )
+            ).all()
+        )
+        assert len(revert_actions) == 1
+        assert revert_actions[0].status == "success"
+
+    assert any(item[0] == "upsert" for item in call_log)
+    assert any(item[0] == "turn_on" for item in call_log)
+    assert any(item[0] == "turn_off" for item in call_log)
+
+
+def test_adjustment_revert_keeps_original_disabled_when_it_was_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-test-disabled")
+    draft_id = seed_adjustment_draft(profile_id)
+
+    call_log: list[tuple[str, str]] = []
+
+    async def fake_upsert(_: Any, config_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        call_log.append(("upsert", config_key))
+        assert payload["alias"].endswith("(DisabledTest)")
+        return {"result": "ok"}
+
+    async def fake_turn_on(_: Any, entity_id: str) -> list[dict[str, Any]]:
+        call_log.append(("turn_on", entity_id))
+        return [{"entity_id": entity_id, "state": "on"}]
+
+    async def fake_turn_off(_: Any, entity_id: str, stop_actions: bool = False) -> list[dict[str, Any]]:
+        call_log.append(("turn_off", entity_id))
+        return [{"entity_id": entity_id, "state": "off", "stop_actions": stop_actions}]
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [{"entity_id": "automation.evening_mode", "state": "off"}]
+
+    monkeypatch.setattr("app.main.HAClient.upsert_automation_config", fake_upsert)
+    monkeypatch.setattr("app.main.HAClient.automation_turn_on", fake_turn_on)
+    monkeypatch.setattr("app.main.HAClient.automation_turn_off", fake_turn_off)
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+
+    test_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/test",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "test_alias_suffix": " (DisabledTest)",
+            "confirm_test": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert test_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        assert draft.last_test_action_id is not None
+        test_action = session.get(AutomationAdjustmentAction, draft.last_test_action_id)
+        assert test_action is not None
+        request_payload = json.loads(test_action.request_payload_json or "{}")
+        assert request_payload["old_was_enabled"] is False
+
+    revert_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/revert-test",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "confirm_revert": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert revert_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        revert_actions = list(
+            session.exec(
+                select(AutomationAdjustmentAction).where(
+                    AutomationAdjustmentAction.draft_id == draft_id,
+                    AutomationAdjustmentAction.operation == "revert_test",
+                )
+            ).all()
+        )
+        assert len(revert_actions) == 1
+        assert revert_actions[0].status == "success"
+        revert_response_payload = json.loads(revert_actions[0].response_payload_json or "{}")
+        assert "enable_original_automation" not in revert_response_payload
+        assert "enable_original_automation_skipped" in revert_response_payload
+
+    turn_on_entities = [entity_id for call, entity_id in call_log if call == "turn_on"]
+    assert len(turn_on_entities) == 1
+
+
+def test_suggestions_decoupled_from_adjustment_workflow(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-decouple")
+    seed_default_llm_connection(profile_id, name="Decouple LLM")
+    seed_config_snapshot(profile_id)
+    monkeypatch.setenv("TEST_LLM_KEY", "key-123")
+
+    suggestions_response = client.get(f"/suggestions?profile_id={profile_id}")
+    assert suggestions_response.status_code == 200
+    assert "adjust_current_automations" not in suggestions_response.text
+
+    async def fake_chat_json(_: Any, __: str, ___: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        return {
+            "suggestions": [
+                {
+                    "title": "Small cleanup",
+                    "summary": "Refine existing timing.",
+                    "concept_type": "maintenance",
+                    "target_kind": "existing_automation",
+                    "target_entity_id": "automation.evening_mode",
+                    "impact_score": 0.61,
+                    "feasibility_score": 0.8,
+                    "novelty_score": 0.33,
+                    "confidence": 0.71,
+                    "risk_level": "low",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("app.main.OpenAICompatibleLLMClient.chat_json", fake_chat_json)
+
+    queue_response = client.post(
+        f"/profiles/{profile_id}/suggestions/runs",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/suggestions?profile_id={profile_id}",
+            "idea_type": "adjust_current_automations",
+            "mode": "obscure",
+            "top_k": "2",
+            "include_existing": "on",
+            "include_new": "on",
+        },
+        follow_redirects=False,
+    )
+    assert queue_response.status_code == 303
+    location = queue_response.headers.get("location", "")
+    run_match = re.search(r"/suggestions/(\d+)\?", location)
+    assert run_match is not None
+    run_id = int(run_match.group(1))
+
+    run_payload = wait_for_suggestion_run(client, profile_id, run_id)
+    assert run_payload["run"]["idea_type"] == "general"
+
+    with Session(db.get_engine()) as session:
+        run = session.get(SuggestionRun, run_id)
+        assert run is not None
+        assert run.idea_type == "general"
 
 
 def test_missing_llm_key_and_disabled_connection_are_blocked(

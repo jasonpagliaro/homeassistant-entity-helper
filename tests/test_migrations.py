@@ -32,11 +32,18 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
         entity_suggestion_column_names = {str(row[1]) for row in entity_suggestion_columns}
         app_config_columns = connection.execute(text("PRAGMA table_info(app_config)")).fetchall()
         app_config_column_names = {str(row[1]) for row in app_config_columns}
+        adjustment_draft_columns = connection.execute(
+            text("PRAGMA table_info(automation_adjustment_drafts)")
+        ).fetchall()
+        adjustment_draft_column_names = {str(row[1]) for row in adjustment_draft_columns}
 
     assert "llm_connections" in table_names
     assert "suggestion_runs" in table_names
     assert "suggestion_proposals" in table_names
     assert "suggestion_audit_events" in table_names
+    assert "automation_adjustment_drafts" in table_names
+    assert "automation_adjustment_revisions" in table_names
+    assert "automation_adjustment_actions" in table_names
     assert "app_config" in table_names
     assert "workflow_status" in entity_suggestion_column_names
     assert "workflow_error" in entity_suggestion_column_names
@@ -59,5 +66,11 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
     assert "dismissed_at" in app_config_column_names
     assert "last_update_attempt_at" in app_config_column_names
     assert "last_update_result" in app_config_column_names
+    assert "source_entity_id" in adjustment_draft_column_names
+    assert "source_config_key" in adjustment_draft_column_names
+    assert "working_yaml_text" in adjustment_draft_column_names
+    assert "working_structured_json" in adjustment_draft_column_names
+    assert "queue_status" in adjustment_draft_column_names
+    assert "last_test_action_id" in adjustment_draft_column_names
 
     db.reset_engine_for_tests()

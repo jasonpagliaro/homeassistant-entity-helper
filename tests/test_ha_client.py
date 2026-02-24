@@ -228,3 +228,51 @@ async def test_fetch_area_registry_entries_rejects_non_list(
     with pytest.raises(HAClientError) as exc_info:
         await client.fetch_area_registry_entries()
     assert "Unexpected response format from config/area_registry/list." in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_call_service_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/services/light/turn_on"
+        payload = request.content.decode("utf-8")
+        assert '"entity_id":"light.kitchen"' in payload
+        return httpx.Response(200, json=[{"result": "ok"}])
+
+    client = HAClient(
+        base_url="http://example.local",
+        token="abc123",
+        transport=httpx.MockTransport(handler),
+    )
+    response = await client.call_service("light", "turn_on", {"entity_id": "light.kitchen"})
+    assert isinstance(response, list)
+
+
+@pytest.mark.asyncio
+async def test_automation_turn_on_and_turn_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def fake_call_service(
+        self: HAClient,
+        domain: str,
+        service: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        calls.append((domain, service, payload or {}))
+        return {"ok": True}
+
+    monkeypatch.setattr(HAClient, "call_service", fake_call_service)
+    client = HAClient(base_url="http://example.local", token="abc123")
+
+    await client.automation_turn_on("automation.evening_mode")
+    await client.automation_turn_off("automation.evening_mode", stop_actions=True)
+
+    assert calls[0] == (
+        "automation",
+        "turn_on",
+        {"entity_id": "automation.evening_mode"},
+    )
+    assert calls[1] == (
+        "automation",
+        "turn_off",
+        {"entity_id": "automation.evening_mode", "stop_actions": True},
+    )
