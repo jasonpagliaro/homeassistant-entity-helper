@@ -7,10 +7,20 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body class="ha-theme-shell">
-    <header class="site-header">
-      <div class="container site-header__inner">
-        <div class="row between wrap gap-sm">
-          <h1>{{ app_name }}</h1>
+    <div class="app-shell">
+      <aside id="app-sidebar" class="app-sidebar" aria-label="Application">
+        <div class="app-sidebar__inner">
+          <div class="app-brand">
+            <h1>{{ app_name }}</h1>
+            <p class="app-brand__profile">
+              {% if nav_active_profile %}
+                Active: {{ nav_active_profile.name }}
+              {% else %}
+                No active profile
+              {% endif %}
+            </p>
+          </div>
+
           <form method="post" action="/profiles/select" class="profile-switcher">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <input type="hidden" name="next_url" value="{{ current_url }}" />
@@ -32,9 +42,8 @@
               {% endif %}
             </select>
           </form>
-        </div>
-        <nav class="primary-nav" aria-label="Primary">
-          <div class="primary-nav__scroller">
+
+          <nav class="primary-nav" aria-label="Primary">
             <ul class="primary-nav__list">
               {% for link in nav_primary_links %}
                 <li>
@@ -43,59 +52,144 @@
                     href="{{ link.href }}"
                     {% if link.is_active %}aria-current="page"{% endif %}
                   >
-                    {{ link.label }}
+                    <span class="primary-nav__icon" aria-hidden="true">
+                      {% if link.href == "/entities" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <rect x="3" y="4" width="8" height="7" rx="1.5"></rect>
+                          <rect x="13" y="4" width="8" height="7" rx="1.5"></rect>
+                          <rect x="3" y="13" width="8" height="7" rx="1.5"></rect>
+                          <rect x="13" y="13" width="8" height="7" rx="1.5"></rect>
+                        </svg>
+                      {% elif link.href == "/config-items" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M7 4h10l3 3v13H4V4z"></path>
+                          <path d="M14 4v5h6"></path>
+                        </svg>
+                      {% elif link.href == "/automation-adjustments" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M5 6h14"></path>
+                          <path d="M5 12h14"></path>
+                          <path d="M5 18h8"></path>
+                          <circle cx="16" cy="18" r="3"></circle>
+                        </svg>
+                      {% elif link.href == "/suggestions" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M12 3l2.7 5.5 6.1.9-4.4 4.2 1 6.1L12 17l-5.4 2.8 1-6.1L3.2 9.4l6.1-.9z"></path>
+                        </svg>
+                      {% elif link.href == "/entity-suggestions" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M4 8a8 8 0 0 1 16 0c0 6-8 13-8 13S4 14 4 8z"></path>
+                          <circle cx="12" cy="8" r="2.5"></circle>
+                        </svg>
+                      {% elif link.href == "/automation-drafts" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M4 20h4l10.2-10.2a1.5 1.5 0 0 0 0-2.1L16.3 5.8a1.5 1.5 0 0 0-2.1 0z"></path>
+                          <path d="M13.8 6.2l4 4"></path>
+                        </svg>
+                      {% elif link.href == "/config" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <circle cx="12" cy="12" r="3"></circle>
+                          <path d="M19 12a7 7 0 0 0-.1-1l2.1-1.6-2-3.5-2.5 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.3 2.9a7 7 0 0 0-1.7 1L5 6l-2 3.5L5.1 11A7 7 0 0 0 5 12c0 .3 0 .7.1 1L3 14.6l2 3.5 2.5-1a7 7 0 0 0 1.7 1l.3 2.9h5l.3-2.9a7 7 0 0 0 1.7-1l2.5 1 2-3.5-2.1-1.6c.1-.3.1-.7.1-1z"></path>
+                        </svg>
+                      {% elif link.href == "/settings" %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <circle cx="12" cy="8" r="3"></circle>
+                          <path d="M5 20a7 7 0 0 1 14 0"></path>
+                        </svg>
+                      {% else %}
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <circle cx="12" cy="12" r="8"></circle>
+                        </svg>
+                      {% endif %}
+                    </span>
+                    <span class="primary-nav__label">{{ link.label }}</span>
                   </a>
                 </li>
               {% endfor %}
             </ul>
-          </div>
-        </nav>
-      </div>
-    </header>
+          </nav>
 
-    <main class="container app-main">
-      {% if update_banner %}
-      <div class="flash flash-warning update-banner" role="status" aria-live="polite">
-        <div class="row between wrap gap-sm">
-          <div>{{ update_banner.message }}</div>
-          <div class="row gap-sm wrap">
-            <a
-              class="button-secondary"
-              href="/config?{{ build_query(profile_id=nav_active_profile.id if nav_active_profile else None) }}"
-            >
-              View Updates
-            </a>
-            {% if update_banner.latest_commit_url %}
-            <a class="button-secondary" href="{{ update_banner.latest_commit_url }}" target="_blank" rel="noreferrer">
-              Open Commit
-            </a>
-            {% endif %}
-            <form method="post" action="/config/update-banner/dismiss" class="inline-form inline-form-reset">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-              <input type="hidden" name="next_url" value="{{ current_url }}" />
-              <button
-                type="submit"
-                class="button-secondary"
-                data-tooltip="Hide this update banner until a newer update is detected."
-              >
-                Dismiss
-              </button>
-            </form>
-          </div>
+          <a class="app-sidebar__docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
         </div>
-      </div>
-      {% endif %}
-      {% if flash %}
-      <div class="flash flash-{{ flash.level }}">{{ flash.message }}</div>
-      {% endif %}
-      {% block content %}{% endblock %}
-    </main>
+      </aside>
 
-    <footer class="site-footer">
-      <div class="container site-footer__inner">
-        <a class="site-footer__docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+      <button
+        type="button"
+        id="app-sidebar-overlay"
+        class="app-sidebar-overlay"
+        aria-label="Close navigation menu"
+        hidden
+      ></button>
+
+      <div class="app-workspace">
+        <header class="workspace-header">
+          <div class="workspace-header__left">
+            <button
+              type="button"
+              class="workspace-header__menu"
+              data-sidebar-toggle
+              aria-controls="app-sidebar"
+              aria-expanded="false"
+            >
+              <svg class="workspace-header__menu-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 7h16"></path>
+                <path d="M4 12h16"></path>
+                <path d="M4 17h16"></path>
+              </svg>
+              <span>Menu</span>
+            </button>
+            <h2 class="workspace-header__title">{{ app_name }}</h2>
+          </div>
+          {% if nav_active_profile %}
+            <div class="workspace-header__meta">{{ nav_active_profile.name }}</div>
+          {% endif %}
+        </header>
+
+        <main class="app-main">
+          {% if update_banner %}
+          <div class="flash flash-warning update-banner" role="status" aria-live="polite">
+            <div class="row between wrap gap-sm">
+              <div>{{ update_banner.message }}</div>
+              <div class="row gap-sm wrap">
+                <a
+                  class="button-secondary"
+                  href="/config?{{ build_query(profile_id=nav_active_profile.id if nav_active_profile else None) }}"
+                >
+                  View Updates
+                </a>
+                {% if update_banner.latest_commit_url %}
+                <a class="button-secondary" href="{{ update_banner.latest_commit_url }}" target="_blank" rel="noreferrer">
+                  Open Commit
+                </a>
+                {% endif %}
+                <form method="post" action="/config/update-banner/dismiss" class="inline-form inline-form-reset">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="next_url" value="{{ current_url }}" />
+                  <button
+                    type="submit"
+                    class="button-secondary"
+                    data-tooltip="Hide this update banner until a newer update is detected."
+                  >
+                    Dismiss
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+          {% if flash %}
+          <div class="flash flash-{{ flash.level }}">{{ flash.message }}</div>
+          {% endif %}
+          {% block content %}{% endblock %}
+        </main>
+
+        <footer class="site-footer">
+          <div class="site-footer__inner">
+            <a class="site-footer__docs-link" href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+          </div>
+        </footer>
       </div>
-    </footer>
+    </div>
 
     <div id="sync-modal" class="sync-modal" aria-hidden="true" hidden>
       <div class="sync-modal__panel" role="status" aria-live="polite" aria-atomic="true">
@@ -106,6 +200,78 @@
 
     <script src="/static/suggestion_run_refresh.js"></script>
     <script>
+      (function () {
+        const mobileMediaQuery = window.matchMedia("(max-width: 1080px)");
+        const sidebar = document.getElementById("app-sidebar");
+        const overlay = document.getElementById("app-sidebar-overlay");
+        const toggleButtons = document.querySelectorAll("[data-sidebar-toggle]");
+        if (!sidebar || !overlay || !toggleButtons.length) {
+          return;
+        }
+
+        function isMobileViewport() {
+          return mobileMediaQuery.matches;
+        }
+
+        function setSidebarOpen(open) {
+          document.body.classList.toggle("sidebar-open", open);
+          overlay.hidden = !open;
+          for (const button of toggleButtons) {
+            button.setAttribute("aria-expanded", open ? "true" : "false");
+          }
+        }
+
+        function closeSidebar() {
+          if (!isMobileViewport()) {
+            return;
+          }
+          setSidebarOpen(false);
+        }
+
+        function toggleSidebar() {
+          if (!isMobileViewport()) {
+            return;
+          }
+          setSidebarOpen(!document.body.classList.contains("sidebar-open"));
+        }
+
+        function handleViewportChange() {
+          if (!isMobileViewport()) {
+            setSidebarOpen(false);
+            overlay.hidden = true;
+            return;
+          }
+          overlay.hidden = !document.body.classList.contains("sidebar-open");
+        }
+
+        for (const button of toggleButtons) {
+          button.addEventListener("click", function (event) {
+            event.preventDefault();
+            toggleSidebar();
+          });
+        }
+
+        overlay.addEventListener("click", closeSidebar);
+        document.addEventListener("keydown", function (event) {
+          if (event.key === "Escape") {
+            closeSidebar();
+          }
+        });
+
+        const navLinks = sidebar.querySelectorAll(".primary-nav__link");
+        for (const link of navLinks) {
+          link.addEventListener("click", closeSidebar);
+        }
+
+        if (typeof mobileMediaQuery.addEventListener === "function") {
+          mobileMediaQuery.addEventListener("change", handleViewportChange);
+        } else if (typeof mobileMediaQuery.addListener === "function") {
+          mobileMediaQuery.addListener(handleViewportChange);
+        }
+
+        handleViewportChange();
+      })();
+
       (function () {
         const DEFAULT_DELAY_MS = 300;
         const modal = document.getElementById("sync-modal");

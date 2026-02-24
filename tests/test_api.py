@@ -504,12 +504,14 @@ def extract_primary_nav_links(html: str) -> list[dict[str, Any]]:
         assert href_match is not None
         assert label_match is not None
         assert class_match is not None
+        label_text = re.sub(r"<[^>]+>", " ", label_match.group(1))
         links.append(
             {
                 "href": href_match.group(1),
-                "label": " ".join(label_match.group(1).split()),
+                "label": " ".join(label_text.split()),
                 "is_active": "is-active" in class_match.group(1).split(),
                 "has_aria_current": 'aria-current="page"' in anchor,
+                "has_icon": 'class="primary-nav__icon"' in anchor,
             }
         )
     return links
@@ -519,6 +521,7 @@ def assert_primary_nav_active_link(html: str, *, active_href: str, active_label:
     links = extract_primary_nav_links(html)
     active_links = [link for link in links if link["is_active"]]
     assert len(active_links) == 1
+    assert all(link["has_icon"] for link in links)
     active_link = active_links[0]
     assert active_link["href"] == active_href
     assert active_link["label"] == active_label
