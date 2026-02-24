@@ -60,6 +60,8 @@ cp .env.docker.example .env
 
 Set a real value for `SESSION_SECRET` in `.env`.
 Keep `DATABASE_URL=` empty for default SQLite mode.
+Docker publishes the app on host port `23010` by default.  
+If you need legacy behavior, set `HEV_HOST_PORT=8000` in `.env`.
 
 ### 4) Start the app
 
@@ -72,10 +74,10 @@ docker compose up -d --build
 ```bash
 docker compose ps
 docker compose logs -f app
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
-Open `http://localhost:8000`.
+Open `http://localhost:23010`.
 
 ### 6) Stop when needed
 

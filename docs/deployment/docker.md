@@ -38,7 +38,7 @@ cp .env.docker.example .env
 docker compose up -d --build
 docker compose ps
 docker compose logs -f app
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 The app applies Alembic migrations automatically at startup.
@@ -92,7 +92,7 @@ Check status:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml logs -f app
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 Stop:
@@ -116,7 +116,7 @@ docker run -d \
   --restart unless-stopped \
   --env-file .env \
   -e HEV_DATA_DIR=/data \
-  -p 8000:8000 \
+  -p 23010:8000 \
   -v hev_data:/data \
   ha-entity-vault:local
 ```
@@ -126,7 +126,7 @@ Check status:
 ```bash
 docker ps
 docker logs -f ha-entity-vault
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 Stop/remove:
@@ -145,6 +145,7 @@ The table below only lists Docker deployment specifics.
 | --- | --- | --- | --- |
 | `SESSION_SECRET` | Yes (production) | placeholder in `.env.docker.example` | Set to a long random value before first deployment. |
 | `HEV_DATA_DIR` | No | `/data` in Compose app container | Container path for SQLite persistence volume mapping. |
+| `HEV_HOST_PORT` | No | `23010` | Host port published by Compose mapping `${HEV_HOST_PORT}:8000`. Set `HEV_HOST_PORT=8000` for legacy host-port behavior. |
 | `DATABASE_URL` | No | empty | Leave empty for SQLite Compose default. Set for external DB or advanced overrides. |
 | `HEV_POSTGRES_DB` | No | `ha_entity_vault` | Database name used by the Postgres overlay service. |
 | `HEV_POSTGRES_USER` | No | `hev` | Username used by the Postgres overlay service. |
@@ -197,7 +198,10 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 1. Pull latest code.
 2. Review `.env` for newly added variables.
 3. Run `docker compose up -d --build` (or the Postgres overlay variant).
-4. Validate health with `curl -fsS http://localhost:8000/healthz`.
+4. Validate health with `curl -fsS http://localhost:23010/healthz`.
+
+Upgrade note: Docker defaults now publish on host port `23010`.  
+If existing scripts/bookmarks expect `8000`, set `HEV_HOST_PORT=8000` in `.env` before `docker compose up -d --build`.
 
 ## Reverse Proxy and TLS Notes
 - Terminate TLS at your reverse proxy (for example Nginx, Caddy, Traefik).
@@ -216,7 +220,7 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 | `permission denied /var/run/docker.sock` | Current Linux user is not in the `docker` group. | Add user to `docker` group, then re-login or refresh group membership. |
 | `docker compose` not recognized | Compose plugin is missing or old command syntax is used. | Install/update Compose plugin and use `docker compose` (with a space). |
 | `.env` missing or placeholder `SESSION_SECRET` | Environment file was not created or not updated. | Copy `.env.docker.example` to `.env`, set a real `SESSION_SECRET`, keep `DATABASE_URL=` for SQLite mode. |
-| Port `8000` already in use | Another process or container is bound to `8000`. | Stop conflicting process/container or map to another host port. |
+| Port `23010` already in use | Another process or container is bound to `23010`. | Stop conflicting process/container or set a different `HEV_HOST_PORT` value. |
 | App container unhealthy/startup crash | Runtime, migration, or env config issue during startup. | Inspect app logs and restart with a clean rebuild. |
 | Postgres overlay auth/connect failures | `HEV_POSTGRES_*` vars mismatch or stale Postgres volume state. | Verify `.env` values, restart overlay, and reset Postgres volume if credentials changed. |
 
@@ -244,7 +248,7 @@ On macOS or Windows, install/start Docker Desktop, then open a new terminal.
 docker --version
 docker compose version
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ### 2) `Cannot connect to the Docker daemon`
@@ -270,7 +274,7 @@ On macOS or Windows, start Docker Desktop and wait until it reports "Engine runn
 ```bash
 docker info
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ### 3) `permission denied /var/run/docker.sock` (Linux)
@@ -295,7 +299,7 @@ If `newgrp` is not available, log out and back in.
 ```bash
 docker info
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ### 4) `docker compose` not recognized / old Compose
@@ -321,7 +325,7 @@ Use `docker compose` (space), not `docker-compose` (hyphen), in this repo.
 ```bash
 docker compose version
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ### 5) `.env` missing or placeholder `SESSION_SECRET` not replaced
@@ -345,15 +349,15 @@ Set the generated value as `SESSION_SECRET=` in `.env`, and keep `DATABASE_URL=`
 
 ```bash
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
-### 6) Port `8000` already in use
-- **What you'll see:** `Bind for 0.0.0.0:8000 failed: port is already allocated`.
+### 6) Port `23010` already in use
+- **What you'll see:** `Bind for 0.0.0.0:23010 failed: port is already allocated`.
 - **Run this check:**
 
 ```bash
-lsof -iTCP:8000 -sTCP:LISTEN
+lsof -iTCP:23010 -sTCP:LISTEN
 ```
 
 - **Fix:**
@@ -363,13 +367,13 @@ docker compose down
 docker ps --format '{{.Names}}\t{{.Ports}}'
 ```
 
-Stop the process/container already using port `8000`, or change the app port mapping in `docker-compose.yml` (for example `8001:8000`).
+Stop the process/container already using port `23010`, or set `HEV_HOST_PORT` to another host port (for example `HEV_HOST_PORT=8001`).
 
 - **Re-test:**
 
 ```bash
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ### 7) App container unhealthy or startup crash
@@ -394,7 +398,7 @@ If logs show DB/migration errors, verify `DATABASE_URL` and Postgres overlay set
 
 ```bash
 docker compose ps
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ### 8) Postgres overlay connection/auth failures
@@ -423,7 +427,7 @@ docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d --buil
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.postgres.yml ps
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
 ## Scaling Limitation

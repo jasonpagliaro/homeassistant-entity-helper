@@ -10,7 +10,7 @@ services:
     environment:
       HEV_DATA_DIR: /data
     ports:
-      - "8000:8000"
+      - "${HEV_HOST_PORT:-23010}:8000"
     volumes:
       - hev_data:/data
     restart: unless-stopped

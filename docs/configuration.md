@@ -14,6 +14,7 @@ This is the canonical environment configuration reference for HA Entity Vault.
 | `SESSION_HTTPS_ONLY` | No | `false` | Set `true` behind HTTPS/TLS so session cookies are marked secure. |
 | `LOG_LEVEL` | No | `INFO` | Root logger level. Typical values: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `HEV_DATA_DIR` | No | `./data` | Base directory for default SQLite path resolution. Compose sets `/data` in containers. |
+| `HEV_HOST_PORT` | No | `23010` | Docker Compose host-port mapping for the app service (`${HEV_HOST_PORT}:8000`). Local non-Docker runs ignore this value. |
 | `DATABASE_URL` | No | empty | Explicit SQLAlchemy URL. Highest-precedence database setting. |
 | `HEV_DB_PATH` | No | empty | SQLite file override path, used only when `DATABASE_URL` is unset. |
 | `HA_TOKEN` | No | empty | Global fallback Home Assistant token. |
@@ -69,5 +70,6 @@ For global LLM settings, `HEV_LLM_API_KEY` is used with `HEV_LLM_BASE_URL`/`HEV_
 ## Deployment Notes
 
 - For Docker Compose default (SQLite), keep `DATABASE_URL=` empty and use persistent volume `hev_data`.
+- Docker Compose publishes `HEV_HOST_PORT` on the host (default `23010`); set `HEV_HOST_PORT=8000` for legacy behavior.
 - For Compose Postgres overlay, use `docker-compose.postgres.yml` and `HEV_POSTGRES_*` variables from `.env.docker.example`.
 - For deterministic version tracking in container builds, pass `HEV_BUILD_COMMIT_SHA` at build or runtime.
