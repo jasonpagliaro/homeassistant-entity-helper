@@ -16,10 +16,10 @@ from app.ha_client import HAClientError
 from app.llm_client import LLMClientError
 from app.main import create_app
 from app.models import (
+    AppConfig,
     AutomationAdjustmentAction,
     AutomationAdjustmentDraft,
     AutomationAdjustmentRevision,
-    AppConfig,
     ConfigSnapshot,
     ConfigSyncRun,
     EntitySuggestion,
