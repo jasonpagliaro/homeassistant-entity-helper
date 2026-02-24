@@ -265,7 +265,7 @@ Log and state paths:
 
 ## Troubleshooting
 
-### Common Errors (Top 8)
+### Common Errors (Top 9)
 
 | Symptom | Likely Cause | Fix |
 | --- | --- | --- |
@@ -273,6 +273,7 @@ Log and state paths:
 | `Cannot connect to the Docker daemon` | Docker daemon is not running. | Start Docker Desktop (macOS/Windows) or start the `docker` service (Linux). |
 | `permission denied /var/run/docker.sock` | Current Linux user is not in the `docker` group. | Add user to `docker` group, then re-login or refresh group membership. |
 | `docker compose` not recognized | Compose plugin is missing or old command syntax is used. | Install/update Compose plugin and use `docker compose` (with a space). |
+| `validating ... services.app additional properties 'args' not allowed` | `args` is placed at `services.app` level instead of under `services.app.build`. | Move `args` under `build` in `docker-compose.yml`, then run `docker compose config --quiet` and retry `docker compose up -d --build`. |
 | `.env` missing or placeholder `SESSION_SECRET` | Environment file was not created or not updated. | Copy `.env.docker.example` to `.env`, set a real `SESSION_SECRET`, keep `DATABASE_URL=` for SQLite mode. |
 | Port `23010` already in use | Another process or container is bound to `23010`. | Stop conflicting process/container or set a different `HEV_HOST_PORT` value. |
 | App container unhealthy/startup crash | Runtime, migration, or env config issue during startup. | Inspect app logs and restart with a clean rebuild. |
@@ -382,7 +383,37 @@ docker compose up -d --build
 curl -fsS http://localhost:23010/healthz
 ```
 
-### 5) `.env` missing or placeholder `SESSION_SECRET` not replaced
+### 5) `additional properties 'args' not allowed`
+- **What you'll see:** `validating ... services.app additional properties 'args' not allowed`.
+- **Run this check:**
+
+```bash
+docker compose config --quiet
+```
+
+- **Fix:**
+
+```bash
+# In docker-compose.yml, ensure args is nested under build:
+# services:
+#   app:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#       args:
+#         HEV_BUILD_COMMIT_SHA: ${HEV_BUILD_COMMIT_SHA}
+```
+
+- **Re-test:**
+
+```bash
+docker compose config --quiet
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose build --no-cache
+docker compose up -d --build
+curl -fsS http://localhost:23010/healthz
+```
+
+### 6) `.env` missing or placeholder `SESSION_SECRET` not replaced
 - **What you'll see:** startup/config errors, or insecure placeholder secret left in `.env`.
 - **Run this check:**
 
@@ -406,7 +437,7 @@ docker compose up -d --build
 curl -fsS http://localhost:23010/healthz
 ```
 
-### 6) Port `23010` already in use
+### 7) Port `23010` already in use
 - **What you'll see:** `Bind for 0.0.0.0:23010 failed: port is already allocated`.
 - **Run this check:**
 
@@ -430,7 +461,7 @@ docker compose up -d --build
 curl -fsS http://localhost:23010/healthz
 ```
 
-### 7) App container unhealthy or startup crash
+### 8) App container unhealthy or startup crash
 - **What you'll see:** `docker compose ps` shows `unhealthy`, `restarting`, or exits quickly.
 - **Run this check:**
 
@@ -455,7 +486,7 @@ docker compose ps
 curl -fsS http://localhost:23010/healthz
 ```
 
-### 8) Postgres overlay connection/auth failures
+### 9) Postgres overlay connection/auth failures
 - **What you'll see:** app logs include authentication failures or cannot connect to `postgres:5432`.
 - **Run this check:**
 

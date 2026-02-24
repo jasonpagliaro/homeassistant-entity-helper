@@ -18,6 +18,10 @@ jobs:
           python-version: "3.12"
       - name: Install npm dependencies
         run: npm ci
+      - name: Compose schema validation
+        run: |
+          [ -f .env ] || cp .env.docker.example .env
+          docker compose config --quiet
       - name: Docs quality checks
         run: npm run docs:check
       - name: Build quality gate
