@@ -56,6 +56,12 @@ docker compose restart app     # restart app service
 docker compose down            # stop stack
 ```
 
+Recommended start/update command (keeps `/config` Installed Commit aligned after `git pull`):
+
+```bash
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+```
+
 Data-destructive cleanup (removes volumes and persisted data):
 
 ```bash
@@ -150,7 +156,7 @@ The table below only lists Docker deployment specifics.
 | `HEV_POSTGRES_DB` | No | `ha_entity_vault` | Database name used by the Postgres overlay service. |
 | `HEV_POSTGRES_USER` | No | `hev` | Username used by the Postgres overlay service. |
 | `HEV_POSTGRES_PASSWORD` | No | `hev_change_me` | Password used by the Postgres overlay service. Change before production use. |
-| `HEV_BUILD_COMMIT_SHA` | No | empty | Optional local build SHA used by `/config` update checker when `.git` metadata is unavailable in runtime containers. |
+| `HEV_BUILD_COMMIT_SHA` | No | empty | Optional local build SHA used by `/config` update checker when `.git` metadata is unavailable in runtime containers. Recommended for local/self-host deploys: runtime-inject per deploy instead of pinning in `.env`. |
 | `HEV_IMAGE_TAG` | No | `ha-entity-vault:local` | Compose runtime image tag used by update-manager rollouts. |
 | `AUTO_UPDATE_ENABLED` | No | `true` | Enables/disables host-side update-manager runs. |
 | `AUTO_UPDATE_SCHEDULE` | No | `04:00` | Local-time daily schedule gate for update manager. |
@@ -158,15 +164,30 @@ The table below only lists Docker deployment specifics.
 | `BACKUP_RETENTION_DAYS` | No | `7` | SQLite backup retention window used by update manager. |
 | `UPDATE_BRANCH` | No | `main` | Git branch tracked by update manager. |
 
-To provide deterministic update-checker local version info in containers:
+Recommended for local/self-host Compose deploys:
+
+```bash
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+```
+
+Compose loads `.env`. If `HEV_BUILD_COMMIT_SHA` is pinned in `.env`, `/config` `Installed Commit` can remain stale after `git pull` unless `.env` is also updated and the image is rebuilt.
+
+If you previously pinned it in `.env`, remove it (or set it empty), then rebuild/recreate:
+
+```bash
+sed -i '/^HEV_BUILD_COMMIT_SHA=/d' .env
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
+```
+
+You may pin it for deterministic builds, but update it on each deploy.
+
+For direct `docker build` deterministic version info:
 
 ```bash
 docker build \
   --build-arg HEV_BUILD_COMMIT_SHA="$(git rev-parse HEAD)" \
   -t ha-entity-vault:local .
 ```
-
-Or set `HEV_BUILD_COMMIT_SHA` in `.env` for Compose/runtime injection.
 
 ## Persistence, Backup, and Restore
 
@@ -203,7 +224,7 @@ cat ha_entity_vault.sql | docker compose -f docker-compose.yml -f docker-compose
 ## Upgrades
 1. Pull latest code.
 2. Review `.env` for newly added variables.
-3. Run `docker compose up -d --build` (or the Postgres overlay variant).
+3. Run `HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate` (or the Postgres overlay variant).
 4. Validate health with `curl -fsS http://localhost:23010/healthz`.
 
 Upgrade note: Docker defaults now publish on host port `23010`.  
@@ -409,7 +430,7 @@ docker compose config --quiet
 ```bash
 docker compose config --quiet
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose build --no-cache
-docker compose up -d --build
+HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
 curl -fsS http://localhost:23010/healthz
 ```
 
