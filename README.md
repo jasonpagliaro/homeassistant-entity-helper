@@ -54,10 +54,12 @@ From repo root:
 cp .env.docker.example .env
 # update SESSION_SECRET in .env before first deployment
 docker compose up -d --build
-curl -fsS http://localhost:8000/healthz
+curl -fsS http://localhost:23010/healthz
 ```
 
-Then open `http://localhost:8000`.
+Then open `http://localhost:23010`.
+
+If you want the previous Docker host-port behavior, set `HEV_HOST_PORT=8000` in `.env` before running Compose.
 
 SQLite data persists in the named Docker volume `hev_data`.
 
