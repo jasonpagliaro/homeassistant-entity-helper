@@ -197,3 +197,5 @@ def test_config_page_form_contract() -> None:
     assert 'name="update_repo_name"' in template
     assert 'name="update_repo_branch"' in template
     assert 'name="update_check_interval_minutes"' in template
+    assert 'data-local-datetime' in template
+    assert "Intl.DateTimeFormat" in template

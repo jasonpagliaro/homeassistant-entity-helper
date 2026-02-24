@@ -329,6 +329,17 @@ def parse_ha_datetime(raw_value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def format_utc_datetime(value: datetime | None) -> str:
+    if value is None:
+        return ""
+
+    if value.tzinfo is None:
+        normalized = value.replace(tzinfo=timezone.utc)
+    else:
+        normalized = value.astimezone(timezone.utc)
+    return normalized.isoformat(timespec="seconds")
+
+
 def safe_json_dump(raw_value: Any) -> str:
     try:
         return json.dumps(raw_value, sort_keys=True, ensure_ascii=True)
@@ -3555,6 +3566,7 @@ def create_app() -> FastAPI:
 
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
     templates.env.globals["build_query"] = build_query
+    templates.env.filters["utc_iso"] = format_utc_datetime
 
     app.mount(
         "/static",
