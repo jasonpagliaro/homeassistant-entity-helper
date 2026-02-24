@@ -15,4 +15,4 @@ RUN node -e "const fs=require('node:fs'); const pkg=JSON.parse(fs.readFileSync('
     npx -y playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium && \
     node ./scripts/playwright-preflight.mjs
 
-ENTRYPOINT ["node", "scripts/playwright-preflight.mjs"]
+ENTRYPOINT ["sh", "scripts/runner-entrypoint.sh"]

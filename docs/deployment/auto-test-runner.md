@@ -37,7 +37,9 @@ The Dockerfile performs these build-time steps:
 
 ## Mandatory preflight at test startup
 
-The runner entrypoint is the preflight script:
+The runner entrypoint always runs preflight first. If you pass a command, it executes that command after preflight succeeds.
+
+Preflight-only:
 
 ```bash
 docker run --rm hev-autotest-runner:pw-1.52.0
@@ -88,7 +90,7 @@ Fallback checks for `time[datetime][data-local-datetime]` markers in server-rend
 A repository wrapper is provided for harness invocation:
 
 ```bash
-cd deploy/autotest && npm install
+npm install --prefix deploy/autotest
 CONFIG_URL=http://127.0.0.1:8000/config scripts/harness/run-config-timestamp-check.sh
 ```
 
