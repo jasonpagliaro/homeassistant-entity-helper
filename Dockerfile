@@ -1,12 +1,12 @@
 FROM python:3.12-slim
 
-ARG HEV_BUILD_COMMIT_SHA=""
+ARG HEV_BUILD_COMMIT_SHA
+ENV HEV_BUILD_COMMIT_SHA=$HEV_BUILD_COMMIT_SHA
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    HEV_DATA_DIR=/data \
-    HEV_BUILD_COMMIT_SHA=${HEV_BUILD_COMMIT_SHA}
+    HEV_DATA_DIR=/data
 
 RUN groupadd --gid 10001 app && \
     useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin app
