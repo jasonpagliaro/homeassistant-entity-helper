@@ -197,7 +197,10 @@ def test_config_page_form_contract() -> None:
     assert 'name="update_repo_name"' in template
     assert 'name="update_repo_branch"' in template
     assert 'name="update_check_interval_minutes"' in template
-    assert "Local Docker Update Commands" in template
+    assert 'aria-label="Manual update commands"' in template
     assert "HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate" in template
+    assert "Local Docker Update Commands" not in template
+    assert template.index("<h2>Update Status</h2>") < template.index('aria-label="Manual update commands"')
+    assert template.index('aria-label="Manual update commands"') < template.index("<h2>Update Settings</h2>")
     assert 'data-local-datetime' in template
     assert "Intl.DateTimeFormat" in template
