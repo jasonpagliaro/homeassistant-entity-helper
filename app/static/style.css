@@ -1039,6 +1039,17 @@ pre {
   font-family: var(--ha-font-family-code);
 }
 
+.code-textarea {
+  width: 100%;
+  min-height: 11rem;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-color: var(--code-border);
+  font-family: var(--ha-font-family-code);
+  white-space: pre;
+  overflow-x: auto;
+}
+
 .pretty-block {
   background: var(--input-fill-color);
   color: var(--primary-text-color);

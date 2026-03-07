@@ -676,8 +676,11 @@ def test_config_page_and_update_settings_persist(
     config_response = client.get("/config")
     assert config_response.status_code == 200
     assert "Update Settings" in config_response.text
-    assert "Local Docker Update Commands" in config_response.text
+    assert 'aria-label="Manual update commands"' in config_response.text
     assert "HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate" in config_response.text
+    assert "Local Docker Update Commands" not in config_response.text
+    assert config_response.text.index("<h2>Update Status</h2>") < config_response.text.index('aria-label="Manual update commands"')
+    assert config_response.text.index('aria-label="Manual update commands"') < config_response.text.index("<h2>Update Settings</h2>")
     assert_primary_nav_active_link(config_response.text, active_href="/config", active_label="Config")
 
     csrf_token = extract_csrf(config_response.text)
