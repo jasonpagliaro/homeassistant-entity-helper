@@ -60,7 +60,26 @@
     Run from this repository root on your Docker host to update a local/self-hosted deployment and keep
     <code>Installed Commit</code> aligned with the running build.
   </p>
-  <textarea class="code-textarea" rows="6" readonly spellcheck="false" aria-label="Manual update commands">git pull --ff-only
+  <div class="row gap-sm wrap manual-update-actions">
+    <button
+      type="button"
+      id="copy-manual-update-commands"
+      class="button-secondary"
+      data-tooltip="Copy the manual update commands to your clipboard."
+    >
+      Copy Text
+    </button>
+    <span id="manual-update-copy-status" class="manual-update-copy-status" role="status" aria-live="polite"></span>
+  </div>
+  <textarea
+    id="manual-update-commands"
+    class="code-textarea manual-update-commands"
+    rows="8"
+    readonly
+    spellcheck="false"
+    wrap="off"
+    aria-label="Manual update commands"
+  >git pull --ff-only
 # one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
 sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
@@ -137,30 +156,99 @@ curl -fsS http://localhost:23010/version</textarea>
 <script>
   (function () {
     const nodes = document.querySelectorAll("[data-local-datetime]");
-    if (!nodes.length) {
-      return;
-    }
-    const formatter = new Intl.DateTimeFormat(undefined, {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-      timeZoneName: "short",
-    });
+    if (nodes.length) {
+      const formatter = new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+        timeZoneName: "short",
+      });
 
-    for (const node of nodes) {
-      const raw = node.getAttribute("datetime");
-      if (!raw) {
-        continue;
+      for (const node of nodes) {
+        const raw = node.getAttribute("datetime");
+        if (!raw) {
+          continue;
+        }
+        const parsed = new Date(raw);
+        if (Number.isNaN(parsed.getTime())) {
+          continue;
+        }
+        node.textContent = formatter.format(parsed);
       }
-      const parsed = new Date(raw);
-      if (Number.isNaN(parsed.getTime())) {
-        continue;
+    }
+
+    function setManualUpdateCopyStatus(message, isError) {
+      const statusEl = document.getElementById("manual-update-copy-status");
+      if (!statusEl) {
+        return;
       }
-      node.textContent = formatter.format(parsed);
+      statusEl.textContent = message;
+      statusEl.dataset.state = isError ? "error" : "success";
+
+      if (setManualUpdateCopyStatus.timeoutId) {
+        window.clearTimeout(setManualUpdateCopyStatus.timeoutId);
+      }
+      setManualUpdateCopyStatus.timeoutId = window.setTimeout(function () {
+        statusEl.textContent = "";
+        delete statusEl.dataset.state;
+      }, 2200);
+    }
+
+    async function copyManualUpdateCommands() {
+      const commandsEl = document.getElementById("manual-update-commands");
+      if (!(commandsEl instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      const text = commandsEl.value.trim();
+      if (!text) {
+        setManualUpdateCopyStatus("Nothing to copy.", true);
+        return;
+      }
+
+      try {
+        try {
+          if (!navigator.clipboard || typeof navigator.clipboard.writeText !== "function") {
+            throw new Error("clipboard-unavailable");
+          }
+          await navigator.clipboard.writeText(text);
+        } catch (_clipboardError) {
+          if (typeof document.execCommand !== "function") {
+            throw _clipboardError;
+          }
+          const selectionStart = commandsEl.selectionStart;
+          const selectionEnd = commandsEl.selectionEnd;
+          const scrollTop = commandsEl.scrollTop;
+          const scrollLeft = commandsEl.scrollLeft;
+
+          commandsEl.focus();
+          commandsEl.select();
+          commandsEl.setSelectionRange(0, commandsEl.value.length);
+          const copied = document.execCommand("copy");
+          commandsEl.setSelectionRange(selectionStart, selectionEnd);
+          commandsEl.scrollTop = scrollTop;
+          commandsEl.scrollLeft = scrollLeft;
+
+          if (!copied) {
+            throw _clipboardError;
+          }
+        }
+
+        setManualUpdateCopyStatus("Copied to clipboard.", false);
+      } catch (_err) {
+        setManualUpdateCopyStatus("Clipboard copy failed.", true);
+      }
+    }
+
+    const copyButton = document.getElementById("copy-manual-update-commands");
+    if (copyButton) {
+      copyButton.addEventListener("click", function () {
+        copyManualUpdateCommands();
+      });
     }
   })();
 </script>
