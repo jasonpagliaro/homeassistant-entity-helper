@@ -291,6 +291,70 @@ compose_container_id() {
   docker compose ps -q "${COMPOSE_SERVICE}" | head -n 1
 }
 
+path_is_within_mount() {
+  local path="$1"
+  local mount_point="$2"
+  [[ "${path}" == "${mount_point}" || "${path}" == "${mount_point}"/* ]]
+}
+
+volume_contains_sqlite_db() {
+  local volume_name="$1"
+
+  if ! docker volume inspect "${volume_name}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  docker run --rm -v "${volume_name}:/data:ro" busybox \
+    sh -c 'test -r "$1" && test -s "$1"' _ "${SQLITE_DB_PATH}" >/dev/null 2>&1
+}
+
+resolve_sqlite_volume_from_container() {
+  local container_id="$1"
+  local best_destination="" best_volume="" mount_type mount_destination mount_name
+
+  while IFS='|' read -r mount_type mount_destination mount_name; do
+    [[ "${mount_type}" == "volume" ]] || continue
+    if ! path_is_within_mount "${SQLITE_DB_PATH}" "${mount_destination}"; then
+      continue
+    fi
+    if (( ${#mount_destination} > ${#best_destination} )); then
+      best_destination="${mount_destination}"
+      best_volume="${mount_name}"
+    fi
+  done < <(
+    docker inspect --format '{{range .Mounts}}{{printf "%s|%s|%s\n" .Type .Destination .Name}}{{end}}' "${container_id}"
+  )
+
+  printf '%s' "${best_volume}"
+}
+
+ensure_sqlite_volume_resolved() {
+  local requested_volume resolved_volume container_id
+
+  requested_volume="${SQLITE_VOLUME:-}"
+  if [[ -n "${requested_volume}" ]] && volume_contains_sqlite_db "${requested_volume}"; then
+    return 0
+  fi
+
+  container_id="$(compose_container_id)"
+  if [[ -n "${container_id}" ]]; then
+    resolved_volume="$(resolve_sqlite_volume_from_container "${container_id}")"
+    if [[ -n "${resolved_volume}" ]]; then
+      SQLITE_VOLUME="${resolved_volume}"
+      export SQLITE_VOLUME
+      return 0
+    fi
+  fi
+
+  if [[ -n "${requested_volume}" ]] && docker volume inspect "${requested_volume}" >/dev/null 2>&1; then
+    SQLITE_VOLUME="${requested_volume}"
+    export SQLITE_VOLUME
+    return 0
+  fi
+
+  return 1
+}
+
 container_health() {
   local container_id="$1"
   docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${container_id}"
@@ -335,6 +399,10 @@ wait_for_service_healthy() {
 }
 
 get_alembic_version() {
+  if ! ensure_sqlite_volume_resolved; then
+    return 1
+  fi
+
   docker run --rm \
     -v "${SQLITE_VOLUME}:/data:ro" \
     python:3.12-slim \
@@ -368,6 +436,10 @@ backup_sqlite() {
   local backup_name
   backup_name="$(basename "${backup_path}")"
 
+  if ! ensure_sqlite_volume_resolved; then
+    return 1
+  fi
+
   docker run --rm \
     -v "${SQLITE_VOLUME}:/data:ro" \
     -v "${AUTO_UPDATE_BACKUP_DIR}:/backup:rw" \
@@ -393,6 +465,10 @@ restore_sqlite_backup() {
   local backup_name
   backup_name="$(basename "${backup_path}")"
 
+  if ! ensure_sqlite_volume_resolved; then
+    return 1
+  fi
+
   docker run --rm \
     -v "${SQLITE_VOLUME}:/data:rw" \
     -v "${AUTO_UPDATE_BACKUP_DIR}:/backup:ro" \
@@ -415,6 +491,10 @@ PY
 update_db_update_status() {
   local attempt_at="$1"
   local update_result="$2"
+
+  if ! ensure_sqlite_volume_resolved; then
+    return 1
+  fi
 
   docker run --rm \
     -v "${SQLITE_VOLUME}:/data:rw" \
@@ -590,11 +670,16 @@ run_prechecks() {
     return 1
   fi
 
+  if ! ensure_sqlite_volume_resolved; then
+    log_json "ERROR" "precheck_failed" "check" "sqlite_volume" "volume" "${SQLITE_VOLUME}"
+    return 1
+  fi
+
   if ! docker volume inspect "${SQLITE_VOLUME}" >/dev/null 2>&1; then
     log_json "ERROR" "precheck_failed" "check" "sqlite_volume" "volume" "${SQLITE_VOLUME}"
     return 1
   fi
-  if ! docker run --rm -v "${SQLITE_VOLUME}:/data:ro" busybox sh -c 'test -r "$1" && test -s "$1"' _ "${SQLITE_DB_PATH}" >/dev/null 2>&1; then
+  if ! volume_contains_sqlite_db "${SQLITE_VOLUME}"; then
     log_json "ERROR" "precheck_failed" "check" "sqlite_volume_file" "volume" "${SQLITE_VOLUME}" "path" "${SQLITE_DB_PATH}"
     return 1
   fi
@@ -1067,6 +1152,7 @@ main() {
   esac
 }
 
-trap release_lock EXIT
-
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  trap release_lock EXIT
+  main "$@"
+fi
