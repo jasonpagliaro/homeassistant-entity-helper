@@ -676,11 +676,15 @@ def test_config_page_and_update_settings_persist(
     config_response = client.get("/config")
     assert config_response.status_code == 200
     assert "Update Settings" in config_response.text
-    assert "Copy Text" in config_response.text
+    assert re.search(r'id="copy-manual-update-commands"[\s\S]*?>\s*Copy\s*</button>', config_response.text)
+    assert "Copy Text" not in config_response.text
     assert 'id="copy-manual-update-commands"' in config_response.text
     assert 'id="manual-update-commands"' in config_response.text
+    assert 'class="manual-update-window"' in config_response.text
+    assert 'class="manual-update-window__body"' in config_response.text
     assert 'aria-label="Manual update commands"' in config_response.text
-    assert 'wrap="off"' in config_response.text
+    assert 'wrap="off"' not in config_response.text
+    assert "<textarea" not in config_response.text
     assert "HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate" in config_response.text
     assert "Local Docker Update Commands" not in config_response.text
     assert config_response.text.index("<h2>Update Status</h2>") < config_response.text.index('aria-label="Manual update commands"')

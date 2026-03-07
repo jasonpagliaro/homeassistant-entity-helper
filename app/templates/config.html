@@ -60,31 +60,31 @@
     Run from this repository root on your Docker host to update a local/self-hosted deployment and keep
     <code>Installed Commit</code> aligned with the running build.
   </p>
-  <div class="row gap-sm wrap manual-update-actions">
-    <button
-      type="button"
-      id="copy-manual-update-commands"
-      class="button-secondary"
-      data-tooltip="Copy the manual update commands to your clipboard."
-    >
-      Copy Text
-    </button>
-    <span id="manual-update-copy-status" class="manual-update-copy-status" role="status" aria-live="polite"></span>
-  </div>
-  <textarea
-    id="manual-update-commands"
-    class="code-textarea manual-update-commands"
-    rows="8"
-    readonly
-    spellcheck="false"
-    wrap="off"
-    aria-label="Manual update commands"
-  >git pull --ff-only
+  <div class="manual-update-window">
+    <div class="manual-update-window__toolbar">
+      <span
+        id="manual-update-copy-status"
+        class="manual-update-copy-status visually-hidden"
+        role="status"
+        aria-live="polite"
+      ></span>
+      <button
+        type="button"
+        id="copy-manual-update-commands"
+        class="button-secondary manual-update-copy-button"
+        data-tooltip="Copy the manual update commands to your clipboard."
+        aria-describedby="manual-update-copy-status"
+      >
+        Copy
+      </button>
+    </div>
+    <pre class="manual-update-window__body"><code id="manual-update-commands" class="manual-update-commands" aria-label="Manual update commands">git pull --ff-only
 # one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
 sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
 curl -fsS http://localhost:23010/healthz
-curl -fsS http://localhost:23010/version</textarea>
+curl -fsS http://localhost:23010/version</code></pre>
+  </div>
   <p class="muted-text">
     If your deployment uses a non-default host port, replace <code>23010</code> in the <code>curl</code> commands.
   </p>
@@ -181,32 +181,35 @@ curl -fsS http://localhost:23010/version</textarea>
       }
     }
 
-    function setManualUpdateCopyStatus(message, isError) {
+    function setManualUpdateCopyStatus(message, buttonLabel, isError) {
       const statusEl = document.getElementById("manual-update-copy-status");
-      if (!statusEl) {
+      const copyButton = document.getElementById("copy-manual-update-commands");
+      if (!(statusEl instanceof HTMLElement) || !(copyButton instanceof HTMLButtonElement)) {
         return;
       }
       statusEl.textContent = message;
-      statusEl.dataset.state = isError ? "error" : "success";
+      copyButton.textContent = buttonLabel;
+      copyButton.dataset.state = isError ? "error" : "success";
 
       if (setManualUpdateCopyStatus.timeoutId) {
         window.clearTimeout(setManualUpdateCopyStatus.timeoutId);
       }
       setManualUpdateCopyStatus.timeoutId = window.setTimeout(function () {
         statusEl.textContent = "";
-        delete statusEl.dataset.state;
+        copyButton.textContent = copyButton.dataset.defaultLabel || "Copy";
+        delete copyButton.dataset.state;
       }, 2200);
     }
 
     async function copyManualUpdateCommands() {
       const commandsEl = document.getElementById("manual-update-commands");
-      if (!(commandsEl instanceof HTMLTextAreaElement)) {
+      if (!(commandsEl instanceof HTMLElement)) {
         return;
       }
 
-      const text = commandsEl.value.trim();
+      const text = (commandsEl.textContent || "").trim();
       if (!text) {
-        setManualUpdateCopyStatus("Nothing to copy.", true);
+        setManualUpdateCopyStatus("Nothing to copy.", "Copy failed", true);
         return;
       }
 
@@ -220,32 +223,37 @@ curl -fsS http://localhost:23010/version</textarea>
           if (typeof document.execCommand !== "function") {
             throw _clipboardError;
           }
-          const selectionStart = commandsEl.selectionStart;
-          const selectionEnd = commandsEl.selectionEnd;
-          const scrollTop = commandsEl.scrollTop;
-          const scrollLeft = commandsEl.scrollLeft;
+          const fallbackEl = document.createElement("textarea");
+          fallbackEl.value = text;
+          fallbackEl.setAttribute("readonly", "");
+          fallbackEl.setAttribute("aria-hidden", "true");
+          fallbackEl.style.position = "fixed";
+          fallbackEl.style.top = "0";
+          fallbackEl.style.left = "-9999px";
+          document.body.appendChild(fallbackEl);
 
-          commandsEl.focus();
-          commandsEl.select();
-          commandsEl.setSelectionRange(0, commandsEl.value.length);
-          const copied = document.execCommand("copy");
-          commandsEl.setSelectionRange(selectionStart, selectionEnd);
-          commandsEl.scrollTop = scrollTop;
-          commandsEl.scrollLeft = scrollLeft;
-
-          if (!copied) {
-            throw _clipboardError;
+          try {
+            fallbackEl.focus();
+            fallbackEl.select();
+            fallbackEl.setSelectionRange(0, fallbackEl.value.length);
+            const copied = document.execCommand("copy");
+            if (!copied) {
+              throw _clipboardError;
+            }
+          } finally {
+            fallbackEl.remove();
           }
         }
 
-        setManualUpdateCopyStatus("Copied to clipboard.", false);
+        setManualUpdateCopyStatus("Copied to clipboard.", "Copied", false);
       } catch (_err) {
-        setManualUpdateCopyStatus("Clipboard copy failed.", true);
+        setManualUpdateCopyStatus("Clipboard copy failed.", "Copy failed", true);
       }
     }
 
     const copyButton = document.getElementById("copy-manual-update-commands");
-    if (copyButton) {
+    if (copyButton instanceof HTMLButtonElement) {
+      copyButton.dataset.defaultLabel = copyButton.textContent.trim() || "Copy";
       copyButton.addEventListener("click", function () {
         copyManualUpdateCommands();
       });
