@@ -1040,7 +1040,9 @@ pre {
 }
 
 .code-textarea {
+  display: block;
   width: 100%;
+  max-width: 100%;
   min-height: 11rem;
   background: var(--code-bg);
   color: var(--code-ink);
@@ -1048,6 +1050,31 @@ pre {
   font-family: var(--ha-font-family-code);
   white-space: pre;
   overflow-x: auto;
+}
+
+.manual-update-actions {
+  margin-bottom: var(--ha-space-2);
+}
+
+.manual-update-commands {
+  min-height: 15rem;
+  resize: vertical;
+}
+
+.manual-update-copy-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.1rem;
+  color: var(--secondary-text-color);
+  font-size: var(--ha-font-size-s);
+}
+
+.manual-update-copy-status[data-state="success"] {
+  color: var(--success-color);
+}
+
+.manual-update-copy-status[data-state="error"] {
+  color: var(--error-color);
 }
 
 .pretty-block {
