@@ -199,12 +199,18 @@ def test_config_page_form_contract() -> None:
     assert 'name="update_check_interval_minutes"' in template
     assert 'id="copy-manual-update-commands"' in template
     assert 'id="manual-update-commands"' in template
+    assert 'class="manual-update-window"' in template
+    assert 'class="manual-update-window__body"' in template
+    assert 'class="button-secondary manual-update-copy-button"' in template
     assert 'aria-label="Manual update commands"' in template
-    assert 'wrap="off"' in template
-    assert "Copy Text" in template
+    assert 'wrap="off"' not in template
+    assert "<textarea" not in template
+    assert "Copy Text" not in template
+    assert re.search(r'id="copy-manual-update-commands"[\s\S]*?>\s*Copy\s*</button>', template)
     assert "HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate" in template
     assert "navigator.clipboard.writeText" in template
     assert 'document.execCommand("copy")' in template
+    assert 'fallbackEl.style.left = "-9999px"' in template
     assert "Local Docker Update Commands" not in template
     assert template.index("<h2>Update Status</h2>") < template.index('aria-label="Manual update commands"')
     assert template.index('aria-label="Manual update commands"') < template.index("<h2>Update Settings</h2>")
