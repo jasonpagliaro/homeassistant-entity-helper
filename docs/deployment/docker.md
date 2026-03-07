@@ -43,7 +43,8 @@ curl -fsS http://localhost:23010/healthz
 
 The app applies Alembic migrations automatically at startup.
 
-SQLite data is persisted in Docker volume `hev_data`.
+SQLite data is persisted in the Compose logical volume `hev_data`.
+Docker usually creates the actual engine volume with the project prefix, for example `homeassistant-entity-helper_hev_data`.
 
 ## Command Basics (Day-2 Operations)
 Default Compose commands:
@@ -168,6 +169,7 @@ The table below only lists Docker deployment specifics.
 | `UPDATE_TIMEOUT_SECONDS` | No | `120` | Health timeout for deploy/rollback in update manager. |
 | `BACKUP_RETENTION_DAYS` | No | `7` | SQLite backup retention window used by update manager. |
 | `UPDATE_BRANCH` | No | `main` | Git branch tracked by update manager. |
+| `SQLITE_VOLUME` | No | `hev_data` | Compose volume source key or Docker volume name used by the updater for SQLite backup/restore. Keep `hev_data` for default Compose installs; the updater resolves the actual engine volume automatically. |
 
 Recommended for local/self-host Compose deploys:
 
@@ -205,14 +207,16 @@ docker build \
 Backup:
 
 ```bash
-docker run --rm -v hev_data:/data -v "$PWD":/backup busybox \
+SQLITE_VOLUME_NAME="$(docker inspect "$(docker compose ps -q app)" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/data")}}{{println .Name}}{{end}}{{end}}' | head -n 1)"
+docker run --rm -v "${SQLITE_VOLUME_NAME}:/data" -v "$PWD":/backup busybox \
   sh -c 'cp /data/ha_entity_vault.db /backup/ha_entity_vault.db.backup'
 ```
 
 Restore:
 
 ```bash
-docker run --rm -v hev_data:/data -v "$PWD":/backup busybox \
+SQLITE_VOLUME_NAME="$(docker inspect "$(docker compose ps -q app)" --format '{{range .Mounts}}{{if and (eq .Type "volume") (eq .Destination "/data")}}{{println .Name}}{{end}}{{end}}' | head -n 1)"
+docker run --rm -v "${SQLITE_VOLUME_NAME}:/data" -v "$PWD":/backup busybox \
   sh -c 'cp /backup/ha_entity_vault.db.backup /data/ha_entity_vault.db'
 ```
 
@@ -253,6 +257,7 @@ This deployment includes a host-side update manager script:
 Behavior:
 - Uses `git fetch` + `git pull --ff-only` on `UPDATE_BRANCH`.
 - Refuses update on failed safety checks (Docker, git origin, healthy container, disk, volume/db checks, root-user container).
+- Resolves the running Compose SQLite mount to the actual engine volume name before backup, precheck, and rollback work.
 - Creates timestamped SQLite backups before deploy and prunes old backups.
 - Builds candidate image before replacing running container.
 - Uses health-gated `docker compose up --no-deps --no-build`.

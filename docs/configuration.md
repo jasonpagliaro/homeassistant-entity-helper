@@ -43,7 +43,7 @@ This is the canonical environment configuration reference for HA Entity Vault.
 | `UPDATE_POLL_SECONDS` | No | `3` | Poll interval used for health/restart checks. |
 | `UPDATE_EXPECTED_ORIGIN` | No | `https://github.com/jasonpagliaro/homeassistant-entity-helper.git` | Git origin validation target for supply-chain safety check. |
 | `COMPOSE_SERVICE` | No | `app` | Compose service name controlled by update manager. |
-| `SQLITE_VOLUME` | No | `hev_data` | Docker volume name containing SQLite data file. |
+| `SQLITE_VOLUME` | No | `hev_data` | Compose volume source key or Docker volume name containing the SQLite data file. For default Compose installs, keep `hev_data`; the updater resolves the actual project-scoped engine volume automatically. |
 | `SQLITE_DB_PATH` | No | `/data/ha_entity_vault.db` | SQLite file path inside mounted data volume. |
 | `POST_DEPLOY_MONITOR_SECONDS` | No | `600` | Post-deploy crash monitoring window duration. |
 | `POST_DEPLOY_CRASH_THRESHOLD` | No | `3` | Restart-count increase threshold that triggers rollback and pause. |
@@ -87,7 +87,7 @@ For global LLM settings, `HEV_LLM_API_KEY` is used with `HEV_LLM_BASE_URL`/`HEV_
 
 ## Deployment Notes
 
-- For Docker Compose default (SQLite), keep `DATABASE_URL=` empty and use persistent volume `hev_data`.
+- For Docker Compose default (SQLite), keep `DATABASE_URL=` empty and use the Compose `hev_data` volume source. Docker usually creates a project-scoped engine volume such as `homeassistant-entity-helper_hev_data`.
 - Docker Compose publishes `HEV_HOST_PORT` on the host (default `23010`); set `HEV_HOST_PORT=8000` for legacy behavior.
 - For Compose Postgres overlay, use `docker-compose.postgres.yml` and `HEV_POSTGRES_*` variables from `.env.docker.example`.
 - For deterministic version tracking in container builds, pass `HEV_BUILD_COMMIT_SHA` at build or runtime.

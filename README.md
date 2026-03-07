@@ -75,7 +75,8 @@ Docker Compose loads `.env`. If `HEV_BUILD_COMMIT_SHA` is pinned there, `/config
 
 If you want the previous Docker host-port behavior, set `HEV_HOST_PORT=8000` in `.env` before running Compose.
 
-SQLite data persists in the named Docker volume `hev_data`.
+SQLite data persists in the Compose logical volume `hev_data`.
+Docker names the actual engine volume with the project prefix by default, for example `homeassistant-entity-helper_hev_data`.
 
 Optional Postgres overlay (instead of SQLite):
 
@@ -180,6 +181,7 @@ Template files for local and Docker runs:
 - systemd templates: `deploy/systemd/ha-entity-vault-update.service` and `deploy/systemd/ha-entity-vault-update.timer`.
 - Default schedule gate: daily at `04:00` local time via `.env` (`AUTO_UPDATE_SCHEDULE`).
 - Safety checks include Docker daemon reachability, git origin/branch checks, container health, disk headroom, and SQLite volume/db validation.
+- For Docker Compose SQLite deployments, leave `SQLITE_VOLUME=hev_data`; the updater resolves the actual mounted engine volume automatically.
 - Deploy is health-gated with automatic rollback to `ha-entity-vault:last-known-good`.
 - Post-deploy crash loops (default: 3 restarts in 10 minutes) trigger rollback and pause updates until manual resume.
 - Structured logs are written to `/var/log/ha-entity-vault-update.log`.
