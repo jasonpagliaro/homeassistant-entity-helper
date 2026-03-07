@@ -642,6 +642,7 @@ def test_update_status_endpoint_exposes_update_runtime_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AUTO_UPDATE_ENABLED", "false")
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: None)
 
     response = client.get("/update-status")
     assert response.status_code == 200
@@ -657,6 +658,40 @@ def test_update_status_endpoint_exposes_update_runtime_fields(
     app_config = get_app_config()
     assert app_config.last_update_attempt_at is None
     assert app_config.last_update_result == "never"
+
+
+def test_update_status_endpoint_reconciles_runtime_commit_after_deploy(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    initial_response = client.get("/update-status")
+    assert initial_response.status_code == 200
+
+    with Session(db.get_engine()) as session:
+        app_config = session.exec(select(AppConfig).order_by(AppConfig.id.asc())).first()
+        assert app_config is not None
+        app_config.last_check_state = "update_available"
+        app_config.installed_commit_sha = "a" * 40
+        app_config.latest_commit_sha = "b" * 40
+        app_config.last_check_error = "stale error"
+        session.add(app_config)
+        session.commit()
+
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "b" * 40)
+
+    response = client.get("/update-status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["installed_commit_sha"] == "b" * 40
+    assert payload["last_check_state"] == "ok"
+    assert payload["last_check_error"] is None
+
+    app_config = get_app_config()
+    assert app_config.installed_commit_sha == "b" * 40
+    assert app_config.last_check_state == "ok"
+    assert app_config.last_check_error is None
 
 
 def test_config_page_and_update_settings_persist(
@@ -836,6 +871,39 @@ def test_update_banner_dismiss_and_reappears_on_new_commit(
     assert entities_after_new_update.status_code == 200
     assert 'action="/config/update-banner/dismiss"' in entities_after_new_update.text
     assert "cccccccc" in entities_after_new_update.text
+
+
+def test_entities_page_hides_stale_update_banner_after_runtime_commit_change(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "a" * 40)
+
+    initial_response = client.get("/update-status")
+    assert initial_response.status_code == 200
+
+    with Session(db.get_engine()) as session:
+        app_config = session.exec(select(AppConfig).order_by(AppConfig.id.asc())).first()
+        assert app_config is not None
+        app_config.last_check_state = "update_available"
+        app_config.installed_commit_sha = "a" * 40
+        app_config.latest_commit_sha = "b" * 40
+        app_config.latest_commit_url = "https://github.com/example/repo/commit/" + ("b" * 40)
+        app_config.last_check_error = "stale error"
+        session.add(app_config)
+        session.commit()
+
+    monkeypatch.setattr("app.main.resolve_installed_commit_sha", lambda: "b" * 40)
+
+    entities_response = client.get("/entities")
+    assert entities_response.status_code == 200
+    assert 'action="/config/update-banner/dismiss"' not in entities_response.text
+    assert "Update available" not in entities_response.text
+
+    app_config = get_app_config()
+    assert app_config.installed_commit_sha == "b" * 40
+    assert app_config.last_check_state == "ok"
+    assert app_config.last_check_error is None
 
 
 def test_config_update_check_failure_state_does_not_show_banner(

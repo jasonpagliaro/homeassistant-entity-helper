@@ -720,6 +720,37 @@ def resolve_installed_commit_sha() -> str | None:
     return None
 
 
+def reconcile_runtime_update_state(session: Session, app_config: AppConfig) -> None:
+    stored_installed_commit_sha = as_clean_string(app_config.installed_commit_sha)
+    if stored_installed_commit_sha:
+        stored_installed_commit_sha = stored_installed_commit_sha.lower()
+
+    latest_commit_sha = as_clean_string(app_config.latest_commit_sha)
+    if latest_commit_sha:
+        latest_commit_sha = latest_commit_sha.lower()
+
+    if not stored_installed_commit_sha and not latest_commit_sha:
+        return
+
+    runtime_installed_commit_sha = resolve_installed_commit_sha()
+    if runtime_installed_commit_sha == stored_installed_commit_sha:
+        return
+
+    app_config.installed_commit_sha = runtime_installed_commit_sha
+    if latest_commit_sha:
+        if not runtime_installed_commit_sha:
+            app_config.last_check_state = "unknown_local_sha"
+        elif runtime_installed_commit_sha == latest_commit_sha:
+            app_config.last_check_state = "ok"
+        else:
+            app_config.last_check_state = "update_available"
+        app_config.last_check_error = None
+
+    app_config.updated_at = utcnow()
+    session.add(app_config)
+    session.commit()
+
+
 async def fetch_latest_commit(
     owner: str,
     repo: str,
@@ -4128,6 +4159,7 @@ def create_app() -> FastAPI:
         active_profile: Profile | None,
     ) -> dict[str, Any]:
         app_config = get_or_create_app_config(session)
+        reconcile_runtime_update_state(session, app_config)
         context["nav_profiles"] = get_enabled_profiles(session)
         context["nav_active_profile"] = active_profile
         context["nav_primary_links"] = build_primary_nav_links(request.url.path)
@@ -4187,6 +4219,7 @@ def create_app() -> FastAPI:
     @app.get("/update-status")
     async def update_status(session: Session = Depends(get_session)) -> JSONResponse:
         app_config = get_or_create_app_config(session)
+        reconcile_runtime_update_state(session, app_config)
         return JSONResponse(
             {
                 "auto_update_enabled": env_bool("AUTO_UPDATE_ENABLED", default=True),
