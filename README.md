@@ -64,10 +64,7 @@ For existing Docker instances, use this update flow after pulling new code (keep
 
 ```bash
 git pull --ff-only
-# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
-sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
-curl -fsS http://localhost:23010/healthz
 curl -fsS http://localhost:23010/version
 ```
 

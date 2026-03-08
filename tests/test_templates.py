@@ -207,6 +207,9 @@ def test_config_page_form_contract() -> None:
     assert "<textarea" not in template
     assert "Copy Text" not in template
     assert re.search(r'id="copy-manual-update-commands"[\s\S]*?>\s*Copy\s*</button>', template)
+    assert "# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env" not in template
+    assert "sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak" not in template
+    assert "curl -fsS http://localhost:23010/healthz" not in template
     assert "HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate" in template
     assert "navigator.clipboard.writeText" in template
     assert 'document.execCommand("copy")' in template

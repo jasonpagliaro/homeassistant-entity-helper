@@ -720,6 +720,9 @@ def test_config_page_and_update_settings_persist(
     assert 'aria-label="Manual update commands"' in config_response.text
     assert 'wrap="off"' not in config_response.text
     assert "<textarea" not in config_response.text
+    assert "# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env" not in config_response.text
+    assert "sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak" not in config_response.text
+    assert "curl -fsS http://localhost:23010/healthz" not in config_response.text
     assert "HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate" in config_response.text
     assert "Local Docker Update Commands" not in config_response.text
     assert config_response.text.index("<h2>Update Status</h2>") < config_response.text.index('aria-label="Manual update commands"')

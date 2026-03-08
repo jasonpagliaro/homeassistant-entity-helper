@@ -79,10 +79,7 @@
       </button>
     </div>
     <pre class="manual-update-window__body"><code id="manual-update-commands" class="manual-update-commands" aria-label="Manual update commands">git pull --ff-only
-# one-time cleanup for older installs that pinned HEV_BUILD_COMMIT_SHA in .env
-sed -i.bak '/^HEV_BUILD_COMMIT_SHA=/d' .env && rm -f .env.bak
 HEV_BUILD_COMMIT_SHA=$(git rev-parse HEAD) docker compose up -d --build --force-recreate
-curl -fsS http://localhost:23010/healthz
 curl -fsS http://localhost:23010/version</code></pre>
   </div>
   <p class="muted-text">
