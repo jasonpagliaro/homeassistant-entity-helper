@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -26,6 +26,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic.functional_validators import BeforeValidator
 from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
@@ -94,6 +95,11 @@ CSRF_SESSION_KEY = "csrf_token"
 FLASH_SESSION_KEY = "flash"
 ACTIVE_PROFILE_SESSION_KEY = "active_profile_id"
 DEFAULT_PAGE_SIZE = 50
+ChangedWithinQuery = Annotated[
+    int | None,
+    BeforeValidator(lambda v: None if v == "" else v),
+    Query(ge=1, le=10080),
+]
 AREA_CREATE_OPTION_VALUE = "__create_new_area__"
 CONFIG_SYNC_CONCURRENCY = 8
 CONFIG_KINDS = {"automation", "script", "scene"}
@@ -8345,7 +8351,7 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         domain: str = Query(default=""),
         state_value: str = Query(default="", alias="state"),
-        changed_within: int | None = Query(default=None, ge=1, le=10080),
+        changed_within: ChangedWithinQuery = None,
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
         session: Session = Depends(get_session),
@@ -10598,7 +10604,7 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         domain: str = Query(default=""),
         state_value: str = Query(default="", alias="state"),
-        changed_within: int | None = Query(default=None, ge=1, le=10080),
+        changed_within: ChangedWithinQuery = None,
         session: Session = Depends(get_session),
     ) -> Response:
         active_profile = choose_active_profile(session, request, profile_id)
@@ -10670,7 +10676,7 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         domain: str = Query(default=""),
         state_value: str = Query(default="", alias="state"),
-        changed_within: int | None = Query(default=None, ge=1, le=10080),
+        changed_within: ChangedWithinQuery = None,
         session: Session = Depends(get_session),
     ) -> Response:
         active_profile = choose_active_profile(session, request, profile_id)
