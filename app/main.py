@@ -98,7 +98,7 @@ DEFAULT_PAGE_SIZE = 50
 ChangedWithinQuery = Annotated[
     int | None,
     BeforeValidator(lambda v: None if v == "" else v),
-    Query(default=None, ge=1, le=10080),
+    Query(ge=1, le=10080),
 ]
 AREA_CREATE_OPTION_VALUE = "__create_new_area__"
 CONFIG_SYNC_CONCURRENCY = 8
