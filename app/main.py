@@ -23,10 +23,10 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 import httpx
 import yaml  # type: ignore[import-untyped]
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
-from pydantic.functional_validators import BeforeValidator
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic.functional_validators import BeforeValidator
 from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
