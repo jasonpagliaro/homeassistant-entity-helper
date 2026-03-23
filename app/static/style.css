@@ -498,6 +498,15 @@ h5 {
   margin-bottom: var(--ha-space-4);
 }
 
+.grid-form-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ha-space-2);
+  flex-wrap: wrap;
+  justify-self: start;
+  align-self: end;
+}
+
 .llm-form-actions {
   display: flex;
   align-items: center;

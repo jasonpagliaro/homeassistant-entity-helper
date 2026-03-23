@@ -38,13 +38,17 @@
         Answer
         <textarea name="answer" rows="4" placeholder="Provide constraints, exceptions, and details."></textarea>
       </label>
-      <button type="submit">Submit Answer</button>
+      <div class="grid-form-actions">
+        <button type="submit">Submit Answer</button>
+      </div>
     </form>
 
     <form method="post" action="/suggestions/generations/{{ generation.id }}/let-llm-decide" class="grid-form compact">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
-      <button type="submit" data-tooltip="Stop asking questions and let the model decide the rest.">Let LLM Decide the Rest</button>
+      <div class="grid-form-actions">
+        <button type="submit" data-tooltip="Stop asking questions and let the model decide the rest.">Let LLM Decide the Rest</button>
+      </div>
     </form>
   {% endif %}
 
@@ -63,13 +67,17 @@
           <input type="checkbox" name="confirm_submit" value="on" />
           Confirm submit to Home Assistant
         </label>
-        <button type="submit" data-tooltip="Submit this generated automation to Home Assistant config API.">Submit to Home Assistant</button>
+        <div class="grid-form-actions">
+          <button type="submit" data-tooltip="Submit this generated automation to Home Assistant config API.">Submit to Home Assistant</button>
+        </div>
       </form>
 
       <form method="post" action="/suggestions/generations/{{ generation.id }}/clone-variant" class="grid-form compact">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="/suggestions/queue?{{ build_query(profile_id=active_profile.id) }}" />
-        <button type="submit" class="button-secondary" data-tooltip="Clone this concept as a variant for additional iteration.">Clone as Variant</button>
+        <div class="grid-form-actions">
+          <button type="submit" class="button-secondary" data-tooltip="Clone this concept as a variant for additional iteration.">Clone as Variant</button>
+        </div>
       </form>
     </div>
 
@@ -81,7 +89,9 @@
         Tweak Prompt
         <input type="text" name="tweak_prompt" placeholder="Example: add a condition to suppress duplicate notifications" />
       </label>
-      <button type="submit">Apply LLM Tweak</button>
+      <div class="grid-form-actions">
+        <button type="submit">Apply LLM Tweak</button>
+      </div>
     </form>
 
     <h3>Manual YAML Edit</h3>
@@ -92,7 +102,9 @@
         YAML
         <textarea name="yaml_text" rows="14">{{ generation.final_yaml_text }}</textarea>
       </label>
-      <button type="submit">Save Manual Edit</button>
+      <div class="grid-form-actions">
+        <button type="submit">Save Manual Edit</button>
+      </div>
     </form>
   {% endif %}
 
@@ -117,7 +129,9 @@
         Optional Instruction
         <input type="text" name="optional_instruction" value="{{ generation.optional_instruction or '' }}" />
       </label>
-      <button type="submit">Restart</button>
+      <div class="grid-form-actions">
+        <button type="submit">Restart</button>
+      </div>
     </form>
   </div>
 

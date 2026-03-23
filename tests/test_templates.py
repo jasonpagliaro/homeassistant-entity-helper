@@ -143,6 +143,18 @@ def _button_counts(template: str, label: str) -> tuple[int, int]:
     return total, with_tooltip
 
 
+def _action_wrapper_contains_label(template: str, label: str) -> bool:
+    for match in re.finditer(
+        r'<div class="grid-form-actions">([\s\S]*?)</div>',
+        template,
+        flags=re.DOTALL,
+    ):
+        text = re.sub(r"<[^>]+>", " ", match.group(1))
+        if _normalize_text(label) in _normalize_text(text):
+            return True
+    return False
+
+
 def test_responsive_table_markup_contract() -> None:
     for template_name, labels in TEMPLATE_TABLE_LABELS.items():
         template = _read_template(template_name)
@@ -170,6 +182,19 @@ def test_high_impact_buttons_have_tooltips() -> None:
                 f"{template_name}: expected all '{label}' button(s) to include data-tooltip, "
                 f"found {tooltip_count}/{expected_count}"
             )
+
+
+def test_grid_form_action_wrappers_present_on_key_pages() -> None:
+    automation_adjustment_template = _read_template("automation_adjustment_detail.html")
+    assert _action_wrapper_contains_label(automation_adjustment_template, "Save Manual Edit")
+    assert _action_wrapper_contains_label(automation_adjustment_template, "Apply AI Whole Edit")
+
+    suggestion_queue_template = _read_template("suggestion_queue.html")
+    assert _action_wrapper_contains_label(suggestion_queue_template, "Apply")
+    assert _action_wrapper_contains_label(suggestion_queue_template, "Reset")
+
+    config_template = _read_template("config.html")
+    assert _action_wrapper_contains_label(config_template, "Save Update Settings")
 
 
 def test_settings_llm_preset_form_contract() -> None:

@@ -30,8 +30,10 @@
       Page Size
       <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
     </label>
-    <button type="submit">Apply</button>
-    <a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    <div class="grid-form-actions">
+      <button type="submit">Apply</button>
+      <a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
   </form>
 
   {% if active_profile %}
@@ -81,7 +83,9 @@
                     <option value="auto">auto</option>
                     <option value="advanced">advanced</option>
                   </select>
-                  <button type="submit">Generate</button>
+                  <div class="grid-form-actions">
+                    <button type="submit">Generate</button>
+                  </div>
                 </form>
                 <form method="post" action="/suggestions/proposals/{{ proposal.id }}/stage" class="grid-form compact">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -91,7 +95,9 @@
                       <option value="{{ choice }}" {% if proposal.queue_stage == choice %}selected{% endif %}>{{ choice }}</option>
                     {% endfor %}
                   </select>
-                  <button type="submit">Stage</button>
+                  <div class="grid-form-actions">
+                    <button type="submit">Stage</button>
+                  </div>
                 </form>
               </td>
             </tr>

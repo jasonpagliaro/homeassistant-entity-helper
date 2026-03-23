@@ -84,7 +84,9 @@
       YAML
       <textarea name="yaml_text" rows="18">{{ draft.working_yaml_text }}</textarea>
     </label>
-    <button type="submit" data-tooltip="Validate and save manual YAML edits to this draft.">Save Manual Edit</button>
+    <div class="grid-form-actions">
+      <button type="submit" data-tooltip="Validate and save manual YAML edits to this draft.">Save Manual Edit</button>
+    </div>
   </form>
 </section>
 
@@ -98,7 +100,9 @@
       Whole Automation Instruction
       <textarea name="instruction" rows="4" placeholder="Describe the full automation changes you want."></textarea>
     </label>
-    <button type="submit" data-tooltip="Ask AI to edit the entire automation payload.">Apply AI Whole Edit</button>
+    <div class="grid-form-actions">
+      <button type="submit" data-tooltip="Ask AI to edit the entire automation payload.">Apply AI Whole Edit</button>
+    </div>
   </form>
 
   <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/ai-section" class="grid-form compact">
@@ -117,7 +121,9 @@
       Section Instruction
       <textarea name="instruction" rows="3" placeholder="Describe the change for this section only."></textarea>
     </label>
-    <button type="submit" data-tooltip="Ask AI to edit only one automation section.">Apply AI Section Edit</button>
+    <div class="grid-form-actions">
+      <button type="submit" data-tooltip="Ask AI to edit only one automation section.">Apply AI Section Edit</button>
+    </div>
   </form>
 </section>
 
