@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Services</h2>
+
+  <form method="get" action="/services" class="grid-form compact">
+    {% if active_profile %}
+      <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
+    {% endif %}
+
+    <label>
+      Sync Run
+      <select name="service_sync_run_id">
+        <option value="">Latest</option>
+        {% for run in service_runs %}
+          <option value="{{ run.id }}" {% if active_service_sync_run and run.id == active_service_sync_run.id %}selected{% endif %}>#{{ run.id }} ({{ run.pulled_at }}, {{ run.status }})</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Search
+      <input type="text" name="q" value="{{ q }}" placeholder="service/name/description..." />
+    </label>
+
+    <label>
+      Domain
+      <select name="domain">
+        <option value="">All</option>
+        {% for item in domains %}
+          <option value="{{ item }}" {% if item == domain %}selected{% endif %}>{{ item }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label>
+      Page Size
+      <input type="number" name="page_size" min="1" max="200" value="{{ page_size }}" />
+    </label>
+
+    <div class="row gap-sm align-end">
+      <button type="submit">Apply Filters</button>
+      <a class="button" href="/services?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
+  </form>
+
+  <div class="row between wrap gap-sm">
+    <div>
+      {% if active_profile %}
+        <strong>Active Profile:</strong> {{ active_profile.name }}
+      {% endif %}
+      {% if active_service_sync_run %}
+        <div><strong>Last Service Sync:</strong> {{ active_service_sync_run.pulled_at }}</div>
+        <div><strong>Status:</strong> {{ active_service_sync_run.status }} ({{ active_service_sync_run.domain_count }} domains / {{ active_service_sync_run.service_count }} services)</div>
+      {% endif %}
+    </div>
+
+    {% if active_profile %}
+      <div class="row gap-sm wrap">
+        <form
+          method="post"
+          action="/profiles/{{ active_profile.id }}/sync-services"
+          data-sync-modal="true"
+          data-sync-modal-label="Syncing services..."
+        >
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <input type="hidden" name="next_url" value="{{ next_url }}" />
+          <button
+            type="submit"
+            data-tooltip="Pull the latest Home Assistant service catalog for this profile."
+          >
+            Sync Services
+          </button>
+        </form>
+        <a class="button" href="/entities?{{ build_query(profile_id=active_profile.id) }}">View Entities</a>
+        <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id) }}">View Config Items</a>
+      </div>
+    {% endif %}
+  </div>
+
+  {% if active_profile and active_service_sync_run %}
+    <p>{{ total }} services match filters.</p>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Service ID</th>
+            <th>Name</th>
+            <th>Domain</th>
+            <th>Description</th>
+            <th>Pulled At</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in services %}
+          <tr>
+            <td data-label="ID">{{ item.id }}</td>
+            <td data-label="Service ID"><code>{{ item.service_id }}</code></td>
+            <td data-label="Name">{{ item.name or item.service_name }}</td>
+            <td data-label="Domain">{{ item.domain }}</td>
+            <td data-label="Description">{{ item.description or '' }}</td>
+            <td data-label="Pulled At">{{ item.pulled_at }}</td>
+            <td data-label="Actions">
+              <a href="/services/{{ item.id }}?{{ build_query(profile_id=active_profile.id, service_sync_run_id=active_service_sync_run.id) }}">Details</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="row between">
+      <div>Page {{ page }} of {{ total_pages }}</div>
+      <div class="row gap-sm">
+        {% if page > 1 %}
+          <a class="button" href="/services?{{ build_query(profile_id=active_profile.id, service_sync_run_id=active_service_sync_run.id, q=q, domain=domain, page=page-1, page_size=page_size) }}">Previous</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="button" href="/services?{{ build_query(profile_id=active_profile.id, service_sync_run_id=active_service_sync_run.id, q=q, domain=domain, page=page+1, page_size=page_size) }}">Next</a>
+        {% endif %}
+      </div>
+    </div>
+  {% elif active_profile %}
+    <p>No synced services for this profile yet. Use <strong>Sync Services</strong>.</p>
+  {% elif profile_count > 0 %}
+    <p>No enabled profiles are available. Enable a profile on the <a href="/settings">Profiles page</a>.</p>
+  {% else %}
+    <p>No profiles are configured yet. Add one on the <a href="/settings">Profiles page</a>.</p>
+    <p>
+      Need help? See
+      <a href="https://www.home-assistant.io/docs/configuration/" target="_blank" rel="noreferrer">Home Assistant configuration</a>
+      and
+      <a href="https://developers.home-assistant.io/docs/auth_api/#long-lived-access-token" target="_blank" rel="noreferrer">token setup</a>.
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

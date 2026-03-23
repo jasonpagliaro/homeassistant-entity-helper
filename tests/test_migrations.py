@@ -36,6 +36,14 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
             text("PRAGMA table_info(automation_adjustment_drafts)")
         ).fetchall()
         adjustment_draft_column_names = {str(row[1]) for row in adjustment_draft_columns}
+        service_sync_run_columns = connection.execute(
+            text("PRAGMA table_info(service_sync_runs)")
+        ).fetchall()
+        service_sync_run_column_names = {str(row[1]) for row in service_sync_run_columns}
+        service_snapshot_columns = connection.execute(
+            text("PRAGMA table_info(service_snapshots)")
+        ).fetchall()
+        service_snapshot_column_names = {str(row[1]) for row in service_snapshot_columns}
 
     assert "llm_connections" in table_names
     assert "suggestion_runs" in table_names
@@ -45,6 +53,8 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
     assert "automation_adjustment_revisions" in table_names
     assert "automation_adjustment_actions" in table_names
     assert "app_config" in table_names
+    assert "service_sync_runs" in table_names
+    assert "service_snapshots" in table_names
     assert "workflow_status" in entity_suggestion_column_names
     assert "workflow_error" in entity_suggestion_column_names
     assert "workflow_payload_json" in entity_suggestion_column_names
@@ -72,5 +82,11 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
     assert "working_structured_json" in adjustment_draft_column_names
     assert "queue_status" in adjustment_draft_column_names
     assert "last_test_action_id" in adjustment_draft_column_names
+    assert "domain_count" in service_sync_run_column_names
+    assert "service_count" in service_sync_run_column_names
+    assert "status" in service_sync_run_column_names
+    assert "service_name" in service_snapshot_column_names
+    assert "service_id" in service_snapshot_column_names
+    assert "metadata_json" in service_snapshot_column_names
 
     db.reset_engine_for_tests()

@@ -139,6 +139,17 @@ class HAClient:
                 normalized.append(item)
         return normalized
 
+    async def fetch_services(self) -> list[dict[str, Any]]:
+        response = await self._get_json("/api/services")
+        if not isinstance(response, list):
+            raise HAClientError("Unexpected response format from /api/services.")
+
+        normalized: list[dict[str, Any]] = []
+        for item in response:
+            if isinstance(item, dict):
+                normalized.append(item)
+        return normalized
+
     async def call_service(
         self,
         domain: str,

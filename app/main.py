@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic.functional_validators import BeforeValidator
+from pydantic import Field, TypeAdapter, ValidationError
 from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
@@ -64,6 +64,8 @@ from app.models import (
     EntitySuggestionRun,
     LLMConnection,
     Profile,
+    ServiceSnapshot,
+    ServiceSyncRun,
     SuggestionAuditEvent,
     SuggestionGeneration,
     SuggestionGenerationRevision,
@@ -95,11 +97,10 @@ CSRF_SESSION_KEY = "csrf_token"
 FLASH_SESSION_KEY = "flash"
 ACTIVE_PROFILE_SESSION_KEY = "active_profile_id"
 DEFAULT_PAGE_SIZE = 50
-ChangedWithinQuery = Annotated[
-    int | None,
-    BeforeValidator(lambda v: None if v == "" else v),
-    Query(ge=1, le=10080),
-]
+CHANGED_WITHIN_MAX_MINUTES = 10080
+CHANGED_WITHIN_QUERY_ADAPTER: TypeAdapter[int] = TypeAdapter(
+    Annotated[int, Field(ge=1, le=CHANGED_WITHIN_MAX_MINUTES)]
+)
 AREA_CREATE_OPTION_VALUE = "__create_new_area__"
 CONFIG_SYNC_CONCURRENCY = 8
 CONFIG_KINDS = {"automation", "script", "scene"}
@@ -217,6 +218,7 @@ class PrimaryNavLink(TypedDict):
 PRIMARY_NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("Entities", "/entities"),
     ("Config Items", "/config-items"),
+    ("Services", "/services"),
     ("Adjust Automations", "/automation-adjustments"),
     ("Automation Suggestions", "/suggestions"),
     ("Entity Suggestions", "/entity-suggestions"),
@@ -954,6 +956,22 @@ def build_query(**kwargs: Any) -> str:
     return urlencode(filtered)
 
 
+def parse_changed_within_query(
+    changed_within: str | None = Query(default=None),
+) -> int | None:
+    if changed_within in (None, ""):
+        return None
+    try:
+        return CHANGED_WITHIN_QUERY_ADAPTER.validate_python(changed_within)
+    except ValidationError as exc:
+        detail: list[dict[str, Any]] = []
+        for error in exc.errors():
+            normalized = dict(error)
+            normalized["loc"] = ["query", "changed_within"]
+            detail.append(normalized)
+        raise HTTPException(status_code=422, detail=detail) from exc
+
+
 def build_entity_stmt(
     profile_id: int,
     sync_run_id: int,
@@ -1110,6 +1128,71 @@ def build_config_candidates(
     return candidates
 
 
+def normalize_service_catalog(services_payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen_service_ids: set[str] = set()
+
+    for domain_entry in services_payload:
+        domain = as_clean_string(domain_entry.get("domain"))
+        if domain is None:
+            continue
+
+        raw_services = domain_entry.get("services")
+        if isinstance(raw_services, dict):
+            service_entries = [
+                (as_clean_string(service_name), metadata if isinstance(metadata, dict) else {})
+                for service_name, metadata in raw_services.items()
+            ]
+        elif isinstance(raw_services, list):
+            service_entries = []
+            for item in raw_services:
+                if isinstance(item, str):
+                    service_entries.append((as_clean_string(item), {}))
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                service_name = (
+                    as_clean_string(item.get("service"))
+                    or as_clean_string(item.get("service_name"))
+                    or as_clean_string(item.get("id"))
+                    or as_clean_string(item.get("action"))
+                )
+                if service_name is not None:
+                    service_entries.append((service_name, item))
+        else:
+            continue
+
+        for service_name, metadata in service_entries:
+            if service_name is None:
+                continue
+
+            service_id = f"{domain}.{service_name}"
+            if service_id in seen_service_ids:
+                continue
+            seen_service_ids.add(service_id)
+
+            fields_payload = metadata.get("fields") if isinstance(metadata, dict) else None
+            target_payload = metadata.get("target") if isinstance(metadata, dict) else None
+            normalized.append(
+                {
+                    "domain": domain,
+                    "service_name": service_name,
+                    "service_id": service_id,
+                    "name": as_clean_string(metadata.get("name")) if isinstance(metadata, dict) else None,
+                    "description": (
+                        as_clean_string(metadata.get("description"))
+                        if isinstance(metadata, dict)
+                        else None
+                    ),
+                    "fields_json": safe_json_dump(fields_payload) if fields_payload is not None else None,
+                    "target_json": safe_json_dump(target_payload) if target_payload is not None else None,
+                    "metadata_json": safe_json_dump(metadata) if metadata else None,
+                }
+            )
+
+    return normalized
+
+
 def extract_reference_values(raw_value: Any) -> list[str]:
     if isinstance(raw_value, str):
         cleaned = as_clean_string(raw_value)
@@ -1186,6 +1269,16 @@ def get_latest_config_sync_run(session: Session, profile_id: int) -> ConfigSyncR
         .where(ConfigSyncRun.profile_id == profile_id)
         .where(ConfigSyncRun.status.in_(["success", "partial"]))
         .order_by(ConfigSyncRun.pulled_at.desc(), ConfigSyncRun.id.desc())
+    )
+    return session.exec(stmt).first()
+
+
+def get_latest_service_sync_run(session: Session, profile_id: int) -> ServiceSyncRun | None:
+    stmt = (
+        select(ServiceSyncRun)
+        .where(ServiceSyncRun.profile_id == profile_id)
+        .where(ServiceSyncRun.status == "success")
+        .order_by(ServiceSyncRun.pulled_at.desc(), ServiceSyncRun.id.desc())
     )
     return session.exec(stmt).first()
 
@@ -2781,6 +2874,35 @@ def build_config_item_stmt(
 
     if status:
         stmt = stmt.where(ConfigSnapshot.fetch_status == status)
+
+    return stmt
+
+
+def build_service_stmt(
+    profile_id: int,
+    service_sync_run_id: int,
+    q: str,
+    domain: str,
+):
+    stmt = select(ServiceSnapshot).where(
+        ServiceSnapshot.profile_id == profile_id,
+        ServiceSnapshot.service_sync_run_id == service_sync_run_id,
+    )
+
+    if q:
+        pattern = f"%{q.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(ServiceSnapshot.service_id).like(pattern),
+                func.lower(ServiceSnapshot.service_name).like(pattern),
+                func.lower(func.coalesce(ServiceSnapshot.name, "")).like(pattern),
+                func.lower(func.coalesce(ServiceSnapshot.description, "")).like(pattern),
+                func.lower(func.coalesce(ServiceSnapshot.metadata_json, "")).like(pattern),
+            )
+        )
+
+    if domain:
+        stmt = stmt.where(ServiceSnapshot.domain == domain)
 
     return stmt
 
@@ -4649,6 +4771,8 @@ def create_app() -> FastAPI:
         session.exec(delete(EntitySuggestionRun).where(EntitySuggestionRun.profile_id == profile_id))
         session.exec(delete(ConfigSnapshot).where(ConfigSnapshot.profile_id == profile_id))
         session.exec(delete(ConfigSyncRun).where(ConfigSyncRun.profile_id == profile_id))
+        session.exec(delete(ServiceSnapshot).where(ServiceSnapshot.profile_id == profile_id))
+        session.exec(delete(ServiceSyncRun).where(ServiceSyncRun.profile_id == profile_id))
         session.exec(delete(EntitySnapshot).where(EntitySnapshot.profile_id == profile_id))
         session.exec(delete(SyncRun).where(SyncRun.profile_id == profile_id))
         session.delete(profile)
@@ -5461,6 +5585,139 @@ def create_app() -> FastAPI:
                 pulled_at=pulled_at.isoformat(),
             )
 
+        return RedirectResponse(url=with_profile_id(next_url, profile_id_value), status_code=303)
+
+    @app.post("/profiles/{profile_id}/sync-services")
+    async def sync_profile_services(
+        profile_id: int,
+        request: Request,
+        csrf_token: str = Form(...),
+        next_url: str = Form(default="/services"),
+        session: Session = Depends(get_session),
+    ) -> RedirectResponse:
+        verify_csrf(request, csrf_token)
+
+        profile = session.get(Profile, profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        if not require_enabled_profile(profile, request):
+            active_profile = choose_active_profile(session, request, None)
+            return RedirectResponse(
+                url=with_profile_id(next_url, active_profile.id if active_profile else None),
+                status_code=303,
+            )
+
+        token = resolve_profile_token(profile)
+        if not token:
+            set_flash(request, "error", "No token configured in profile or environment.")
+            return RedirectResponse(url=with_profile_id(next_url, profile.id), status_code=303)
+
+        client = HAClient(
+            base_url=profile.base_url,
+            token=token,
+            verify_tls=profile.verify_tls,
+            timeout_seconds=profile.timeout_seconds,
+        )
+
+        pulled_at = utcnow()
+        start = perf_counter()
+        profile_id_value = profile.id
+        if profile_id_value is None:
+            raise HTTPException(status_code=500, detail="Profile ID is unavailable")
+
+        log_event(
+            "service_sync_started",
+            request_id=getattr(request.state, "request_id", None),
+            profile_id=profile_id_value,
+            profile_name=profile.name,
+            pulled_at=pulled_at.isoformat(),
+        )
+
+        try:
+            services_payload = await client.fetch_services()
+        except HAClientError as exc:
+            failed_run = ServiceSyncRun(
+                profile_id=profile_id_value,
+                pulled_at=pulled_at,
+                domain_count=0,
+                service_count=0,
+                duration_ms=int((perf_counter() - start) * 1000),
+                status="failed",
+                error=str(exc),
+            )
+            session.add(failed_run)
+            session.commit()
+
+            set_flash(request, "error", f"Service sync failed: {exc}")
+            log_event(
+                "service_sync_failed",
+                request_id=getattr(request.state, "request_id", None),
+                profile_id=profile_id_value,
+                profile_name=profile.name,
+                error=str(exc),
+            )
+            return RedirectResponse(
+                url=with_profile_id(next_url, profile_id_value),
+                status_code=303,
+            )
+
+        normalized_services = normalize_service_catalog(services_payload)
+        domain_count = len({item["domain"] for item in normalized_services})
+        service_sync_run = ServiceSyncRun(
+            profile_id=profile_id_value,
+            pulled_at=pulled_at,
+            domain_count=domain_count,
+            service_count=len(normalized_services),
+            duration_ms=0,
+            status="success",
+            error=None,
+        )
+        session.add(service_sync_run)
+        session.commit()
+        session.refresh(service_sync_run)
+
+        service_sync_run_id = service_sync_run.id
+        if service_sync_run_id is None:
+            raise HTTPException(status_code=500, detail="Service sync run ID is unavailable")
+
+        snapshots = [
+            ServiceSnapshot(
+                profile_id=profile_id_value,
+                service_sync_run_id=service_sync_run_id,
+                domain=item["domain"],
+                service_name=item["service_name"],
+                service_id=item["service_id"],
+                name=item["name"],
+                description=item["description"],
+                fields_json=item["fields_json"],
+                target_json=item["target_json"],
+                metadata_json=item["metadata_json"],
+                pulled_at=pulled_at,
+            )
+            for item in normalized_services
+        ]
+
+        service_sync_run.duration_ms = int((perf_counter() - start) * 1000)
+        session.add_all(snapshots)
+        session.add(service_sync_run)
+        session.commit()
+
+        set_flash(
+            request,
+            "success",
+            f"Service sync complete. Stored {service_sync_run.service_count} services.",
+        )
+        log_event(
+            "service_sync_completed",
+            request_id=getattr(request.state, "request_id", None),
+            profile_id=profile_id_value,
+            profile_name=profile.name,
+            service_sync_run_id=service_sync_run_id,
+            domain_count=service_sync_run.domain_count,
+            service_count=service_sync_run.service_count,
+            duration_ms=service_sync_run.duration_ms,
+            pulled_at=pulled_at.isoformat(),
+        )
         return RedirectResponse(url=with_profile_id(next_url, profile_id_value), status_code=303)
 
     @app.get("/automation-adjustments", response_class=HTMLResponse)
@@ -8351,7 +8608,7 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         domain: str = Query(default=""),
         state_value: str = Query(default="", alias="state"),
-        changed_within: ChangedWithinQuery = None,
+        changed_within: int | None = Depends(parse_changed_within_query),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
         session: Session = Depends(get_session),
@@ -8700,6 +8957,161 @@ def create_app() -> FastAPI:
                     "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
                     "back_url": f"/config-items?{back_query}",
                     "active_llm_connection": get_default_llm_connection(session, active_profile.id),
+                },
+                active_profile,
+            ),
+        )
+
+    @app.get("/services", response_class=HTMLResponse)
+    async def list_services(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        service_sync_run_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        domain: str = Query(default=""),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        normalized_domain = domain.strip()
+
+        active_profile = choose_active_profile(session, request, profile_id)
+        profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
+
+        service_runs: list[ServiceSyncRun] = []
+        active_service_sync_run: ServiceSyncRun | None = None
+        if active_profile is not None:
+            service_runs = list(
+                session.exec(
+                    select(ServiceSyncRun)
+                    .where(ServiceSyncRun.profile_id == active_profile.id)
+                    .order_by(ServiceSyncRun.pulled_at.desc(), ServiceSyncRun.id.desc())
+                ).all()
+            )
+            if service_sync_run_id is not None:
+                candidate = session.get(ServiceSyncRun, service_sync_run_id)
+                if candidate is not None and candidate.profile_id == active_profile.id:
+                    active_service_sync_run = candidate
+            if active_service_sync_run is None:
+                active_service_sync_run = get_latest_service_sync_run(session, active_profile.id)
+
+        services: list[ServiceSnapshot] = []
+        total = 0
+        total_pages = 1
+        domains: list[str] = []
+
+        if active_profile is not None and active_service_sync_run is not None:
+            filtered_stmt = build_service_stmt(
+                profile_id=active_profile.id,
+                service_sync_run_id=active_service_sync_run.id,
+                q=q,
+                domain=normalized_domain,
+            )
+            total = int(
+                session.exec(select(func.count()).select_from(filtered_stmt.subquery())).one()
+            )
+
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, total_pages)
+            offset = (page - 1) * page_size
+            services = session.exec(
+                filtered_stmt.order_by(ServiceSnapshot.domain, ServiceSnapshot.service_name)
+                .offset(offset)
+                .limit(page_size)
+            ).all()
+
+            domains = list(
+                session.exec(
+                    select(ServiceSnapshot.domain)
+                    .where(
+                        ServiceSnapshot.profile_id == active_profile.id,
+                        ServiceSnapshot.service_sync_run_id == active_service_sync_run.id,
+                    )
+                    .distinct()
+                    .order_by(ServiceSnapshot.domain)
+                ).all()
+            )
+
+        next_url_query = build_query(
+            profile_id=active_profile.id if active_profile else None,
+            service_sync_run_id=active_service_sync_run.id if active_service_sync_run else None,
+            q=q,
+            domain=normalized_domain,
+            page=page,
+            page_size=page_size,
+        )
+        next_url = f"/services?{next_url_query}" if next_url_query else "/services"
+
+        return render_template(
+            request,
+            "services.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "active_profile": active_profile,
+                    "service_runs": service_runs,
+                    "active_service_sync_run": active_service_sync_run,
+                    "services": services,
+                    "domains": domains,
+                    "q": q,
+                    "domain": normalized_domain,
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": total_pages,
+                    "next_url": next_url,
+                    "profile_count": profile_count,
+                },
+                active_profile,
+            ),
+        )
+
+    @app.get("/services/{snapshot_id}", response_class=HTMLResponse)
+    async def service_detail(
+        snapshot_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        service_sync_run_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No enabled profiles found")
+
+        snapshot = session.get(ServiceSnapshot, snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Service not found")
+        if snapshot.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Service not found in requested profile")
+
+        if service_sync_run_id is not None and snapshot.service_sync_run_id != service_sync_run_id:
+            raise HTTPException(status_code=404, detail="Service not found in requested sync run")
+
+        profile = session.get(Profile, snapshot.profile_id)
+        sync_run = session.get(ServiceSyncRun, snapshot.service_sync_run_id)
+        if profile is None or sync_run is None or not profile.is_enabled:
+            raise HTTPException(status_code=404, detail="Related profile or sync run not found")
+
+        back_query = build_query(
+            profile_id=snapshot.profile_id,
+            service_sync_run_id=snapshot.service_sync_run_id,
+        )
+
+        return render_template(
+            request,
+            "service_detail.html",
+            with_navigation(
+                request,
+                session,
+                {
+                    "profile": profile,
+                    "sync_run": sync_run,
+                    "snapshot": snapshot,
+                    "fields_pretty": safe_pretty_json(snapshot.fields_json),
+                    "target_pretty": safe_pretty_json(snapshot.target_json),
+                    "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
+                    "back_url": f"/services?{back_query}",
                 },
                 active_profile,
             ),
@@ -10311,6 +10723,123 @@ def create_app() -> FastAPI:
         set_flash(request, "success", f"Rejected draft for {draft.entity_id}.")
         return RedirectResponse(url=with_profile_id(next_url, draft.profile_id), status_code=303)
 
+    @app.get("/api/services")
+    async def api_services(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        service_sync_run_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        domain: str = Query(default=""),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
+        session: Session = Depends(get_session),
+    ) -> JSONResponse:
+        normalized_domain = domain.strip()
+
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No profile found")
+
+        active_run: ServiceSyncRun | None = None
+        if service_sync_run_id is not None:
+            candidate_run = session.get(ServiceSyncRun, service_sync_run_id)
+            if candidate_run is not None and candidate_run.profile_id == active_profile.id:
+                active_run = candidate_run
+        if active_run is None:
+            active_run = get_latest_service_sync_run(session, active_profile.id)
+        if active_run is None:
+            return JSONResponse(
+                {
+                    "profile_id": active_profile.id,
+                    "profile_name": active_profile.name,
+                    "service_sync_run": None,
+                    "items": [],
+                    "total": 0,
+                }
+            )
+
+        filtered_stmt = build_service_stmt(
+            profile_id=active_profile.id,
+            service_sync_run_id=active_run.id,
+            q=q,
+            domain=normalized_domain,
+        )
+        total = int(session.exec(select(func.count()).select_from(filtered_stmt.subquery())).one())
+        offset = (page - 1) * page_size
+        rows = list(
+            session.exec(
+                filtered_stmt.order_by(ServiceSnapshot.domain, ServiceSnapshot.service_name)
+                .offset(offset)
+                .limit(page_size)
+            ).all()
+        )
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            items.append(
+                {
+                    "id": row.id,
+                    "domain": row.domain,
+                    "service_name": row.service_name,
+                    "service_id": row.service_id,
+                    "name": row.name,
+                    "description": row.description,
+                    "pulled_at": row.pulled_at.isoformat(),
+                }
+            )
+
+        return JSONResponse(
+            {
+                "profile_id": active_profile.id,
+                "profile_name": active_profile.name,
+                "service_sync_run": {
+                    "id": active_run.id,
+                    "status": active_run.status,
+                    "domain_count": active_run.domain_count,
+                    "service_count": active_run.service_count,
+                    "duration_ms": active_run.duration_ms,
+                    "error": active_run.error,
+                    "pulled_at": active_run.pulled_at.isoformat(),
+                },
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "items": items,
+            }
+        )
+
+    @app.get("/api/services/{snapshot_id}")
+    async def api_service_detail(
+        snapshot_id: int,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> JSONResponse:
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No profile found")
+
+        snapshot = session.get(ServiceSnapshot, snapshot_id)
+        if snapshot is None or snapshot.profile_id != active_profile.id:
+            raise HTTPException(status_code=404, detail="Service not found")
+
+        return JSONResponse(
+            {
+                "id": snapshot.id,
+                "profile_id": snapshot.profile_id,
+                "service_sync_run_id": snapshot.service_sync_run_id,
+                "domain": snapshot.domain,
+                "service_name": snapshot.service_name,
+                "service_id": snapshot.service_id,
+                "name": snapshot.name,
+                "description": snapshot.description,
+                "fields": safe_json_load(snapshot.fields_json, {}),
+                "target": safe_json_load(snapshot.target_json, {}),
+                "metadata": safe_json_load(snapshot.metadata_json, {}),
+                "pulled_at": snapshot.pulled_at.isoformat(),
+            }
+        )
+
     @app.get("/api/entity-suggestions")
     async def api_entity_suggestions(
         request: Request,
@@ -10604,7 +11133,7 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         domain: str = Query(default=""),
         state_value: str = Query(default="", alias="state"),
-        changed_within: ChangedWithinQuery = None,
+        changed_within: int | None = Depends(parse_changed_within_query),
         session: Session = Depends(get_session),
     ) -> Response:
         active_profile = choose_active_profile(session, request, profile_id)
@@ -10676,7 +11205,7 @@ def create_app() -> FastAPI:
         q: str = Query(default=""),
         domain: str = Query(default=""),
         state_value: str = Query(default="", alias="state"),
-        changed_within: ChangedWithinQuery = None,
+        changed_within: int | None = Depends(parse_changed_within_query),
         session: Session = Depends(get_session),
     ) -> Response:
         active_profile = choose_active_profile(session, request, profile_id)

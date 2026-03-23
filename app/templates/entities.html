@@ -97,6 +97,21 @@
       </form>
       <form
         method="post"
+        action="/profiles/{{ active_profile.id }}/sync-services"
+        data-sync-modal="true"
+        data-sync-modal-label="Syncing services..."
+      >
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/services?{{ build_query(profile_id=active_profile.id) }}" />
+        <button
+          type="submit"
+          data-tooltip="Pull the latest Home Assistant service catalog for this profile."
+        >
+          Sync Services
+        </button>
+      </form>
+      <form
+        method="post"
         action="/profiles/{{ active_profile.id }}/run-entity-suggestions"
         data-sync-modal="true"
         data-sync-modal-label="Running entity suggestions..."
@@ -111,6 +126,7 @@
         </button>
       </form>
       <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id) }}">View Config Items</a>
+      <a class="button" href="/services?{{ build_query(profile_id=active_profile.id) }}">View Services</a>
       <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}">View Suggestions</a>
 
       {% if active_sync_run %}

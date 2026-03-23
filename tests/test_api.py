@@ -25,6 +25,8 @@ from app.models import (
     EntitySuggestion,
     LLMConnection,
     Profile,
+    ServiceSnapshot,
+    ServiceSyncRun,
     SuggestionProposal,
     SuggestionRun,
     utcnow,
@@ -554,6 +556,7 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     assert 'action="/profiles/select"' in settings_html
     assert_form_absent(settings_html, r"/profiles/\d+/sync")
     assert_form_absent(settings_html, r"/profiles/\d+/sync-config")
+    assert_form_absent(settings_html, r"/profiles/\d+/sync-services")
 
     csrf_token = extract_csrf(settings_html)
     profile_id = create_profile(client, csrf_token, name="home")
@@ -573,6 +576,12 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
         r"/profiles/\d+/sync-config",
         "Syncing config items...",
     )
+    assert_form_has_sync_modal_attrs(
+        entities_html,
+        r"/profiles/\d+/sync-services",
+        "Syncing services...",
+    )
+    assert f"/services?profile_id={profile_id}" in entities_html
 
     config_items_response = client.get("/config-items")
     assert config_items_response.status_code == 200
@@ -584,7 +593,25 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
         r"/profiles/\d+/sync-config",
         "Syncing config items...",
     )
+    assert_form_has_sync_modal_attrs(
+        config_items_html,
+        r"/profiles/\d+/sync-services",
+        "Syncing services...",
+    )
     assert f"/profiles/{profile_id}/sync-config" in config_items_html
+    assert f"/profiles/{profile_id}/sync-services" in config_items_html
+
+    services_response = client.get("/services")
+    assert services_response.status_code == 200
+    services_html = services_response.text
+    assert_sync_modal_markup(services_html)
+    assert 'action="/profiles/select"' in services_html
+    assert_form_has_sync_modal_attrs(
+        services_html,
+        r"/profiles/\d+/sync-services",
+        "Syncing services...",
+    )
+    assert f"/profiles/{profile_id}/sync-services" in services_html
 
 
 @pytest.mark.parametrize(
@@ -592,6 +619,7 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     [
         ("/entities", "/entities", "Entities"),
         ("/config-items", "/config-items", "Config Items"),
+        ("/services", "/services", "Services"),
         ("/automation-adjustments", "/automation-adjustments", "Adjust Automations"),
         ("/suggestions", "/suggestions", "Automation Suggestions"),
         ("/entity-suggestions", "/entity-suggestions", "Entity Suggestions"),
@@ -1029,6 +1057,13 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert "Kitchen" in entities_response.text
     assert "Kitchen (First Floor)" in entities_response.text
 
+    blank_changed_within_entities_response = client.get(
+        f"/entities?profile_id={profile_id}&changed_within="
+    )
+    assert blank_changed_within_entities_response.status_code == 200
+    assert "light.kitchen" in blank_changed_within_entities_response.text
+    assert "sensor.outdoor_temp" in blank_changed_within_entities_response.text
+
     detail_response = client.get(f"/entities/light.kitchen?profile_id={profile_id}")
     assert detail_response.status_code == 200
     assert "Kitchen Light" in detail_response.text
@@ -1049,12 +1084,29 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert exported[0]["labels"]["names"] == ["Lighting", "Room - Kitchen"]
     assert exported[0]["metadata"]["entity_platform"] == "hue"
 
+    blank_changed_within_export_json_response = client.get(
+        f"/export/json?profile_id={profile_id}&changed_within="
+    )
+    assert blank_changed_within_export_json_response.status_code == 200
+    blank_changed_within_exported = json.loads(blank_changed_within_export_json_response.text)
+    assert [item["entity_id"] for item in blank_changed_within_exported] == [
+        "light.kitchen",
+        "sensor.outdoor_temp",
+    ]
+
     export_csv_response = client.get(f"/export/csv?profile_id={profile_id}&domain=light")
     assert export_csv_response.status_code == 200
     assert "text/csv" in export_csv_response.headers["content-type"]
     assert "light.kitchen" in export_csv_response.text
     assert "area_name" in export_csv_response.text
     assert "labels_json" in export_csv_response.text
+
+    blank_changed_within_export_csv_response = client.get(
+        f"/export/csv?profile_id={profile_id}&changed_within="
+    )
+    assert blank_changed_within_export_csv_response.status_code == 200
+    assert "light.kitchen" in blank_changed_within_export_csv_response.text
+    assert "sensor.outdoor_temp" in blank_changed_within_export_csv_response.text
 
 
 def test_sync_config_items_list_and_detail_flow(
@@ -1325,6 +1377,190 @@ def test_sync_config_items_missing_locator(client: TestClient, monkeypatch: pyte
     assert "missing_config_locator" in detail_response.text
 
 
+def test_sync_services_list_and_detail_flow(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = create_profile(client, csrf_token, name="default")
+
+    async def fake_fetch_services(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "domain": "light",
+                "services": {
+                    "turn_on": {
+                        "name": "Turn On",
+                        "description": "Switch on lights",
+                        "fields": {
+                            "entity_id": {
+                                "selector": {"entity": {"domain": ["light"]}},
+                                "required": False,
+                            }
+                        },
+                        "target": {"entity": {"domain": ["light"]}},
+                    },
+                    "toggle": {"name": "Toggle"},
+                },
+            },
+            {"domain": "notify", "services": ["notify"]},
+            {
+                "domain": "script",
+                "services": [
+                    "",
+                    {
+                        "service": "run",
+                        "name": "Run Script",
+                        "description": "Execute a script",
+                    },
+                ],
+            },
+            {"domain": "", "services": {"invalid": {"name": "Ignored"}}},
+            {"services": {"missing_domain": {"name": "Ignored"}}},
+            {"domain": "light", "services": {"turn_on": {"name": "Duplicate ignored"}}},
+        ]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_services", fake_fetch_services)
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync-services",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/services?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        run = session.exec(
+            select(ServiceSyncRun)
+            .where(ServiceSyncRun.profile_id == profile_id)
+            .order_by(ServiceSyncRun.id.desc())
+        ).first()
+        assert run is not None
+        assert run.id is not None
+        assert run.status == "success"
+        assert run.domain_count == 3
+        assert run.service_count == 4
+
+        service_ids = list(
+            session.exec(
+                select(ServiceSnapshot.service_id)
+                .where(ServiceSnapshot.profile_id == profile_id)
+                .order_by(ServiceSnapshot.service_id)
+            ).all()
+        )
+        assert service_ids == [
+            "light.toggle",
+            "light.turn_on",
+            "notify.notify",
+            "script.run",
+        ]
+
+        detail_snapshot = session.exec(
+            select(ServiceSnapshot).where(
+                ServiceSnapshot.profile_id == profile_id,
+                ServiceSnapshot.service_id == "light.turn_on",
+            )
+        ).first()
+        assert detail_snapshot is not None
+        assert detail_snapshot.id is not None
+        snapshot_id = detail_snapshot.id
+
+    items_response = client.get(f"/services?profile_id={profile_id}")
+    assert items_response.status_code == 200
+    assert "light.turn_on" in items_response.text
+    assert "notify.notify" in items_response.text
+    assert "Run Script" in items_response.text
+    assert "Duplicate ignored" not in items_response.text
+
+    notify_only_response = client.get(f"/services?profile_id={profile_id}&domain=notify")
+    assert notify_only_response.status_code == 200
+    assert "notify.notify" in notify_only_response.text
+    assert "light.turn_on" not in notify_only_response.text
+
+    detail_response = client.get(f"/services/{snapshot_id}?profile_id={profile_id}")
+    assert detail_response.status_code == 200
+    assert "Turn On" in detail_response.text
+    assert "Switch on lights" in detail_response.text
+    assert "entity_id" in detail_response.text
+    assert_primary_nav_active_link(detail_response.text, active_href="/services", active_label="Services")
+    assert_docs_link_in_footer_not_primary_nav(detail_response.text)
+
+
+def test_api_services_list_and_detail(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = create_profile(client, csrf_token, name="default")
+
+    async def fake_fetch_services(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "domain": "light",
+                "services": {
+                    "turn_on": {
+                        "name": "Turn On",
+                        "description": "Switch on lights",
+                        "fields": {"entity_id": {"required": False}},
+                        "target": {"entity": {"domain": ["light"]}},
+                    },
+                    "turn_off": {"name": "Turn Off"},
+                },
+            },
+            {"domain": "notify", "services": ["notify"]},
+        ]
+
+    monkeypatch.setattr("app.main.HAClient.fetch_services", fake_fetch_services)
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync-services",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/services?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        snapshot = session.exec(
+            select(ServiceSnapshot).where(
+                ServiceSnapshot.profile_id == profile_id,
+                ServiceSnapshot.service_id == "light.turn_on",
+            )
+        ).first()
+        assert snapshot is not None
+        assert snapshot.id is not None
+        snapshot_id = snapshot.id
+
+    list_response = client.get(f"/api/services?profile_id={profile_id}&q=turn&domain=light")
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert payload["profile_id"] == profile_id
+    assert payload["service_sync_run"]["status"] == "success"
+    assert payload["service_sync_run"]["domain_count"] == 2
+    assert payload["service_sync_run"]["service_count"] == 3
+    assert [item["service_id"] for item in payload["items"]] == [
+        "light.turn_off",
+        "light.turn_on",
+    ]
+
+    detail_response = client.get(f"/api/services/{snapshot_id}?profile_id={profile_id}")
+    assert detail_response.status_code == 200
+    detail_payload = detail_response.json()
+    assert detail_payload["service_id"] == "light.turn_on"
+    assert detail_payload["name"] == "Turn On"
+    assert detail_payload["description"] == "Switch on lights"
+    assert detail_payload["fields"]["entity_id"]["required"] is False
+    assert detail_payload["target"]["entity"]["domain"] == ["light"]
+    assert detail_payload["metadata"]["description"] == "Switch on lights"
+
+
 def test_empty_state_without_profiles(client: TestClient) -> None:
     settings_response = client.get("/settings")
     assert settings_response.status_code == 200
@@ -1340,6 +1576,11 @@ def test_empty_state_without_profiles(client: TestClient) -> None:
     assert config_items_response.status_code == 200
     assert "No profiles are configured yet." in config_items_response.text
     assert "token setup" in config_items_response.text
+
+    services_response = client.get("/services")
+    assert services_response.status_code == 200
+    assert "No profiles are configured yet." in services_response.text
+    assert "token setup" in services_response.text
 
 
 def test_profile_switcher_session_and_query_precedence(client: TestClient) -> None:

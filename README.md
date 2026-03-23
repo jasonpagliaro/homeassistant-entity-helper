@@ -1,6 +1,6 @@
 # HA Entity Vault
 
-HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entities on demand, browsing/filtering them, and exporting filtered views as JSON/CSV.
+HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entities and services on demand, browsing/filtering them, and exporting filtered entity views as JSON/CSV.
 
 - Stack: Python 3.12, FastAPI, SQLModel + SQLite, Jinja2, httpx, Alembic.
 - Build/task runner: npm (Node 20+).
@@ -87,8 +87,9 @@ Postgres overlay data persists in the named Docker volume `hev_pg_data`.
 1. Open `/settings`, add a profile (name, base URL, token), and save.
 2. Click `Test Connection` for that profile.
 3. Open `/entities`, then click `Sync Now`.
-4. Apply filters/search, inspect entity details, and export via JSON/CSV.
-5. Optional: run `Run Suggestions Check` and automation suggestions workflows.
+4. Optional: open `/services`, then click `Sync Services` to pull the Home Assistant service catalog.
+5. Apply filters/search, inspect details, and export entity views via JSON/CSV.
+6. Optional: run `Run Suggestions Check` and automation suggestions workflows.
 
 ## Release Notes
 See [CHANGELOG.md](CHANGELOG.md) for current and historical release notes.
@@ -103,6 +104,7 @@ See [CHANGELOG.md](CHANGELOG.md) for current and historical release notes.
   - Request timeout seconds
 - Test connection (`GET /api/config`) with actionable status.
 - Sync now (`GET /api/states`) and store entity snapshots.
+- Sync services (`GET /api/services`) and store service catalog snapshots.
 - Registry enrichment during sync (best effort):
   - entity registry
   - device registry
@@ -114,6 +116,7 @@ See [CHANGELOG.md](CHANGELOG.md) for current and historical release notes.
   - Filters (domain/state/changed recently)
   - Server-side pagination
 - Entity detail page with enriched metadata plus prettified attributes/context JSON.
+- Service catalog page with search/filter/pagination plus raw service metadata detail view.
 - Export filtered results as JSON or CSV (includes `pulled_at` and profile context).
 - Health endpoint: `GET /healthz`.
 - Structured JSON logs with request IDs and sync timing/count fields.
@@ -124,8 +127,10 @@ MVP uses immutable snapshot runs:
 1. `profiles`
 2. `sync_runs`
 3. `entity_snapshots`
+4. `service_sync_runs`
+5. `service_snapshots`
 
-Each sync creates one `sync_runs` row and N `entity_snapshots` rows linked by `sync_run_id`, preserving point-in-time views for future diffing/history features.
+Each sync creates immutable run rows and linked snapshots, preserving point-in-time entity and service views for future diffing/history features.
 
 ## Build and Quality Commands
 ```bash
@@ -195,6 +200,7 @@ Template files for local and Docker runs:
 ## HA API Integration (MVP)
 - `GET /api/config` for connection test/version discovery.
 - `GET /api/states` for on-demand full entity pull.
+- `GET /api/services` for on-demand service catalog pulls.
 - `WS /api/websocket` for registry enrichment (`entity/device/area/label/floor` lists).
 - Auth: `Authorization: Bearer <token>`.
 - Base URLs are normalized to avoid trailing slash issues.

@@ -53,6 +53,81 @@ async def test_fetch_states_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_services_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/services"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "domain": "light",
+                    "services": {
+                        "turn_on": {
+                            "name": "Turn On",
+                            "description": "Switch on a light",
+                        }
+                    },
+                },
+                "invalid-entry",
+            ],
+        )
+
+    client = HAClient(
+        base_url="http://example.local",
+        token="abc123",
+        transport=httpx.MockTransport(handler),
+    )
+
+    services = await client.fetch_services()
+    assert services == [
+        {
+            "domain": "light",
+            "services": {
+                "turn_on": {
+                    "name": "Turn On",
+                    "description": "Switch on a light",
+                }
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_services_rejects_non_list_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/services"
+        return httpx.Response(200, json={"domain": "light"})
+
+    client = HAClient(
+        base_url="http://example.local",
+        token="abc123",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(HAClientError) as exc_info:
+        await client.fetch_services()
+
+    assert "Unexpected response format from /api/services." in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_services_request_error_is_actionable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    client = HAClient(
+        base_url="http://example.local",
+        token="abc123",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(HAClientError) as exc_info:
+        await client.fetch_services()
+
+    assert "Unable to reach Home Assistant" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_fetch_config_rest_endpoints_success() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/config/automation/config/evening_mode":

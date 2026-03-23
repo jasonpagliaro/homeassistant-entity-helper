@@ -25,6 +25,8 @@ This page documents stable/public routes for HA Entity Vault.
 | `GET` | `/entities/{entity_id}` | Entity detail page. |
 | `GET` | `/config-items` | Configuration item list page. |
 | `GET` | `/config-items/{snapshot_id}` | Configuration item detail page. |
+| `GET` | `/services` | Service catalog list page. |
+| `GET` | `/services/{snapshot_id}` | Service catalog detail page. |
 | `GET` | `/entity-suggestions` | Entity readiness suggestions page. |
 | `GET` | `/entity-suggestions/{suggestion_id}` | Entity suggestion detail page. |
 | `GET` | `/entity-suggestions/workflow` | Missing-details workflow queue page. |
@@ -39,6 +41,8 @@ This page documents stable/public routes for HA Entity Vault.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET` | `/api/services` | Service catalog API list with filter/pagination. |
+| `GET` | `/api/services/{snapshot_id}` | Service catalog API detail. |
 | `GET` | `/api/entity-suggestions` | Entity suggestions API list with filter/pagination. |
 | `GET` | `/api/entity-suggestions/{suggestion_id}` | Entity suggestion API detail. |
 | `GET` | `/api/suggestions/runs/{run_id}` | Automation suggestion run status API. |

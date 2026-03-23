@@ -174,6 +174,49 @@ class ConfigSnapshot(SQLModel, table=True):
     )
 
 
+class ServiceSyncRun(SQLModel, table=True):
+    __tablename__ = "service_sync_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    pulled_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    domain_count: int = Field(default=0, ge=0)
+    service_count: int = Field(default=0, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    status: str = Field(default="success", max_length=32, index=True)
+    error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+
+
+class ServiceSnapshot(SQLModel, table=True):
+    __tablename__ = "service_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "service_sync_run_id",
+            "service_id",
+            name="uq_service_snapshots_run_service_id",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    profile_id: int = Field(foreign_key="profiles.id", index=True)
+    service_sync_run_id: int = Field(foreign_key="service_sync_runs.id", index=True)
+    domain: str = Field(index=True, max_length=128)
+    service_name: str = Field(index=True, max_length=128)
+    service_id: str = Field(index=True, max_length=255)
+    name: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    fields_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    target_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    metadata_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    pulled_at: datetime = Field(
+        default_factory=utcnow,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class EntitySuggestionRun(SQLModel, table=True):
     __tablename__ = "entity_suggestion_runs"
 

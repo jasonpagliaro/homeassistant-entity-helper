@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h2>Service Detail</h2>
+  <div class="row gap-sm wrap">
+    <a class="button" href="{{ back_url }}">Back to services</a>
+    <a class="button" href="/entities?{{ build_query(profile_id=profile.id) }}">View Entities</a>
+    <a class="button" href="/config-items?{{ build_query(profile_id=profile.id) }}">View Config Items</a>
+  </div>
+
+  <div class="detail-grid">
+    <div><strong>Profile</strong></div><div>{{ profile.name }}</div>
+    <div><strong>Sync Run</strong></div><div>#{{ sync_run.id }} ({{ sync_run.status }})</div>
+    <div><strong>Domain</strong></div><div>{{ snapshot.domain }}</div>
+    <div><strong>Service Name</strong></div><div>{{ snapshot.service_name }}</div>
+    <div><strong>Service ID</strong></div><div><code>{{ snapshot.service_id }}</code></div>
+    <div><strong>Display Name</strong></div><div>{{ snapshot.name or '' }}</div>
+    <div><strong>Description</strong></div><div>{{ snapshot.description or '' }}</div>
+    <div><strong>Pulled At</strong></div><div>{{ snapshot.pulled_at }}</div>
+  </div>
+
+  <h3>Fields</h3>
+  <pre>{{ fields_pretty }}</pre>
+
+  <h3>Target</h3>
+  <pre>{{ target_pretty }}</pre>
+
+  <h3>Raw Metadata</h3>
+  <pre>{{ metadata_pretty }}</pre>
+</section>
+{% endblock %}
