@@ -130,8 +130,10 @@
         {% endfor %}
       </select>
     </label>
-    <button type="submit">Apply</button>
-    <a class="button" href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    <div class="grid-form-actions">
+      <button type="submit">Apply</button>
+      <a class="button" href="/suggestions/{{ run.id }}?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
   </form>
 
   {% if enriched_proposals %}
@@ -251,7 +253,9 @@
                   {% endfor %}
                 </select>
               </label>
-              <button type="submit">Update Stage</button>
+              <div class="grid-form-actions">
+                <button type="submit">Update Stage</button>
+              </div>
             </form>
           </section>
 
@@ -271,7 +275,9 @@
                 Optional Instruction
                 <input type="text" name="optional_instruction" placeholder="Optional guidance for the LLM" />
               </label>
-              <button type="submit" data-tooltip="Generate YAML from this concept.">Generate YAML</button>
+              <div class="grid-form-actions">
+                <button type="submit" data-tooltip="Generate YAML from this concept.">Generate YAML</button>
+              </div>
             </form>
           </section>
         </div>

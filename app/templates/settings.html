@@ -54,7 +54,9 @@
               <input type="checkbox" name="clear_token" />
               Clear stored token
             </label>
-            <button type="submit">Save Profile</button>
+            <div class="grid-form-actions">
+              <button type="submit">Save Profile</button>
+            </div>
           </form>
 
           <div class="row gap-sm wrap">
@@ -216,7 +218,9 @@
                 <input type="checkbox" name="is_default" />
                 Default for Suggestions
               </label>
-              <button type="submit">Add LLM Connection</button>
+              <div class="grid-form-actions">
+                <button type="submit">Add LLM Connection</button>
+              </div>
             </form>
 
             {% if profile_connections %}
@@ -336,7 +340,9 @@
                       <input type="checkbox" name="is_default" {% if connection.is_default %}checked{% endif %} />
                       Default for Suggestions
                     </label>
-                    <button type="submit">Save Connection</button>
+                    <div class="grid-form-actions">
+                      <button type="submit">Save Connection</button>
+                    </div>
                   </form>
                   <div class="row gap-sm wrap">
                     <form method="post" action="/llm-connections/{{ connection.id }}/test">
@@ -405,7 +411,9 @@
               <input type="checkbox" name="clear_token" />
               Clear stored token
             </label>
-            <button type="submit">Save Profile</button>
+            <div class="grid-form-actions">
+              <button type="submit">Save Profile</button>
+            </div>
           </form>
 
           <div class="row gap-sm wrap">
@@ -487,7 +495,9 @@
         <input type="checkbox" name="verify_tls" checked />
         Verify TLS Certificate
       </label>
-      <button type="submit">Create Profile</button>
+      <div class="grid-form-actions">
+        <button type="submit">Create Profile</button>
+      </div>
     </form>
   </div>
 </div>

@@ -62,12 +62,14 @@
         Include brand-new automation ideas
       </label>
 
-      <button
-        type="submit"
-        data-tooltip="Generate ranked concept suggestions without YAML."
-      >
-        Generate Concept Suggestions
-      </button>
+      <div class="grid-form-actions">
+        <button
+          type="submit"
+          data-tooltip="Generate ranked concept suggestions without YAML."
+        >
+          Generate Concept Suggestions
+        </button>
+      </div>
     </form>
     <p><a class="button" href="/suggestions/queue?{{ build_query(profile_id=active_profile.id) }}">Open Concept Queue</a></p>
   {% elif active_profile %}
@@ -88,8 +90,10 @@
         <option value="failed" {% if status == "failed" %}selected{% endif %}>failed</option>
       </select>
     </label>
-    <button type="submit">Apply</button>
-    <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    <div class="grid-form-actions">
+      <button type="submit">Apply</button>
+      <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id if active_profile else None) }}">Reset</a>
+    </div>
   </form>
 
   <div class="flash flash-warning" data-refresh-banner role="status" aria-live="polite" hidden>
