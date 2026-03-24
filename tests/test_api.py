@@ -612,6 +612,22 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     assert f"/profiles/{profile_id}/sync-services" in services_html
 
 
+def test_favicon_links_and_fallback_route(client: TestClient) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+    html = response.text
+    assert 'rel="icon"' in html
+    assert 'type="image/svg+xml"' in html
+    assert 'href="/static/favicon.svg"' in html
+    assert 'rel="alternate icon"' in html
+    assert 'href="/favicon.ico"' in html
+
+    favicon_response = client.get("/favicon.ico")
+    assert favicon_response.status_code == 200
+    assert "image" in favicon_response.headers["content-type"]
+    assert favicon_response.content
+
+
 @pytest.mark.parametrize(
     ("path", "active_href", "active_label"),
     [

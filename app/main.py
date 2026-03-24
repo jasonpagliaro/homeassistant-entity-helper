@@ -23,7 +23,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 import httpx
 import yaml  # type: ignore[import-untyped]
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import Field, TypeAdapter, ValidationError
@@ -4404,6 +4404,9 @@ async def lifespan(_: FastAPI):
 def create_app() -> FastAPI:
     clear_workflow_registry_cache()
     app = FastAPI(title=app_name(), lifespan=lifespan)
+    app_dir = Path(__file__).resolve().parent
+    templates_dir = app_dir / "templates"
+    static_dir = app_dir / "static"
 
     app.add_middleware(
         SessionMiddleware,
@@ -4412,13 +4415,13 @@ def create_app() -> FastAPI:
         https_only=env_bool("SESSION_HTTPS_ONLY", default=False),
     )
 
-    templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+    templates = Jinja2Templates(directory=str(templates_dir))
     templates.env.globals["build_query"] = build_query
     templates.env.filters["utc_iso"] = format_utc_datetime
 
     app.mount(
         "/static",
-        StaticFiles(directory=str(Path(__file__).resolve().parent / "static")),
+        StaticFiles(directory=str(static_dir)),
         name="static",
     )
 
@@ -4484,6 +4487,10 @@ def create_app() -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        return FileResponse(static_dir / "favicon.ico", media_type="image/x-icon")
 
     @app.get("/version")
     async def version() -> JSONResponse:
