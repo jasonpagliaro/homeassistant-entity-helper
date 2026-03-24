@@ -44,6 +44,12 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
             text("PRAGMA table_info(service_snapshots)")
         ).fetchall()
         service_snapshot_column_names = {str(row[1]) for row in service_snapshot_columns}
+        sync_run_columns = connection.execute(text("PRAGMA table_info(sync_runs)")).fetchall()
+        sync_run_column_names = {str(row[1]) for row in sync_run_columns}
+        entity_snapshot_columns = connection.execute(
+            text("PRAGMA table_info(entity_snapshots)")
+        ).fetchall()
+        entity_snapshot_column_names = {str(row[1]) for row in entity_snapshot_columns}
 
     assert "llm_connections" in table_names
     assert "suggestion_runs" in table_names
@@ -88,5 +94,11 @@ def test_migration_upgrade_from_0004_to_head(tmp_path: Path, monkeypatch) -> Non
     assert "service_name" in service_snapshot_column_names
     assert "service_id" in service_snapshot_column_names
     assert "metadata_json" in service_snapshot_column_names
+    assert "registry_enrichment_available" in sync_run_column_names
+    assert "registry_enrichment_error" in sync_run_column_names
+    assert "source_payload_json" in entity_snapshot_column_names
+    assert "has_entity_registry" in entity_snapshot_column_names
+    assert "has_device_registry" in entity_snapshot_column_names
+    assert "last_reported" in entity_snapshot_column_names
 
     db.reset_engine_for_tests()

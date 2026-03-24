@@ -88,6 +88,11 @@ class SyncRun(SQLModel, table=True):
     duration_ms: int = Field(default=0, ge=0)
     status: str = Field(default="success", max_length=32)
     error: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    registry_enrichment_available: Optional[bool] = Field(default=None)
+    registry_enrichment_error: Optional[str] = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
 
 
 class EntitySnapshot(SQLModel, table=True):
@@ -109,13 +114,20 @@ class EntitySnapshot(SQLModel, table=True):
     location_name: Optional[str] = Field(default=None, max_length=255)
     labels_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     metadata_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    source_payload_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     attributes_json: str = Field(sa_column=Column(Text, nullable=False))
     context_json: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    has_entity_registry: Optional[bool] = Field(default=None)
+    has_device_registry: Optional[bool] = Field(default=None)
     last_changed: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     last_updated: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_reported: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )

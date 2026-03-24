@@ -517,6 +517,7 @@ def enrich_state_snapshot(
     )
     if not isinstance(entity_entry, dict):
         entity_entry = {}
+    has_entity_registry = bool(entity_entry)
 
     device_id = as_clean_string(entity_entry.get("device_id")) or as_clean_string(
         attributes.get("device_id")
@@ -526,6 +527,7 @@ def enrich_state_snapshot(
         raw_device = devices_by_id.get(device_id)
         if isinstance(raw_device, dict):
             device_entry = raw_device
+    has_device_registry = bool(device_entry)
 
     area_id = (
         as_clean_string(entity_entry.get("area_id"))
@@ -587,6 +589,17 @@ def enrich_state_snapshot(
     if label_ids or label_names:
         labels_payload = {"ids": label_ids, "names": label_names}
 
+    source_payload = {
+        "entity_registry": entity_entry or None,
+        "device_registry": device_entry or None,
+        "area": area_entry or None,
+        "floor": floor_entry or None,
+        "labels": {
+            "ids": label_ids,
+            "names": label_names,
+        },
+    }
+
     metadata = compact_dict(
         {
             "entity_registry_id": as_clean_string(entity_entry.get("id")),
@@ -624,8 +637,11 @@ def enrich_state_snapshot(
         "floor_id": floor_id,
         "floor_name": floor_name,
         "location_name": location_name,
+        "has_entity_registry": has_entity_registry,
+        "has_device_registry": has_device_registry,
         "labels_json": safe_json_dump(labels_payload) if labels_payload is not None else None,
         "metadata_json": safe_json_dump(metadata) if metadata else None,
+        "source_payload_json": safe_json_dump(source_payload),
     }
 
 
@@ -3552,6 +3568,8 @@ async def perform_profile_sync(
             duration_ms=int((perf_counter() - start) * 1000),
             status="failed",
             error=str(exc),
+            registry_enrichment_available=None,
+            registry_enrichment_error=None,
         )
         session.add(failed_run)
         session.commit()
@@ -3565,15 +3583,19 @@ async def perform_profile_sync(
         return None, f"Sync failed: {exc}"
 
     registry_metadata: dict[str, list[dict[str, Any]]] = {}
+    registry_enrichment_available = True
+    registry_enrichment_error: str | None = None
     try:
         registry_metadata = await client.fetch_registry_metadata()
     except HAClientError as exc:
+        registry_enrichment_available = False
+        registry_enrichment_error = str(exc)
         log_event(
             "sync_registry_enrichment_unavailable",
             request_id=request_id,
             profile_id=profile.id,
             profile_name=profile.name,
-            error=str(exc),
+            error=registry_enrichment_error,
         )
 
     registry_lookup = build_registry_lookup(registry_metadata)
@@ -3585,6 +3607,8 @@ async def perform_profile_sync(
         duration_ms=0,
         status="success",
         error=None,
+        registry_enrichment_available=registry_enrichment_available,
+        registry_enrichment_error=registry_enrichment_error,
     )
     session.add(sync_run)
     session.commit()
@@ -3620,10 +3644,14 @@ async def perform_profile_sync(
                 location_name=enrichment["location_name"],
                 labels_json=enrichment["labels_json"],
                 metadata_json=enrichment["metadata_json"],
+                source_payload_json=enrichment["source_payload_json"],
                 attributes_json=safe_json_dump(enrichment["attributes"]),
                 context_json=safe_json_dump(raw_context) if raw_context is not None else None,
+                has_entity_registry=enrichment["has_entity_registry"],
+                has_device_registry=enrichment["has_device_registry"],
                 last_changed=parse_ha_datetime(state.get("last_changed")),
                 last_updated=parse_ha_datetime(state.get("last_updated")),
+                last_reported=parse_ha_datetime(state.get("last_reported")),
                 pulled_at=pulled_at,
             )
         )
@@ -3643,6 +3671,7 @@ async def perform_profile_sync(
         entity_count=len(snapshots),
         duration_ms=sync_run.duration_ms,
         pulled_at=pulled_at.isoformat(),
+        registry_enrichment_available=registry_enrichment_available,
     )
     return sync_run, None
 
@@ -8768,6 +8797,7 @@ def create_app() -> FastAPI:
                     "context_pretty": safe_pretty_json(snapshot.context_json),
                     "labels_pretty": safe_pretty_json(snapshot.labels_json),
                     "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
+                    "source_payload_pretty": safe_pretty_json(snapshot.source_payload_json),
                     "back_url": f"/entities?{back_query}",
                 },
                 active_profile,
@@ -11323,7 +11353,9 @@ def create_app() -> FastAPI:
                     "profile_id": row.profile_id,
                     "profile_name": active_profile.name,
                     "sync_run_id": row.sync_run_id,
-                    "pulled_at": row.pulled_at.isoformat(),
+                    "pulled_at": format_utc_datetime(row.pulled_at),
+                    "registry_enrichment_available": active_sync_run.registry_enrichment_available,
+                    "registry_enrichment_error": active_sync_run.registry_enrichment_error,
                     "entity_id": row.entity_id,
                     "domain": row.domain,
                     "state": row.state,
@@ -11335,12 +11367,25 @@ def create_app() -> FastAPI:
                     "floor_id": row.floor_id,
                     "floor_name": row.floor_name,
                     "location_name": row.location_name,
+                    "has_entity_registry": row.has_entity_registry,
+                    "has_device_registry": row.has_device_registry,
                     "labels": json.loads(row.labels_json) if row.labels_json else None,
                     "metadata": json.loads(row.metadata_json) if row.metadata_json else None,
+                    "source_payload_json": row.source_payload_json,
+                    "source_payload": (
+                        json.loads(row.source_payload_json) if row.source_payload_json else None
+                    ),
                     "attributes": json.loads(row.attributes_json),
                     "context": json.loads(row.context_json) if row.context_json else None,
-                    "last_changed": row.last_changed.isoformat() if row.last_changed else None,
-                    "last_updated": row.last_updated.isoformat() if row.last_updated else None,
+                    "last_changed": (
+                        format_utc_datetime(row.last_changed) if row.last_changed else None
+                    ),
+                    "last_updated": (
+                        format_utc_datetime(row.last_updated) if row.last_updated else None
+                    ),
+                    "last_reported": (
+                        format_utc_datetime(row.last_reported) if row.last_reported else None
+                    ),
                 }
             )
 
@@ -11396,6 +11441,8 @@ def create_app() -> FastAPI:
                 "profile_name",
                 "sync_run_id",
                 "pulled_at",
+                "registry_enrichment_available",
+                "registry_enrichment_error",
                 "entity_id",
                 "domain",
                 "state",
@@ -11409,8 +11456,12 @@ def create_app() -> FastAPI:
                 "location_name",
                 "last_changed",
                 "last_updated",
+                "last_reported",
+                "has_entity_registry",
+                "has_device_registry",
                 "labels_json",
                 "metadata_json",
+                "source_payload_json",
                 "attributes_json",
                 "context_json",
             ],
@@ -11423,7 +11474,13 @@ def create_app() -> FastAPI:
                     "profile_id": row.profile_id,
                     "profile_name": active_profile.name,
                     "sync_run_id": row.sync_run_id,
-                    "pulled_at": row.pulled_at.isoformat(),
+                    "pulled_at": format_utc_datetime(row.pulled_at),
+                    "registry_enrichment_available": (
+                        ""
+                        if active_sync_run.registry_enrichment_available is None
+                        else str(active_sync_run.registry_enrichment_available)
+                    ),
+                    "registry_enrichment_error": active_sync_run.registry_enrichment_error or "",
                     "entity_id": row.entity_id,
                     "domain": row.domain,
                     "state": row.state,
@@ -11435,10 +11492,24 @@ def create_app() -> FastAPI:
                     "floor_id": row.floor_id or "",
                     "floor_name": row.floor_name or "",
                     "location_name": row.location_name or "",
-                    "last_changed": row.last_changed.isoformat() if row.last_changed else "",
-                    "last_updated": row.last_updated.isoformat() if row.last_updated else "",
+                    "last_changed": (
+                        format_utc_datetime(row.last_changed) if row.last_changed else ""
+                    ),
+                    "last_updated": (
+                        format_utc_datetime(row.last_updated) if row.last_updated else ""
+                    ),
+                    "last_reported": (
+                        format_utc_datetime(row.last_reported) if row.last_reported else ""
+                    ),
+                    "has_entity_registry": (
+                        "" if row.has_entity_registry is None else str(row.has_entity_registry)
+                    ),
+                    "has_device_registry": (
+                        "" if row.has_device_registry is None else str(row.has_device_registry)
+                    ),
                     "labels_json": row.labels_json or "",
                     "metadata_json": row.metadata_json or "",
+                    "source_payload_json": row.source_payload_json or "",
                     "attributes_json": row.attributes_json,
                     "context_json": row.context_json or "",
                 }

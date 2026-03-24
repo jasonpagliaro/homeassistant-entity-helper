@@ -22,6 +22,7 @@ from app.models import (
     AutomationAdjustmentRevision,
     ConfigSnapshot,
     ConfigSyncRun,
+    EntitySnapshot,
     EntitySuggestion,
     LLMConnection,
     Profile,
@@ -29,6 +30,7 @@ from app.models import (
     ServiceSyncRun,
     SuggestionProposal,
     SuggestionRun,
+    SyncRun,
     utcnow,
 )
 
@@ -977,15 +979,24 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
                 "attributes": {"friendly_name": "Kitchen Light"},
                 "last_changed": "2026-02-15T00:00:00+00:00",
                 "last_updated": "2026-02-15T00:01:00+00:00",
+                "last_reported": "2026-02-15T00:01:30+00:00",
                 "context": {"id": "abc"},
             },
             {
                 "entity_id": "sensor.outdoor_temp",
-                "state": "71",
+                "state": "unknown",
                 "attributes": {"unit_of_measurement": "F"},
                 "last_changed": "2026-02-15T00:02:00+00:00",
                 "last_updated": "2026-02-15T00:02:00+00:00",
                 "context": {"id": "def"},
+            },
+            {
+                "entity_id": "binary_sensor.front_door",
+                "state": "unavailable",
+                "attributes": {"friendly_name": "Front Door"},
+                "last_changed": "2026-02-15T00:03:00+00:00",
+                "last_updated": "2026-02-15T00:03:00+00:00",
+                "context": {"id": "ghi"},
             },
         ]
 
@@ -1054,8 +1065,11 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert entities_response.status_code == 200
     assert "light.kitchen" in entities_response.text
     assert "sensor.outdoor_temp" in entities_response.text
+    assert "binary_sensor.front_door" in entities_response.text
     assert "Kitchen" in entities_response.text
     assert "Kitchen (First Floor)" in entities_response.text
+    assert "Registry Enrichment:" in entities_response.text
+    assert "available" in entities_response.text
 
     blank_changed_within_entities_response = client.get(
         f"/entities?profile_id={profile_id}&changed_within="
@@ -1063,12 +1077,18 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert blank_changed_within_entities_response.status_code == 200
     assert "light.kitchen" in blank_changed_within_entities_response.text
     assert "sensor.outdoor_temp" in blank_changed_within_entities_response.text
+    assert "binary_sensor.front_door" in blank_changed_within_entities_response.text
 
     detail_response = client.get(f"/entities/light.kitchen?profile_id={profile_id}")
     assert detail_response.status_code == 200
     assert "Kitchen Light" in detail_response.text
     assert "Kitchen Ceiling" in detail_response.text
     assert "Lighting" in detail_response.text
+    assert "Runtime State" in detail_response.text
+    assert "Registry Metadata" in detail_response.text
+    assert "Registry Source Payload" in detail_response.text
+    assert "Last Reported" in detail_response.text
+    assert "Registry Enrichment Available" in detail_response.text
     assert_primary_nav_active_link(detail_response.text, active_href="/entities", active_label="Entities")
     assert_docs_link_in_footer_not_primary_nav(detail_response.text)
 
@@ -1081,8 +1101,19 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert exported[0]["area_name"] == "Kitchen"
     assert exported[0]["location_name"] == "Kitchen (First Floor)"
     assert exported[0]["device_name"] == "Kitchen Ceiling"
+    assert exported[0]["registry_enrichment_available"] is True
+    assert exported[0]["registry_enrichment_error"] is None
+    assert exported[0]["has_entity_registry"] is True
+    assert exported[0]["has_device_registry"] is True
     assert exported[0]["labels"]["names"] == ["Lighting", "Room - Kitchen"]
     assert exported[0]["metadata"]["entity_platform"] == "hue"
+    assert exported[0]["source_payload"]["entity_registry"]["entity_id"] == "light.kitchen"
+    assert exported[0]["source_payload"]["device_registry"]["id"] == "device_kitchen_light"
+    assert exported[0]["source_payload"]["area"]["area_id"] == "kitchen_area"
+    assert exported[0]["source_payload"]["floor"]["floor_id"] == "first_floor"
+    assert exported[0]["source_payload"]["labels"]["names"] == ["Lighting", "Room - Kitchen"]
+    assert exported[0]["last_reported"] == "2026-02-15T00:01:30+00:00"
+    assert exported[0]["source_payload_json"] is not None
 
     blank_changed_within_export_json_response = client.get(
         f"/export/json?profile_id={profile_id}&changed_within="
@@ -1090,9 +1121,22 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert blank_changed_within_export_json_response.status_code == 200
     blank_changed_within_exported = json.loads(blank_changed_within_export_json_response.text)
     assert [item["entity_id"] for item in blank_changed_within_exported] == [
+        "binary_sensor.front_door",
         "light.kitchen",
         "sensor.outdoor_temp",
     ]
+    by_entity = {item["entity_id"]: item for item in blank_changed_within_exported}
+    assert by_entity["sensor.outdoor_temp"]["state"] == "unknown"
+    assert by_entity["sensor.outdoor_temp"]["has_entity_registry"] is False
+    assert by_entity["sensor.outdoor_temp"]["has_device_registry"] is False
+    assert by_entity["sensor.outdoor_temp"]["source_payload"] == {
+        "entity_registry": None,
+        "device_registry": None,
+        "area": None,
+        "floor": None,
+        "labels": {"ids": [], "names": []},
+    }
+    assert by_entity["binary_sensor.front_door"]["state"] == "unavailable"
 
     export_csv_response = client.get(f"/export/csv?profile_id={profile_id}&domain=light")
     assert export_csv_response.status_code == 200
@@ -1100,6 +1144,9 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert "light.kitchen" in export_csv_response.text
     assert "area_name" in export_csv_response.text
     assert "labels_json" in export_csv_response.text
+    assert "source_payload_json" in export_csv_response.text
+    assert "registry_enrichment_available" in export_csv_response.text
+    assert "last_reported" in export_csv_response.text
 
     blank_changed_within_export_csv_response = client.get(
         f"/export/csv?profile_id={profile_id}&changed_within="
@@ -1107,6 +1154,96 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert blank_changed_within_export_csv_response.status_code == 200
     assert "light.kitchen" in blank_changed_within_export_csv_response.text
     assert "sensor.outdoor_temp" in blank_changed_within_export_csv_response.text
+    assert "binary_sensor.front_door" in blank_changed_within_export_csv_response.text
+
+
+def test_sync_succeeds_when_registry_enrichment_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    response = client.get("/settings")
+    assert response.status_code == 200
+
+    csrf_token = extract_csrf(response.text)
+    profile_id = create_profile(client, csrf_token, name="registry-failure")
+
+    async def fake_fetch_states(_: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "entity_id": "sensor.orphan_temperature",
+                "state": "unknown",
+                "attributes": {"friendly_name": "Orphan Temperature"},
+                "last_changed": "2026-02-15T02:00:00+00:00",
+                "last_updated": "2026-02-15T02:00:00+00:00",
+                "context": {"id": "ctx-orphan"},
+            }
+        ]
+
+    async def failing_fetch_registry_metadata(_: Any) -> dict[str, list[dict[str, Any]]]:
+        raise HAClientError("Registry websocket unavailable")
+
+    monkeypatch.setattr("app.main.HAClient.fetch_states", fake_fetch_states)
+    monkeypatch.setattr(
+        "app.main.HAClient.fetch_registry_metadata",
+        failing_fetch_registry_metadata,
+    )
+
+    sync_response = client.post(
+        f"/profiles/{profile_id}/sync",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/entities?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert sync_response.status_code == 303
+
+    entities_response = client.get(f"/entities?profile_id={profile_id}")
+    assert entities_response.status_code == 200
+    assert "sensor.orphan_temperature" in entities_response.text
+    assert "Registry Enrichment:" in entities_response.text
+    assert "Registry websocket unavailable" in entities_response.text
+
+    export_json_response = client.get(f"/export/json?profile_id={profile_id}")
+    assert export_json_response.status_code == 200
+    exported = json.loads(export_json_response.text)
+    assert len(exported) == 1
+    assert exported[0]["registry_enrichment_available"] is False
+    assert exported[0]["registry_enrichment_error"] == "Registry websocket unavailable"
+    assert exported[0]["has_entity_registry"] is False
+    assert exported[0]["has_device_registry"] is False
+    assert exported[0]["source_payload"] == {
+        "entity_registry": None,
+        "device_registry": None,
+        "area": None,
+        "floor": None,
+        "labels": {"ids": [], "names": []},
+    }
+
+    with Session(db.get_engine()) as session:
+        sync_run = session.exec(
+            select(SyncRun)
+            .where(SyncRun.profile_id == profile_id)
+            .order_by(SyncRun.id.desc())
+        ).first()
+        assert sync_run is not None
+        assert sync_run.registry_enrichment_available is False
+        assert sync_run.registry_enrichment_error == "Registry websocket unavailable"
+
+        snapshot = session.exec(
+            select(EntitySnapshot)
+            .where(EntitySnapshot.profile_id == profile_id)
+            .order_by(EntitySnapshot.id.desc())
+        ).first()
+        assert snapshot is not None
+        assert snapshot.has_entity_registry is False
+        assert snapshot.has_device_registry is False
+        assert json.loads(snapshot.source_payload_json or "{}") == {
+            "entity_registry": None,
+            "device_registry": None,
+            "area": None,
+            "floor": None,
+            "labels": {"ids": [], "names": []},
+        }
 
 
 def test_sync_config_items_list_and_detail_flow(

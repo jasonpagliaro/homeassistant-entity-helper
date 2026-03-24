@@ -4,12 +4,35 @@
   <h2>Entity Detail</h2>
   <p><a href="{{ back_url }}">Back to entities</a></p>
 
+  <h3>Runtime State</h3>
   <div class="detail-grid">
     <div><strong>Profile</strong></div><div>{{ profile.name }}</div>
+    <div><strong>Sync Run</strong></div><div>#{{ sync_run.id }} ({{ sync_run.status }})</div>
     <div><strong>Entity ID</strong></div><div><code>{{ snapshot.entity_id }}</code></div>
     <div><strong>Friendly Name</strong></div><div>{{ snapshot.friendly_name or '' }}</div>
     <div><strong>Domain</strong></div><div>{{ snapshot.domain }}</div>
     <div><strong>State</strong></div><div>{{ snapshot.state }}</div>
+    <div><strong>Last Changed</strong></div><div>{{ snapshot.last_changed or '' }}</div>
+    <div><strong>Last Updated</strong></div><div>{{ snapshot.last_updated or '' }}</div>
+    <div><strong>Last Reported</strong></div><div>{{ snapshot.last_reported or '' }}</div>
+    <div><strong>Pulled At</strong></div><div>{{ snapshot.pulled_at }}</div>
+  </div>
+
+  <h3>Registry Metadata</h3>
+  <div class="detail-grid">
+    <div><strong>Registry Enrichment Available</strong></div>
+    <div>
+      {% if sync_run.registry_enrichment_available is sameas true %}Yes{% elif sync_run.registry_enrichment_available is sameas false %}No{% else %}Unknown{% endif %}
+    </div>
+    <div><strong>Registry Enrichment Error</strong></div><div>{{ sync_run.registry_enrichment_error or '' }}</div>
+    <div><strong>Has Entity Registry</strong></div>
+    <div>
+      {% if snapshot.has_entity_registry is sameas true %}Yes{% elif snapshot.has_entity_registry is sameas false %}No{% else %}Unknown{% endif %}
+    </div>
+    <div><strong>Has Device Registry</strong></div>
+    <div>
+      {% if snapshot.has_device_registry is sameas true %}Yes{% elif snapshot.has_device_registry is sameas false %}No{% else %}Unknown{% endif %}
+    </div>
     <div><strong>Device ID</strong></div><div>{{ snapshot.device_id or '' }}</div>
     <div><strong>Device Name</strong></div><div>{{ snapshot.device_name or '' }}</div>
     <div><strong>Area ID</strong></div><div>{{ snapshot.area_id or '' }}</div>
@@ -17,18 +40,18 @@
     <div><strong>Floor ID</strong></div><div>{{ snapshot.floor_id or '' }}</div>
     <div><strong>Floor Name</strong></div><div>{{ snapshot.floor_name or '' }}</div>
     <div><strong>Location</strong></div><div>{{ snapshot.location_name or '' }}</div>
-    <div><strong>Last Changed</strong></div><div>{{ snapshot.last_changed or '' }}</div>
-    <div><strong>Last Updated</strong></div><div>{{ snapshot.last_updated or '' }}</div>
-    <div><strong>Pulled At</strong></div><div>{{ snapshot.pulled_at }}</div>
   </div>
 
   <h3>Labels</h3>
   <pre>{{ labels_pretty }}</pre>
 
-  <h3>Metadata</h3>
+  <h3>Flattened Metadata</h3>
   <pre>{{ metadata_pretty }}</pre>
 
-  <h3>Attributes</h3>
+  <h3>Registry Source Payload</h3>
+  <pre>{{ source_payload_pretty }}</pre>
+
+  <h3>State Attributes</h3>
   <pre>{{ attributes_pretty }}</pre>
 
   <h3>Context</h3>

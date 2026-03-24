@@ -60,6 +60,13 @@
       {% endif %}
       {% if active_sync_run %}
         <div><strong>Last Sync:</strong> {{ active_sync_run.pulled_at }}</div>
+        <div>
+          <strong>Registry Enrichment:</strong>
+          {% if active_sync_run.registry_enrichment_available is sameas true %}available{% elif active_sync_run.registry_enrichment_available is sameas false %}unavailable{% else %}unknown{% endif %}
+          {% if active_sync_run.registry_enrichment_error %}
+            ({{ active_sync_run.registry_enrichment_error }})
+          {% endif %}
+        </div>
       {% endif %}
     </div>
 
