@@ -74,6 +74,10 @@
         </form>
         <a class="button" href="/entities?{{ build_query(profile_id=active_profile.id) }}">View Entities</a>
         <a class="button" href="/config-items?{{ build_query(profile_id=active_profile.id) }}">View Config Items</a>
+        {% if active_service_sync_run %}
+          <a class="button" href="/services/export/json?{{ build_query(profile_id=active_profile.id, service_sync_run_id=active_service_sync_run.id, q=q, domain=domain) }}">Export JSON</a>
+          <a class="button" href="/services/export/csv?{{ build_query(profile_id=active_profile.id, service_sync_run_id=active_service_sync_run.id, q=q, domain=domain) }}">Export CSV</a>
+        {% endif %}
       </div>
     {% endif %}
   </div>

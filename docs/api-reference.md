@@ -58,3 +58,5 @@ This page documents stable/public routes for HA Entity Vault.
 | --- | --- | --- |
 | `GET` | `/export/json` | Export currently filtered entities as JSON. |
 | `GET` | `/export/csv` | Export currently filtered entities as CSV. |
+| `GET` | `/services/export/json` | Export currently filtered services as JSON. |
+| `GET` | `/services/export/csv` | Export currently filtered services as CSV. |

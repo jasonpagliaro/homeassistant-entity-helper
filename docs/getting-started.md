@@ -100,7 +100,7 @@ Postgres mode persists data in Docker volume `hev_pg_data`.
 3. Click `Test Connection` for that profile.
 4. Go to `/entities` and click `Sync Now`.
 5. Review entities with search and filters.
-6. Export via `/export/json` or `/export/csv` as needed.
+6. Export entities via `/export/json` or `/export/csv`, and services via `/services/export/json` or `/services/export/csv`, as needed.
 7. Optional: run entity suggestions and automation suggestion workflows.
 
 ## Next Steps

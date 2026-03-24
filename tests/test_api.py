@@ -1476,11 +1476,34 @@ def test_sync_services_list_and_detail_flow(
     assert "notify.notify" in items_response.text
     assert "Run Script" in items_response.text
     assert "Duplicate ignored" not in items_response.text
+    assert "Export JSON" in items_response.text
+    assert "Export CSV" in items_response.text
+    assert "/services/export/json?" in items_response.text
+    assert "/services/export/csv?" in items_response.text
 
     notify_only_response = client.get(f"/services?profile_id={profile_id}&domain=notify")
     assert notify_only_response.status_code == 200
     assert "notify.notify" in notify_only_response.text
     assert "light.turn_on" not in notify_only_response.text
+
+    export_json_response = client.get(f"/services/export/json?profile_id={profile_id}&q=turn")
+    assert export_json_response.status_code == 200
+    exported_json = json.loads(export_json_response.text)
+    assert len(exported_json) == 1
+    assert exported_json[0]["service_id"] == "light.turn_on"
+    assert exported_json[0]["profile_name"] == "default"
+    assert exported_json[0]["fields"]["entity_id"]["required"] is False
+    assert exported_json[0]["target"]["entity"]["domain"] == ["light"]
+    assert exported_json[0]["metadata"]["description"] == "Switch on lights"
+
+    export_csv_response = client.get(f"/services/export/csv?profile_id={profile_id}&domain=light")
+    assert export_csv_response.status_code == 200
+    assert "text/csv" in export_csv_response.headers["content-type"]
+    assert "light.turn_on" in export_csv_response.text
+    assert "light.toggle" in export_csv_response.text
+    assert "notify.notify" not in export_csv_response.text
+    assert "fields_json" in export_csv_response.text
+    assert "metadata_json" in export_csv_response.text
 
     detail_response = client.get(f"/services/{snapshot_id}?profile_id={profile_id}")
     assert detail_response.status_code == 200

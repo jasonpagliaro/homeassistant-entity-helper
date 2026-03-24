@@ -1,6 +1,6 @@
 # HA Entity Vault
 
-HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entities and services on demand, browsing/filtering them, and exporting filtered entity views as JSON/CSV.
+HA Entity Vault is a self-hosted standalone app for pulling Home Assistant entities and services on demand, browsing/filtering them, and exporting filtered entity and service views as JSON/CSV.
 
 - Stack: Python 3.12, FastAPI, SQLModel + SQLite, Jinja2, httpx, Alembic.
 - Build/task runner: npm (Node 20+).
@@ -88,7 +88,7 @@ Postgres overlay data persists in the named Docker volume `hev_pg_data`.
 2. Click `Test Connection` for that profile.
 3. Open `/entities`, then click `Sync Now`.
 4. Optional: open `/services`, then click `Sync Services` to pull the Home Assistant service catalog.
-5. Apply filters/search, inspect details, and export entity views via JSON/CSV.
+5. Apply filters/search, inspect details, and export entity or service views via JSON/CSV.
 6. Optional: run `Run Suggestions Check` and automation suggestions workflows.
 
 ## Release Notes
@@ -117,7 +117,7 @@ See [CHANGELOG.md](CHANGELOG.md) for current and historical release notes.
   - Server-side pagination
 - Entity detail page with enriched metadata plus prettified attributes/context JSON.
 - Service catalog page with search/filter/pagination plus raw service metadata detail view.
-- Export filtered results as JSON or CSV (includes `pulled_at` and profile context).
+- Export filtered entity and service results as JSON or CSV (includes `pulled_at` and profile context).
 - Health endpoint: `GET /healthz`.
 - Structured JSON logs with request IDs and sync timing/count fields.
 

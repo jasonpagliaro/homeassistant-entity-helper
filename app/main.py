@@ -11106,7 +11106,7 @@ def create_app() -> FastAPI:
             }
         )
 
-    def get_export_rows(
+    def get_entity_export_rows(
         session: Session,
         active_profile: Profile,
         active_sync_run: SyncRun,
@@ -11124,6 +11124,162 @@ def create_app() -> FastAPI:
             changed_within=changed_within,
         )
         return session.exec(stmt.order_by(EntitySnapshot.entity_id)).all()
+
+    def get_service_export_rows(
+        session: Session,
+        active_profile: Profile,
+        active_service_sync_run: ServiceSyncRun,
+        q: str,
+        domain: str,
+    ) -> list[ServiceSnapshot]:
+        stmt = build_service_stmt(
+            profile_id=active_profile.id,
+            service_sync_run_id=active_service_sync_run.id,
+            q=q,
+            domain=domain,
+        )
+        return session.exec(stmt.order_by(ServiceSnapshot.service_id)).all()
+
+    @app.get("/services/export/json")
+    async def export_services_json(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        service_sync_run_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        domain: str = Query(default=""),
+        session: Session = Depends(get_session),
+    ) -> Response:
+        normalized_domain = domain.strip()
+
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No profile found")
+
+        active_service_sync_run: ServiceSyncRun | None = None
+        if service_sync_run_id is not None:
+            candidate = session.get(ServiceSyncRun, service_sync_run_id)
+            if candidate is not None and candidate.profile_id == active_profile.id:
+                active_service_sync_run = candidate
+        if active_service_sync_run is None:
+            active_service_sync_run = get_latest_service_sync_run(session, active_profile.id)
+        if active_service_sync_run is None:
+            raise HTTPException(status_code=404, detail="No synced services found")
+
+        rows = get_service_export_rows(
+            session,
+            active_profile,
+            active_service_sync_run,
+            q=q,
+            domain=normalized_domain,
+        )
+
+        payload: list[dict[str, Any]] = []
+        for row in rows:
+            payload.append(
+                {
+                    "profile_id": row.profile_id,
+                    "profile_name": active_profile.name,
+                    "service_sync_run_id": row.service_sync_run_id,
+                    "pulled_at": row.pulled_at.isoformat(),
+                    "domain": row.domain,
+                    "service_name": row.service_name,
+                    "service_id": row.service_id,
+                    "name": row.name,
+                    "description": row.description,
+                    "fields": json.loads(row.fields_json) if row.fields_json else None,
+                    "target": json.loads(row.target_json) if row.target_json else None,
+                    "metadata": json.loads(row.metadata_json) if row.metadata_json else None,
+                }
+            )
+
+        filename = (
+            f"services_{active_profile.name}_{active_service_sync_run.pulled_at.strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+        return Response(
+            content=json.dumps(payload, indent=2, ensure_ascii=True),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/services/export/csv")
+    async def export_services_csv(
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        service_sync_run_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        domain: str = Query(default=""),
+        session: Session = Depends(get_session),
+    ) -> Response:
+        normalized_domain = domain.strip()
+
+        active_profile = choose_active_profile(session, request, profile_id)
+        if active_profile is None:
+            raise HTTPException(status_code=404, detail="No profile found")
+
+        active_service_sync_run: ServiceSyncRun | None = None
+        if service_sync_run_id is not None:
+            candidate = session.get(ServiceSyncRun, service_sync_run_id)
+            if candidate is not None and candidate.profile_id == active_profile.id:
+                active_service_sync_run = candidate
+        if active_service_sync_run is None:
+            active_service_sync_run = get_latest_service_sync_run(session, active_profile.id)
+        if active_service_sync_run is None:
+            raise HTTPException(status_code=404, detail="No synced services found")
+
+        rows = get_service_export_rows(
+            session,
+            active_profile,
+            active_service_sync_run,
+            q=q,
+            domain=normalized_domain,
+        )
+
+        output = io.StringIO()
+        writer = csv.DictWriter(
+            output,
+            fieldnames=[
+                "profile_id",
+                "profile_name",
+                "service_sync_run_id",
+                "pulled_at",
+                "domain",
+                "service_name",
+                "service_id",
+                "name",
+                "description",
+                "fields_json",
+                "target_json",
+                "metadata_json",
+            ],
+        )
+        writer.writeheader()
+
+        for row in rows:
+            writer.writerow(
+                {
+                    "profile_id": row.profile_id,
+                    "profile_name": active_profile.name,
+                    "service_sync_run_id": row.service_sync_run_id,
+                    "pulled_at": row.pulled_at.isoformat(),
+                    "domain": row.domain,
+                    "service_name": row.service_name,
+                    "service_id": row.service_id,
+                    "name": row.name or "",
+                    "description": row.description or "",
+                    "fields_json": row.fields_json or "",
+                    "target_json": row.target_json or "",
+                    "metadata_json": row.metadata_json or "",
+                }
+            )
+
+        filename = (
+            f"services_{active_profile.name}_{active_service_sync_run.pulled_at.strftime('%Y%m%dT%H%M%SZ')}.csv"
+        )
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/export/json")
     async def export_json(
@@ -11150,7 +11306,7 @@ def create_app() -> FastAPI:
         if active_sync_run is None:
             raise HTTPException(status_code=404, detail="No synced entities found")
 
-        rows = get_export_rows(
+        rows = get_entity_export_rows(
             session,
             active_profile,
             active_sync_run,
@@ -11222,7 +11378,7 @@ def create_app() -> FastAPI:
         if active_sync_run is None:
             raise HTTPException(status_code=404, detail="No synced entities found")
 
-        rows = get_export_rows(
+        rows = get_entity_export_rows(
             session,
             active_profile,
             active_sync_run,
