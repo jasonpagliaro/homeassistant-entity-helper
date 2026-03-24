@@ -4,7 +4,6 @@
   <h2>Config Item Detail</h2>
   <div class="row gap-sm wrap">
     <a class="button" href="{{ back_url }}">Back to config items</a>
-    <a class="button" href="/suggestions?{{ build_query(profile_id=profile.id) }}">View Automation Suggestions</a>
     {% if active_llm_connection and snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
       <form
         method="post"

@@ -217,6 +217,7 @@ class PrimaryNavLink(TypedDict):
 
 PRIMARY_NAV_ITEMS: tuple[tuple[str, str], ...] = (
     ("Entities", "/entities"),
+    ("States", "/states"),
     ("Config Items", "/config-items"),
     ("Services", "/services"),
     ("Adjust Automations", "/automation-adjustments"),
@@ -2894,6 +2895,130 @@ def build_config_item_stmt(
     return stmt
 
 
+def resolve_entity_page_scope(
+    session: Session,
+    request: Request,
+    profile_id: int | None,
+    sync_run_id: int | None,
+) -> tuple[Profile | None, int, SyncRun | None]:
+    active_profile = choose_active_profile(session, request, profile_id)
+    profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
+
+    active_sync_run: SyncRun | None = None
+    if active_profile is not None:
+        if sync_run_id is not None:
+            candidate = session.get(SyncRun, sync_run_id)
+            if candidate is not None and candidate.profile_id == active_profile.id:
+                active_sync_run = candidate
+        if active_sync_run is None:
+            active_sync_run = get_latest_sync_run(session, active_profile.id)
+
+    return active_profile, profile_count, active_sync_run
+
+
+def build_entity_list_view_context(
+    session: Session,
+    *,
+    active_profile: Profile | None,
+    active_sync_run: SyncRun | None,
+    profile_count: int,
+    q: str,
+    domain: str,
+    state_value: str,
+    changed_within: int | None,
+    page: int,
+    page_size: int,
+    base_path: str,
+    include_runtime_filters: bool,
+) -> dict[str, Any]:
+    applied_state_value = state_value if include_runtime_filters else ""
+    applied_changed_within = changed_within if include_runtime_filters else None
+
+    entities: list[EntitySnapshot] = []
+    total = 0
+    total_pages = 1
+
+    if active_profile is not None and active_sync_run is not None:
+        filtered_stmt = build_entity_stmt(
+            profile_id=active_profile.id,
+            sync_run_id=active_sync_run.id,
+            q=q,
+            domain=domain,
+            state_value=applied_state_value,
+            changed_within=applied_changed_within,
+        )
+
+        count_stmt = select(func.count()).select_from(filtered_stmt.subquery())
+        total = int(session.exec(count_stmt).one())
+
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        offset = (page - 1) * page_size
+        entities = session.exec(
+            filtered_stmt.order_by(EntitySnapshot.entity_id).offset(offset).limit(page_size)
+        ).all()
+
+    domains: list[str] = []
+    states: list[str] = []
+    if active_profile is not None and active_sync_run is not None:
+        domains = list(
+            session.exec(
+                select(EntitySnapshot.domain)
+                .where(
+                    EntitySnapshot.profile_id == active_profile.id,
+                    EntitySnapshot.sync_run_id == active_sync_run.id,
+                )
+                .distinct()
+                .order_by(EntitySnapshot.domain)
+            ).all()
+        )
+        if include_runtime_filters:
+            states = list(
+                session.exec(
+                    select(EntitySnapshot.state)
+                    .where(
+                        EntitySnapshot.profile_id == active_profile.id,
+                        EntitySnapshot.sync_run_id == active_sync_run.id,
+                    )
+                    .distinct()
+                    .order_by(EntitySnapshot.state)
+                ).all()
+            )
+
+    next_url_kwargs: dict[str, Any] = {
+        "profile_id": active_profile.id if active_profile else None,
+        "sync_run_id": active_sync_run.id if active_sync_run else None,
+        "q": q,
+        "domain": domain,
+        "page": page,
+        "page_size": page_size,
+    }
+    if include_runtime_filters:
+        next_url_kwargs["state"] = applied_state_value
+        next_url_kwargs["changed_within"] = applied_changed_within
+
+    next_url_query = build_query(**next_url_kwargs)
+    next_url = f"{base_path}?{next_url_query}" if next_url_query else base_path
+
+    return {
+        "active_profile": active_profile,
+        "active_sync_run": active_sync_run,
+        "entities": entities,
+        "domains": domains,
+        "states": states,
+        "q": q,
+        "domain": domain,
+        "state_value": applied_state_value,
+        "changed_within": applied_changed_within,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "next_url": next_url,
+        "profile_count": profile_count,
+    }
+
+
 def build_service_stmt(
     profile_id: int,
     service_sync_run_id: int,
@@ -5382,7 +5507,7 @@ def create_app() -> FastAPI:
         profile_id: int,
         request: Request,
         csrf_token: str = Form(...),
-        next_url: str = Form(default="/entities"),
+        next_url: str = Form(default="/states"),
         session: Session = Depends(get_session),
     ) -> RedirectResponse:
         verify_csrf(request, csrf_token)
@@ -8636,85 +8761,36 @@ def create_app() -> FastAPI:
         sync_run_id: int | None = Query(default=None),
         q: str = Query(default=""),
         domain: str = Query(default=""),
-        state_value: str = Query(default="", alias="state"),
-        changed_within: int | None = Depends(parse_changed_within_query),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
         session: Session = Depends(get_session),
-    ) -> HTMLResponse:
-        active_profile = choose_active_profile(session, request, profile_id)
-        profile_count = int(session.exec(select(func.count()).select_from(Profile)).one())
+    ) -> Response:
+        if "state" in request.query_params or "changed_within" in request.query_params:
+            target_url = "/states"
+            if request.url.query:
+                target_url = f"{target_url}?{request.url.query}"
+            return RedirectResponse(url=target_url, status_code=307)
 
-        active_sync_run: SyncRun | None = None
-        if active_profile is not None:
-            if sync_run_id is not None:
-                candidate = session.get(SyncRun, sync_run_id)
-                if candidate is not None and candidate.profile_id == active_profile.id:
-                    active_sync_run = candidate
-            if active_sync_run is None:
-                active_sync_run = get_latest_sync_run(session, active_profile.id)
-
-        entities: list[EntitySnapshot] = []
-        total = 0
-        total_pages = 1
-
-        if active_profile is not None and active_sync_run is not None:
-            filtered_stmt = build_entity_stmt(
-                profile_id=active_profile.id,
-                sync_run_id=active_sync_run.id,
-                q=q,
-                domain=domain,
-                state_value=state_value,
-                changed_within=changed_within,
-            )
-
-            count_stmt = select(func.count()).select_from(filtered_stmt.subquery())
-            total = int(session.exec(count_stmt).one())
-
-            total_pages = max(1, (total + page_size - 1) // page_size)
-            page = min(page, total_pages)
-            offset = (page - 1) * page_size
-            entities = session.exec(
-                filtered_stmt.order_by(EntitySnapshot.entity_id).offset(offset).limit(page_size)
-            ).all()
-
-        domains: list[str] = []
-        states: list[str] = []
-        if active_profile is not None and active_sync_run is not None:
-            domains = list(
-                session.exec(
-                select(EntitySnapshot.domain)
-                .where(
-                    EntitySnapshot.profile_id == active_profile.id,
-                    EntitySnapshot.sync_run_id == active_sync_run.id,
-                )
-                .distinct()
-                .order_by(EntitySnapshot.domain)
-            ).all()
-            )
-            states = list(
-                session.exec(
-                select(EntitySnapshot.state)
-                .where(
-                    EntitySnapshot.profile_id == active_profile.id,
-                    EntitySnapshot.sync_run_id == active_sync_run.id,
-                )
-                .distinct()
-                .order_by(EntitySnapshot.state)
-            ).all()
-            )
-
-        next_url_query = build_query(
-            profile_id=active_profile.id if active_profile else None,
-            sync_run_id=active_sync_run.id if active_sync_run else None,
+        active_profile, profile_count, active_sync_run = resolve_entity_page_scope(
+            session,
+            request,
+            profile_id,
+            sync_run_id,
+        )
+        context = build_entity_list_view_context(
+            session,
+            active_profile=active_profile,
+            active_sync_run=active_sync_run,
+            profile_count=profile_count,
             q=q,
             domain=domain,
-            state=state_value,
-            changed_within=changed_within,
+            state_value="",
+            changed_within=None,
             page=page,
             page_size=page_size,
+            base_path="/entities",
+            include_runtime_filters=False,
         )
-        next_url = f"/entities?{next_url_query}" if next_url_query else "/entities"
 
         return render_template(
             request,
@@ -8722,47 +8798,75 @@ def create_app() -> FastAPI:
             with_navigation(
                 request,
                 session,
-                {
-                    "active_profile": active_profile,
-                    "active_sync_run": active_sync_run,
-                    "entities": entities,
-                    "domains": domains,
-                    "states": states,
-                    "q": q,
-                    "domain": domain,
-                    "state_value": state_value,
-                    "changed_within": changed_within,
-                    "page": page,
-                    "page_size": page_size,
-                    "total": total,
-                    "total_pages": total_pages,
-                    "next_url": next_url,
-                    "profile_count": profile_count,
-                    "profiles": get_enabled_profiles(session),
-                },
+                context,
                 active_profile,
             ),
         )
 
-    @app.get("/entities/{entity_id}", response_class=HTMLResponse)
-    async def entity_detail(
-        entity_id: str,
+    @app.get("/states", response_class=HTMLResponse)
+    async def list_states(
         request: Request,
         profile_id: int | None = Query(default=None),
         sync_run_id: int | None = Query(default=None),
+        q: str = Query(default=""),
+        domain: str = Query(default=""),
+        state_value: str = Query(default="", alias="state"),
+        changed_within: int | None = Depends(parse_changed_within_query),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
         session: Session = Depends(get_session),
     ) -> HTMLResponse:
-        active_profile = choose_active_profile(session, request, profile_id)
+        active_profile, profile_count, active_sync_run = resolve_entity_page_scope(
+            session,
+            request,
+            profile_id,
+            sync_run_id,
+        )
+        context = build_entity_list_view_context(
+            session,
+            active_profile=active_profile,
+            active_sync_run=active_sync_run,
+            profile_count=profile_count,
+            q=q,
+            domain=domain,
+            state_value=state_value,
+            changed_within=changed_within,
+            page=page,
+            page_size=page_size,
+            base_path="/states",
+            include_runtime_filters=True,
+        )
+
+        return render_template(
+            request,
+            "states.html",
+            with_navigation(
+                request,
+                session,
+                context,
+                active_profile,
+            ),
+        )
+
+    def render_entity_detail_page(
+        entity_id: str,
+        request: Request,
+        profile_id: int | None,
+        sync_run_id: int | None,
+        session: Session,
+        *,
+        back_path: str,
+        back_label: str,
+    ) -> HTMLResponse:
+        active_profile, _, active_sync_run = resolve_entity_page_scope(
+            session,
+            request,
+            profile_id,
+            sync_run_id,
+        )
         if active_profile is None:
             raise HTTPException(status_code=404, detail="No profiles configured")
 
-        active_sync_run: SyncRun | None = None
-        if sync_run_id is not None:
-            candidate = session.get(SyncRun, sync_run_id)
-            if candidate is not None and candidate.profile_id == active_profile.id:
-                active_sync_run = candidate
-        if active_sync_run is None:
-            active_sync_run = get_latest_sync_run(session, active_profile.id)
         if active_sync_run is None:
             raise HTTPException(status_code=404, detail="No synced entities found")
 
@@ -8798,10 +8902,47 @@ def create_app() -> FastAPI:
                     "labels_pretty": safe_pretty_json(snapshot.labels_json),
                     "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
                     "source_payload_pretty": safe_pretty_json(snapshot.source_payload_json),
-                    "back_url": f"/entities?{back_query}",
+                    "back_url": f"{back_path}?{back_query}",
+                    "back_label": back_label,
                 },
                 active_profile,
             ),
+        )
+
+    @app.get("/entities/{entity_id}", response_class=HTMLResponse)
+    async def entity_detail(
+        entity_id: str,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        sync_run_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        return render_entity_detail_page(
+            entity_id,
+            request,
+            profile_id,
+            sync_run_id,
+            session,
+            back_path="/entities",
+            back_label="Back to entities",
+        )
+
+    @app.get("/states/{entity_id}", response_class=HTMLResponse)
+    async def state_detail(
+        entity_id: str,
+        request: Request,
+        profile_id: int | None = Query(default=None),
+        sync_run_id: int | None = Query(default=None),
+        session: Session = Depends(get_session),
+    ) -> HTMLResponse:
+        return render_entity_detail_page(
+            entity_id,
+            request,
+            profile_id,
+            sync_run_id,
+            session,
+            back_path="/states",
+            back_label="Back to states",
         )
 
     @app.get("/config-items", response_class=HTMLResponse)

@@ -8,6 +8,16 @@ TEMPLATE_TABLE_LABELS: dict[str, tuple[str, ...]] = {
         "Entity ID",
         "Name",
         "Domain",
+        "Device",
+        "Area",
+        "Location",
+        "Pulled At",
+        "Actions",
+    ),
+    "states.html": (
+        "Entity ID",
+        "Name",
+        "Domain",
         "State",
         "Area",
         "Location",
@@ -79,10 +89,8 @@ HIGH_IMPACT_BUTTON_TOOLTIP_LABELS: dict[str, dict[str, int]] = {
         "Delete Profile": 2,
         "Delete LLM": 1,
     },
-    "entities.html": {
+    "states.html": {
         "Sync Now": 1,
-        "Sync Config Items": 1,
-        "Run Suggestions Check": 1,
     },
     "config_items.html": {
         "Sync Config Items": 1,

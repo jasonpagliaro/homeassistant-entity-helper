@@ -86,9 +86,9 @@ Postgres overlay data persists in the named Docker volume `hev_pg_data`.
 ## First Use Workflow (Core)
 1. Open `/settings`, add a profile (name, base URL, token), and save.
 2. Click `Test Connection` for that profile.
-3. Open `/entities`, then click `Sync Now`.
+3. Open `/states`, then click `Sync Now`.
 4. Optional: open `/services`, then click `Sync Services` to pull the Home Assistant service catalog.
-5. Apply filters/search, inspect details, and export entity or service views via JSON/CSV.
+5. Review `/entities` for inventory metadata, use `/states` for runtime filters/exports, and inspect details as needed.
 6. Optional: run `Run Suggestions Check` and automation suggestions workflows.
 
 ## Release Notes
@@ -111,10 +111,8 @@ See [CHANGELOG.md](CHANGELOG.md) for current and historical release notes.
   - area registry
   - label registry
   - floor registry
-- Entity table with:
-  - Search (`entity_id`, friendly name, area/location, labels)
-  - Filters (domain/state/changed recently)
-  - Server-side pagination
+- Entities page with inventory metadata search/filter/pagination.
+- States page with runtime search/filter/pagination (`domain`, `state`, `changed recently`).
 - Entity detail page with enriched metadata plus prettified attributes/context JSON.
 - Service catalog page with search/filter/pagination plus raw service metadata detail view.
 - Export filtered entity and service results as JSON or CSV (includes `pulled_at` and profile context).

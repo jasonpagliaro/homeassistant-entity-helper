@@ -568,22 +568,23 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     entities_html = entities_response.text
     assert_sync_modal_markup(entities_html)
     assert 'action="/profiles/select"' in entities_html
+    assert_form_absent(entities_html, r"/profiles/\d+/sync")
+    assert_form_absent(entities_html, r"/profiles/\d+/sync-config")
+    assert_form_absent(entities_html, r"/profiles/\d+/sync-services")
+
+    states_response = client.get("/states")
+    assert states_response.status_code == 200
+    states_html = states_response.text
+    assert_sync_modal_markup(states_html)
+    assert 'action="/profiles/select"' in states_html
     assert_form_has_sync_modal_attrs(
-        entities_html,
+        states_html,
         r"/profiles/\d+/sync",
         "Syncing entities...",
     )
-    assert_form_has_sync_modal_attrs(
-        entities_html,
-        r"/profiles/\d+/sync-config",
-        "Syncing config items...",
-    )
-    assert_form_has_sync_modal_attrs(
-        entities_html,
-        r"/profiles/\d+/sync-services",
-        "Syncing services...",
-    )
-    assert f"/services?profile_id={profile_id}" in entities_html
+    assert_form_absent(states_html, r"/profiles/\d+/sync-config")
+    assert_form_absent(states_html, r"/profiles/\d+/sync-services")
+    assert f"/profiles/{profile_id}/sync" in states_html
 
     config_items_response = client.get("/config-items")
     assert config_items_response.status_code == 200
@@ -595,13 +596,8 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
         r"/profiles/\d+/sync-config",
         "Syncing config items...",
     )
-    assert_form_has_sync_modal_attrs(
-        config_items_html,
-        r"/profiles/\d+/sync-services",
-        "Syncing services...",
-    )
+    assert_form_absent(config_items_html, r"/profiles/\d+/sync-services")
     assert f"/profiles/{profile_id}/sync-config" in config_items_html
-    assert f"/profiles/{profile_id}/sync-services" in config_items_html
 
     services_response = client.get("/services")
     assert services_response.status_code == 200
@@ -620,6 +616,7 @@ def test_sync_modal_markup_and_form_attributes(client: TestClient) -> None:
     ("path", "active_href", "active_label"),
     [
         ("/entities", "/entities", "Entities"),
+        ("/states", "/states", "States"),
         ("/config-items", "/config-items", "Config Items"),
         ("/services", "/services", "Services"),
         ("/automation-adjustments", "/automation-adjustments", "Adjust Automations"),
@@ -651,6 +648,22 @@ def test_primary_navigation_active_state_on_top_level_pages(
     assert response.status_code == 200
     assert_primary_nav_active_link(response.text, active_href=active_href, active_label=active_label)
     assert_docs_link_in_footer_not_primary_nav(response.text)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "state=on&q=light",
+        "changed_within=&q=sensor",
+    ],
+)
+def test_entities_runtime_query_params_redirect_to_states(
+    client: TestClient,
+    query: str,
+) -> None:
+    response = client.get(f"/entities?{query}", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == f"/states?{query}"
 
 
 def test_version_endpoint_returns_commit_metadata(
@@ -1055,7 +1068,7 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
         f"/profiles/{profile_id}/sync",
         data={
             "csrf_token": csrf_token,
-            "next_url": f"/entities?profile_id={profile_id}",
+            "next_url": f"/states?profile_id={profile_id}",
         },
         follow_redirects=False,
     )
@@ -1066,18 +1079,37 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert "light.kitchen" in entities_response.text
     assert "sensor.outdoor_temp" in entities_response.text
     assert "binary_sensor.front_door" in entities_response.text
+    assert "Kitchen Ceiling" in entities_response.text
     assert "Kitchen" in entities_response.text
     assert "Kitchen (First Floor)" in entities_response.text
     assert "Registry Enrichment:" in entities_response.text
     assert "available" in entities_response.text
+    assert "Export JSON" not in entities_response.text
+    assert "Export CSV" not in entities_response.text
+    assert "Sync Now" not in entities_response.text
+    assert 'name="state"' not in entities_response.text
+    assert 'name="changed_within"' not in entities_response.text
 
-    blank_changed_within_entities_response = client.get(
-        f"/entities?profile_id={profile_id}&changed_within="
+    states_response = client.get(f"/states?profile_id={profile_id}")
+    assert states_response.status_code == 200
+    assert "light.kitchen" in states_response.text
+    assert "sensor.outdoor_temp" in states_response.text
+    assert "binary_sensor.front_door" in states_response.text
+    assert "Export JSON" in states_response.text
+    assert "Export CSV" in states_response.text
+    assert "Sync Now" in states_response.text
+    assert 'name="state"' in states_response.text
+    assert 'name="changed_within"' in states_response.text
+
+    legacy_runtime_filter_response = client.get(
+        f"/entities?profile_id={profile_id}&changed_within=",
+        follow_redirects=False,
     )
-    assert blank_changed_within_entities_response.status_code == 200
-    assert "light.kitchen" in blank_changed_within_entities_response.text
-    assert "sensor.outdoor_temp" in blank_changed_within_entities_response.text
-    assert "binary_sensor.front_door" in blank_changed_within_entities_response.text
+    assert legacy_runtime_filter_response.status_code == 307
+    assert (
+        legacy_runtime_filter_response.headers["location"]
+        == f"/states?profile_id={profile_id}&changed_within="
+    )
 
     detail_response = client.get(f"/entities/light.kitchen?profile_id={profile_id}")
     assert detail_response.status_code == 200
@@ -1091,6 +1123,17 @@ def test_settings_sync_and_export_flow(client: TestClient, monkeypatch: pytest.M
     assert "Registry Enrichment Available" in detail_response.text
     assert_primary_nav_active_link(detail_response.text, active_href="/entities", active_label="Entities")
     assert_docs_link_in_footer_not_primary_nav(detail_response.text)
+
+    state_detail_response = client.get(f"/states/light.kitchen?profile_id={profile_id}")
+    assert state_detail_response.status_code == 200
+    assert "Kitchen Light" in state_detail_response.text
+    assert "Back to states" in state_detail_response.text
+    assert_primary_nav_active_link(
+        state_detail_response.text,
+        active_href="/states",
+        active_label="States",
+    )
+    assert_docs_link_in_footer_not_primary_nav(state_detail_response.text)
 
     export_json_response = client.get(f"/export/json?profile_id={profile_id}&q=light")
     assert export_json_response.status_code == 200

@@ -98,8 +98,8 @@ Postgres mode persists data in Docker volume `hev_pg_data`.
 1. Go to `/settings`.
 2. Add a Home Assistant profile (name, base URL, long-lived token), then save.
 3. Click `Test Connection` for that profile.
-4. Go to `/entities` and click `Sync Now`.
-5. Review entities with search and filters.
+4. Go to `/states` and click `Sync Now`.
+5. Review `/entities` for inventory metadata and `/states` for runtime filters.
 6. Export entities via `/export/json` or `/export/csv`, and services via `/services/export/json` or `/services/export/csv`, as needed.
 7. Optional: run entity suggestions and automation suggestion workflows.
 

@@ -82,21 +82,6 @@
             Sync Config Items
           </button>
         </form>
-        <form
-          method="post"
-          action="/profiles/{{ active_profile.id }}/sync-services"
-          data-sync-modal="true"
-          data-sync-modal-label="Syncing services..."
-        >
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          <input type="hidden" name="next_url" value="/services?{{ build_query(profile_id=active_profile.id) }}" />
-          <button
-            type="submit"
-            data-tooltip="Pull the latest Home Assistant service catalog for this profile."
-          >
-            Sync Services
-          </button>
-        </form>
         {% if active_llm_connection and active_config_sync_run %}
           <form
             method="post"
@@ -118,9 +103,6 @@
             </button>
           </form>
         {% endif %}
-        <a class="button" href="/services?{{ build_query(profile_id=active_profile.id) }}">View Services</a>
-        <a class="button" href="/suggestions?{{ build_query(profile_id=active_profile.id) }}">View Automation Suggestions</a>
-        <a class="button" href="/entity-suggestions?{{ build_query(profile_id=active_profile.id) }}">View Entity Suggestions</a>
       </div>
     {% endif %}
   </div>
