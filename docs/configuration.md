@@ -17,6 +17,7 @@ This is the canonical environment configuration reference for HA Entity Vault.
 | `HEV_HOST_PORT` | No | `23010` | Docker Compose host-port mapping for the app service (`${HEV_HOST_PORT}:8000`). Local non-Docker runs ignore this value. |
 | `DATABASE_URL` | No | empty | Explicit SQLAlchemy URL. Highest-precedence database setting. |
 | `HEV_DB_PATH` | No | empty | SQLite file override path, used only when `DATABASE_URL` is unset. |
+| `SQLITE_BUSY_TIMEOUT_MS` | No | `30000` | SQLite lock wait in milliseconds. Applied to SQLite connections and `PRAGMA busy_timeout`; ignored for non-SQLite backends. |
 | `HA_TOKEN` | No | empty | Global fallback Home Assistant token. |
 | `HEV_LLM_ENABLED` | No | `false` | Enables LLM-assisted suggestion/draft features when provider settings are valid. |
 | `HEV_LLM_BASE_URL` | No | empty | OpenAI-compatible provider base URL. |
@@ -67,6 +68,12 @@ The app resolves database settings in this order:
 1. `DATABASE_URL` (if set)
 2. `HEV_DB_PATH` (if set, converted to `sqlite:///...`)
 3. SQLite default at `HEV_DATA_DIR/ha_entity_vault.db`
+
+### SQLite Defaults
+
+- SQLite connections enable `PRAGMA journal_mode=WAL` for better concurrent read/write behavior.
+- SQLite connections use `PRAGMA synchronous=NORMAL` to reduce fsync overhead. This trades some crash durability versus `FULL`, but is the chosen default for the app's single-host SQLite deployment path.
+- `SQLITE_BUSY_TIMEOUT_MS` controls both the SQLite driver timeout and connection-level `PRAGMA busy_timeout`.
 
 ### Home Assistant Token Resolution
 
