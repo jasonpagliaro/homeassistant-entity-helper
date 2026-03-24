@@ -403,7 +403,7 @@ get_alembic_version() {
     return 1
   fi
 
-  docker run --rm \
+  docker run --rm -i \
     -v "${SQLITE_VOLUME}:/data:ro" \
     python:3.12-slim \
     python - "${SQLITE_DB_PATH}" <<'PY'
@@ -440,7 +440,7 @@ backup_sqlite() {
     return 1
   fi
 
-  docker run --rm \
+  docker run --rm -i \
     -v "${SQLITE_VOLUME}:/data:ro" \
     -v "${AUTO_UPDATE_BACKUP_DIR}:/backup:rw" \
     python:3.12-slim \
@@ -469,7 +469,7 @@ restore_sqlite_backup() {
     return 1
   fi
 
-  docker run --rm \
+  docker run --rm -i \
     -v "${SQLITE_VOLUME}:/data:rw" \
     -v "${AUTO_UPDATE_BACKUP_DIR}:/backup:ro" \
     python:3.12-slim \
@@ -496,7 +496,7 @@ update_db_update_status() {
     return 1
   fi
 
-  docker run --rm \
+  docker run --rm -i \
     -v "${SQLITE_VOLUME}:/data:rw" \
     python:3.12-slim \
     python - "${SQLITE_DB_PATH}" "${attempt_at}" "${update_result}" <<'PY'
