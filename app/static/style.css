@@ -968,16 +968,41 @@ button.danger:hover {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: var(--ha-space-2);
+  justify-content: flex-start;
+  gap: var(--ha-space-3);
 }
 
 .action-form {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: flex-end;
+  flex: 1 1 220px;
+  display: grid;
+  align-content: end;
+  justify-items: start;
   gap: var(--ha-space-2);
-  min-width: min(220px, 100%);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.action-form--compact {
+  flex-basis: 170px;
+  flex-grow: 0;
+}
+
+.action-form--wide {
+  flex-basis: clamp(240px, 28vw, 320px);
+  flex-grow: 0;
+}
+
+.action-form-field {
+  width: 100%;
+  max-width: 18rem;
+  min-width: 0;
+}
+
+.action-form-field input,
+.action-form-field select,
+.action-form-field textarea {
+  width: 100%;
+  max-width: 100%;
 }
 
 .inline-form {
@@ -991,6 +1016,11 @@ button.danger:hover {
 .action-form .checkbox-row,
 .inline-form .checkbox-row {
   margin-top: 0;
+}
+
+.action-form-row > .button,
+.action-form-row > .button-secondary {
+  align-self: flex-end;
 }
 
 .align-end {

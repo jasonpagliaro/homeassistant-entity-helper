@@ -239,6 +239,16 @@ def test_action_form_layout_contracts_on_adjustment_pages() -> None:
         "/automation-adjustments/drafts/{{ draft.id }}/test",
         "action-form",
     )
+    assert _form_has_class(
+        automation_adjustment_template,
+        "/automation-adjustments/drafts/{{ draft.id }}/test",
+        "action-form--wide",
+    )
+    assert _label_for_input_has_class(
+        automation_adjustment_template,
+        "test_alias_suffix",
+        "action-form-field",
+    )
     assert _label_for_input_has_class(automation_adjustment_template, "confirm_submit", "checkbox-row")
     assert _label_for_input_has_class(automation_adjustment_template, "confirm_test", "checkbox-row")
     assert _label_for_input_has_class(automation_adjustment_template, "confirm_revert", "checkbox-row")
@@ -257,9 +267,20 @@ def test_action_form_layout_contracts_on_draft_and_suggestion_pages() -> None:
     )
     assert _form_has_class(
         automation_draft_template,
+        "/automation-drafts/{{ draft.id }}/accept",
+        "action-form--wide",
+    )
+    assert _form_has_class(
+        automation_draft_template,
         "/automation-drafts/{{ draft.id }}/reject",
         "action-form",
     )
+    assert _form_has_class(
+        automation_draft_template,
+        "/automation-drafts/{{ draft.id }}/reject",
+        "action-form--wide",
+    )
+    assert _label_for_input_has_class(automation_draft_template, "review_note", "action-form-field")
 
     suggestions_template = _read_template("suggestions.html")
     assert _label_for_input_has_class(suggestions_template, "include_existing", "checkbox-row")

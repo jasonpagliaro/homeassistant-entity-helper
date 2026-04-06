@@ -17,22 +17,22 @@
   </div>
 
   <div class="action-form-row">
-    <form method="post" action="/automation-drafts/{{ draft.id }}/accept" class="action-form">
+    <form method="post" action="/automation-drafts/{{ draft.id }}/accept" class="action-form action-form--wide">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_url" value="{{ back_url }}" />
       <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
-      <label>
+      <label class="action-form-field">
         Accept Note
         <input type="text" name="review_note" placeholder="Optional note" />
       </label>
       <button type="submit" data-tooltip="Mark this automation draft as accepted.">Accept Draft</button>
     </form>
 
-    <form method="post" action="/automation-drafts/{{ draft.id }}/reject" class="action-form">
+    <form method="post" action="/automation-drafts/{{ draft.id }}/reject" class="action-form action-form--wide">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_url" value="{{ back_url }}" />
       <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
-      <label>
+      <label class="action-form-field">
         Reject Note
         <input type="text" name="review_note" placeholder="Optional note" />
       </label>
