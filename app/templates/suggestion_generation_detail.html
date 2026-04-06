@@ -63,7 +63,7 @@
       <form method="post" action="/suggestions/generations/{{ generation.id }}/submit" class="grid-form compact">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
-        <label>
+        <label class="checkbox-row">
           <input type="checkbox" name="confirm_submit" value="on" />
           Confirm submit to Home Assistant
         </label>

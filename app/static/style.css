@@ -964,10 +964,33 @@ button.danger:hover {
   gap: var(--ha-space-2);
 }
 
+.action-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ha-space-2);
+}
+
+.action-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: var(--ha-space-2);
+  min-width: min(220px, 100%);
+}
+
 .inline-form {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ha-space-2);
   margin-left: var(--ha-space-1);
+}
+
+.action-form .checkbox-row,
+.inline-form .checkbox-row {
+  margin-top: 0;
 }
 
 .align-end {

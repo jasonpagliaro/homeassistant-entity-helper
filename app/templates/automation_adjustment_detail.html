@@ -14,16 +14,16 @@
     <div><strong>Updated</strong></div><div>{{ draft.updated_at }}</div>
   </div>
 
-  <div class="row gap-sm wrap">
+  <div class="action-form-row">
     {% if draft.queue_status == "queued" %}
-      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/unqueue">
+      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/unqueue" class="action-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
         <input type="hidden" name="next_url" value="{{ default_next_url }}" />
         <button type="submit" data-tooltip="Remove this draft from queue.">Unqueue</button>
       </form>
     {% else %}
-      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/queue">
+      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/queue" class="action-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
         <input type="hidden" name="next_url" value="{{ default_next_url }}" />
@@ -31,18 +31,18 @@
       </form>
     {% endif %}
 
-    <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/submit">
+    <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/submit" class="action-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
       <input type="hidden" name="next_url" value="{{ default_next_url }}" />
-      <label>
+      <label class="checkbox-row">
         <input type="checkbox" name="confirm_submit" value="on" />
         Confirm Submit
       </label>
       <button type="submit" data-tooltip="Submit this draft as an update to the original automation.">Submit Update</button>
     </form>
 
-    <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/test">
+    <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/test" class="action-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
       <input type="hidden" name="next_url" value="{{ default_next_url }}" />
@@ -50,7 +50,7 @@
         Test Alias Suffix
         <input type="text" name="test_alias_suffix" value=" (Test)" />
       </label>
-      <label>
+      <label class="checkbox-row">
         <input type="checkbox" name="confirm_test" value="on" />
         Confirm Test
       </label>
@@ -58,11 +58,11 @@
     </form>
 
     {% if can_revert_test %}
-      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/revert-test">
+      <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/revert-test" class="action-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
         <input type="hidden" name="next_url" value="{{ default_next_url }}" />
-        <label>
+        <label class="checkbox-row">
           <input type="checkbox" name="confirm_revert" value="on" />
           Confirm Revert
         </label>

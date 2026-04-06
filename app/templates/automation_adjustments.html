@@ -210,7 +210,7 @@
                     <input type="hidden" name="profile_id" value="{{ active_profile.id }}" />
                     <input type="hidden" name="next_url" value="/automation-adjustments?{{ build_query(profile_id=active_profile.id) }}" />
                     <input type="hidden" name="test_alias_suffix" value=" (Test)" />
-                    <label>
+                    <label class="checkbox-row">
                       <input type="checkbox" name="confirm_test" value="on" />
                       Confirm Test
                     </label>

@@ -16,8 +16,8 @@
     <div><strong>Pulled At</strong></div><div>{{ draft.pulled_at }}</div>
   </div>
 
-  <div class="row gap-sm wrap">
-    <form method="post" action="/automation-drafts/{{ draft.id }}/accept">
+  <div class="action-form-row">
+    <form method="post" action="/automation-drafts/{{ draft.id }}/accept" class="action-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_url" value="{{ back_url }}" />
       <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
@@ -28,7 +28,7 @@
       <button type="submit" data-tooltip="Mark this automation draft as accepted.">Accept Draft</button>
     </form>
 
-    <form method="post" action="/automation-drafts/{{ draft.id }}/reject">
+    <form method="post" action="/automation-drafts/{{ draft.id }}/reject" class="action-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <input type="hidden" name="next_url" value="{{ back_url }}" />
       <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />

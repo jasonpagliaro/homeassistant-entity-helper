@@ -163,6 +163,27 @@ def _action_wrapper_contains_label(template: str, label: str) -> bool:
     return False
 
 
+def _form_has_class(template: str, action: str, class_name: str) -> bool:
+    for match in re.finditer(r"<form\b([^>]*)>", template, flags=re.DOTALL):
+        attrs = match.group(1)
+        if f'action="{action}"' not in attrs:
+            continue
+        if re.search(rf'\bclass\s*=\s*"[^"]*\b{re.escape(class_name)}\b[^"]*"', attrs):
+            return True
+    return False
+
+
+def _label_for_input_has_class(template: str, input_name: str, class_name: str) -> bool:
+    for match in re.finditer(r"<label\b([^>]*)>([\s\S]*?)</label>", template, flags=re.DOTALL):
+        attrs = match.group(1)
+        body = match.group(2)
+        if f'name="{input_name}"' not in body:
+            continue
+        if re.search(rf'\bclass\s*=\s*"[^"]*\b{re.escape(class_name)}\b[^"]*"', attrs):
+            return True
+    return False
+
+
 def test_responsive_table_markup_contract() -> None:
     for template_name, labels in TEMPLATE_TABLE_LABELS.items():
         template = _read_template(template_name)
@@ -203,6 +224,53 @@ def test_grid_form_action_wrappers_present_on_key_pages() -> None:
 
     config_template = _read_template("config.html")
     assert _action_wrapper_contains_label(config_template, "Save Update Settings")
+
+
+def test_action_form_layout_contracts_on_adjustment_pages() -> None:
+    automation_adjustment_template = _read_template("automation_adjustment_detail.html")
+    assert 'class="action-form-row"' in automation_adjustment_template
+    assert _form_has_class(
+        automation_adjustment_template,
+        "/automation-adjustments/drafts/{{ draft.id }}/submit",
+        "action-form",
+    )
+    assert _form_has_class(
+        automation_adjustment_template,
+        "/automation-adjustments/drafts/{{ draft.id }}/test",
+        "action-form",
+    )
+    assert _label_for_input_has_class(automation_adjustment_template, "confirm_submit", "checkbox-row")
+    assert _label_for_input_has_class(automation_adjustment_template, "confirm_test", "checkbox-row")
+    assert _label_for_input_has_class(automation_adjustment_template, "confirm_revert", "checkbox-row")
+
+    automation_adjustments_template = _read_template("automation_adjustments.html")
+    assert _label_for_input_has_class(automation_adjustments_template, "confirm_test", "checkbox-row")
+
+
+def test_action_form_layout_contracts_on_draft_and_suggestion_pages() -> None:
+    automation_draft_template = _read_template("automation_draft_detail.html")
+    assert 'class="action-form-row"' in automation_draft_template
+    assert _form_has_class(
+        automation_draft_template,
+        "/automation-drafts/{{ draft.id }}/accept",
+        "action-form",
+    )
+    assert _form_has_class(
+        automation_draft_template,
+        "/automation-drafts/{{ draft.id }}/reject",
+        "action-form",
+    )
+
+    suggestions_template = _read_template("suggestions.html")
+    assert _label_for_input_has_class(suggestions_template, "include_existing", "checkbox-row")
+    assert _label_for_input_has_class(suggestions_template, "include_new", "checkbox-row")
+
+    suggestion_generation_template = _read_template("suggestion_generation_detail.html")
+    assert _label_for_input_has_class(
+        suggestion_generation_template,
+        "confirm_submit",
+        "checkbox-row",
+    )
 
 
 def test_settings_llm_preset_form_contract() -> None:
