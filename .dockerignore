@@ -17,7 +17,5 @@ tests
 CHANGELOG.md
 CONTRIBUTING.md
 Makefile
-package-lock.json
-package.json
 requirements-dev.txt
 scripts

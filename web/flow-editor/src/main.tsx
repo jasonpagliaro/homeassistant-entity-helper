@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { stringify as stringifyYaml } from "yaml";
 import "./styles.css";
@@ -9,12 +9,25 @@ import {
   createDefaultTrigger,
   FlowNode,
   FlowNodeKind,
+  FlowViewport,
   importAutomationDocument,
   normalizeAutomationDocument,
   prepareAutomationDocumentForSave,
   removeAtPath,
   updateAtPath,
 } from "./lib/flow-model";
+import {
+  areViewportsEqual,
+  clampViewport,
+  computeStageBounds,
+  fitViewportToStage,
+  FLOW_EDITOR_NODE_HEIGHT,
+  FLOW_EDITOR_NODE_WIDTH,
+  FLOW_EDITOR_ZOOM_STEP,
+  hasSavedViewport,
+  ViewportSize,
+  zoomViewportAtPoint,
+} from "./lib/viewport";
 
 type EditorCatalogs = {
   entities: Array<{ entity_id: string; friendly_name?: string; domain?: string }>;
@@ -33,6 +46,17 @@ type FlowEditorConfig = {
   saveFormId?: string | null;
   yamlTextareaId?: string | null;
 };
+
+type PointerPanState = {
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+};
+
+const DRAG_THRESHOLD_PX = 6;
 
 function parseConfig(elementId: string): FlowEditorConfig {
   const script = document.getElementById(elementId);
@@ -281,16 +305,116 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
     normalizeAutomationDocument(automationDocument),
     config.flowVariableKey,
   );
+  const stageBounds = computeStageBounds(graph.nodes);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(graph.nodes[0]?.id ?? null);
+  const [viewport, setViewport] = useState<FlowViewport>(graph.viewport);
+  const [canvasSize, setCanvasSize] = useState<ViewportSize>({ width: 0, height: 0 });
+  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const panStateRef = useRef<PointerPanState | null>(null);
+  const suppressNodeClickRef = useRef(false);
+  const suppressResetTimerRef = useRef<number | null>(null);
+  const viewportInitializedRef = useRef(false);
+  const graphWithViewport = { ...graph, viewport };
+  const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return undefined;
+    }
+
+    const updateSize = () => {
+      setCanvasSize({
+        width: canvas.clientWidth,
+        height: canvas.clientHeight,
+      });
+    };
+
+    updateSize();
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(updateSize);
+      observer.observe(canvas);
+    }
+    window.addEventListener("resize", updateSize);
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateSize);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (suppressResetTimerRef.current !== null) {
+        window.clearTimeout(suppressResetTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!graph.nodes.some((node) => node.id === selectedNodeId)) {
       setSelectedNodeId(graph.nodes[0]?.id ?? null);
     }
-    updateYamlTextarea(config, automationDocument, graph);
-  }, [automationDocument, selectedNodeId]);
+  }, [graph, selectedNodeId]);
 
-  const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+  useEffect(() => {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+      return;
+    }
+
+    setViewport((current) => {
+      const next = !viewportInitializedRef.current
+        ? hasSavedViewport(graph.viewport)
+          ? clampViewport(graph.viewport, stageBounds, canvasSize)
+          : fitViewportToStage(stageBounds, canvasSize)
+        : clampViewport(current, stageBounds, canvasSize);
+      viewportInitializedRef.current = true;
+      return areViewportsEqual(current, next) ? current : next;
+    });
+  }, [
+    canvasSize.height,
+    canvasSize.width,
+    graph.viewport.x,
+    graph.viewport.y,
+    graph.viewport.zoom,
+    stageBounds.height,
+    stageBounds.width,
+  ]);
+
+  useEffect(() => {
+    updateYamlTextarea(config, automationDocument, graphWithViewport);
+  }, [automationDocument, config, graphWithViewport]);
+
+  const queueSuppressReset = () => {
+    if (suppressResetTimerRef.current !== null) {
+      window.clearTimeout(suppressResetTimerRef.current);
+    }
+    suppressResetTimerRef.current = window.setTimeout(() => {
+      suppressNodeClickRef.current = false;
+      suppressResetTimerRef.current = null;
+    }, 0);
+  };
+
+  const updateViewport = (nextBuilder: (current: FlowViewport) => FlowViewport) => {
+    setViewport((current) => {
+      const next = nextBuilder(current);
+      return areViewportsEqual(current, next) ? current : next;
+    });
+  };
+
+  const stopPanning = () => {
+    const activePan = panStateRef.current;
+    panStateRef.current = null;
+    setIsPanning(false);
+    if (activePan?.moved) {
+      queueSuppressReset();
+    }
+  };
 
   const addTrigger = () =>
     setAutomationDocument((current) => appendToArrayPath(current, ["trigger"], createDefaultTrigger()));
@@ -301,7 +425,131 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
   const addAction = (kind: FlowNodeKind) =>
     setAutomationDocument((current) => appendToArrayPath(current, ["action"], createDefaultAction(kind)));
   const ensureVariables = () =>
-    setAutomationDocument((current) => updateAtPath(current, ["variables"], (current as any).variables ?? {}));
+    setAutomationDocument((current) =>
+      updateAtPath(current, ["variables"], (current as Record<string, unknown>).variables ?? {}),
+    );
+
+  const handleCanvasPointerDownCapture = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 2) {
+      return;
+    }
+    panStateRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: viewport.x,
+      startY: viewport.y,
+      moved: false,
+    };
+    suppressNodeClickRef.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsPanning(true);
+    event.preventDefault();
+  };
+
+  const handleCanvasPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const activePan = panStateRef.current;
+    if (!activePan || activePan.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - activePan.startClientX;
+    const deltaY = event.clientY - activePan.startClientY;
+    if (!activePan.moved && Math.hypot(deltaX, deltaY) >= DRAG_THRESHOLD_PX) {
+      activePan.moved = true;
+      suppressNodeClickRef.current = true;
+    }
+
+    updateViewport((current) =>
+      clampViewport(
+        {
+          x: activePan.startX + deltaX,
+          y: activePan.startY + deltaY,
+          zoom: current.zoom,
+        },
+        stageBounds,
+        canvasSize,
+      ),
+    );
+    event.preventDefault();
+  };
+
+  const handleCanvasPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (panStateRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    stopPanning();
+  };
+
+  const handleCanvasPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (panStateRef.current?.pointerId !== event.pointerId) {
+      return;
+    }
+    stopPanning();
+  };
+
+  const handleCanvasWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+      return;
+    }
+
+    const canvas = canvasRef.current;
+    if (!canvas || event.deltaY === 0) {
+      return;
+    }
+
+    const canvasRect = canvas.getBoundingClientRect();
+    const anchor = {
+      x: event.clientX - canvasRect.left,
+      y: event.clientY - canvasRect.top,
+    };
+
+    updateViewport((current) =>
+      zoomViewportAtPoint(
+        current,
+        current.zoom + (event.deltaY < 0 ? FLOW_EDITOR_ZOOM_STEP : -FLOW_EDITOR_ZOOM_STEP),
+        anchor,
+        stageBounds,
+        canvasSize,
+      ),
+    );
+    event.preventDefault();
+  };
+
+  const fitCanvas = () => {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+      return;
+    }
+    updateViewport(() => fitViewportToStage(stageBounds, canvasSize));
+  };
+
+  const zoomCanvas = (delta: number) => {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+      return;
+    }
+    const center = { x: canvasSize.width / 2, y: canvasSize.height / 2 };
+    updateViewport((current) =>
+      zoomViewportAtPoint(current, current.zoom + delta, center, stageBounds, canvasSize),
+    );
+  };
+
+  const resetZoom = () => {
+    if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+      return;
+    }
+    const center = { x: canvasSize.width / 2, y: canvasSize.height / 2 };
+    updateViewport((current) => zoomViewportAtPoint(current, 1, center, stageBounds, canvasSize));
+  };
+
+  const handleNodeSelect = (nodeId: string) => {
+    if (suppressNodeClickRef.current) {
+      return;
+    }
+    setSelectedNodeId(nodeId);
+  };
 
   return (
     <div className="flow-editor">
@@ -359,7 +607,7 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
             <button
               type="button"
               className="button-secondary"
-              onClick={() => submitFlowForm(config, automationDocument, graph)}
+              onClick={() => submitFlowForm(config, automationDocument, graphWithViewport)}
             >
               Save Flow Changes
             </button>
@@ -374,56 +622,111 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
         <div className="flash flash-warning">{graph.warnings.join(" ")}</div>
       ) : null}
 
-      <div className="flow-editor__layout">
-        <div className="flow-editor__canvas">
-          <svg className="flow-editor__edges" viewBox="0 0 1200 1200" preserveAspectRatio="xMinYMin slice">
-            {graph.edges.map((edge) => {
-              const source = graph.nodes.find((node) => node.id === edge.source);
-              const target = graph.nodes.find((node) => node.id === edge.target);
-              if (!source || !target) {
-                return null;
-              }
-              const x1 = source.position.x + 180;
-              const y1 = source.position.y + 40;
-              const x2 = target.position.x;
-              const y2 = target.position.y + 40;
-              return (
-                <g key={edge.id}>
-                  <path
-                    d={`M ${x1} ${y1} C ${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}`}
-                    className="flow-editor__edge-path"
-                  />
-                  {edge.label ? (
-                    <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 6} className="flow-editor__edge-label">
-                      {edge.label}
-                    </text>
-                  ) : null}
-                </g>
-              );
-            })}
-          </svg>
-
-          {graph.nodes.map((node) => (
+      <div className={`flow-editor__layout${inspectorCollapsed ? " is-inspector-collapsed" : ""}`}>
+        <div className={`flow-editor__canvas-shell${isPanning ? " is-panning" : ""}`}>
+          <div className="flow-editor__canvas-toolbar">
+            <div className="flow-editor__canvas-toolbar-group">
+              <button type="button" className="button-secondary" onClick={fitCanvas}>
+                Fit
+              </button>
+              <button type="button" className="button-secondary" onClick={resetZoom}>
+                100%
+              </button>
+              <button type="button" className="button-secondary" onClick={() => zoomCanvas(-FLOW_EDITOR_ZOOM_STEP)}>
+                -
+              </button>
+              <button type="button" className="button-secondary" onClick={() => zoomCanvas(FLOW_EDITOR_ZOOM_STEP)}>
+                +
+              </button>
+              <span className="flow-editor__zoom-readout">{Math.round(viewport.zoom * 100)}%</span>
+            </div>
             <button
-              key={node.id}
               type="button"
-              className={`flow-editor__node flow-editor__node--${node.kind}${selectedNodeId === node.id ? " is-selected" : ""}${node.locked ? " is-locked" : ""}`}
-              style={{ left: `${node.position.x}px`, top: `${node.position.y}px` }}
-              onClick={() => setSelectedNodeId(node.id)}
+              className="button-secondary"
+              onClick={() => setInspectorCollapsed((current) => !current)}
             >
-              <span className="flow-editor__node-title">{node.title}</span>
-              <span className="flow-editor__node-subtitle">{node.subtitle}</span>
+              {inspectorCollapsed ? "Show Inspector" : "Hide Inspector"}
             </button>
-          ))}
+          </div>
+
+          <div
+            ref={canvasRef}
+            className="flow-editor__canvas"
+            onContextMenu={(event) => event.preventDefault()}
+            onPointerDownCapture={handleCanvasPointerDownCapture}
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerCancel}
+            onLostPointerCapture={stopPanning}
+            onWheel={handleCanvasWheel}
+          >
+            <div
+              className="flow-editor__stage"
+              style={{
+                width: stageBounds.width,
+                height: stageBounds.height,
+                transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+              }}
+            >
+              <svg
+                className="flow-editor__edges"
+                viewBox={`0 0 ${stageBounds.width} ${stageBounds.height}`}
+                preserveAspectRatio="none"
+              >
+                {graph.edges.map((edge) => {
+                  const source = nodesById.get(edge.source);
+                  const target = nodesById.get(edge.target);
+                  if (!source || !target) {
+                    return null;
+                  }
+                  const x1 = source.position.x - stageBounds.minX + FLOW_EDITOR_NODE_WIDTH;
+                  const y1 = source.position.y - stageBounds.minY + FLOW_EDITOR_NODE_HEIGHT / 2;
+                  const x2 = target.position.x - stageBounds.minX;
+                  const y2 = target.position.y - stageBounds.minY + FLOW_EDITOR_NODE_HEIGHT / 2;
+                  return (
+                    <g key={edge.id}>
+                      <path
+                        d={`M ${x1} ${y1} C ${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}`}
+                        className="flow-editor__edge-path"
+                      />
+                      {edge.label ? (
+                        <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 6} className="flow-editor__edge-label">
+                          {edge.label}
+                        </text>
+                      ) : null}
+                    </g>
+                  );
+                })}
+              </svg>
+
+              {graph.nodes.map((node) => (
+                <button
+                  key={node.id}
+                  type="button"
+                  className={`flow-editor__node flow-editor__node--${node.kind}${selectedNodeId === node.id ? " is-selected" : ""}${node.locked ? " is-locked" : ""}`}
+                  style={{
+                    left: `${node.position.x - stageBounds.minX}px`,
+                    top: `${node.position.y - stageBounds.minY}px`,
+                  }}
+                  onClick={() => handleNodeSelect(node.id)}
+                >
+                  <span className="flow-editor__node-title">{node.title}</span>
+                  <span className="flow-editor__node-subtitle">{node.subtitle}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
-        <NodeEditor
-          config={config}
-          node={selectedNode}
-          automationDocument={automationDocument}
-          setAutomationDocument={setAutomationDocument}
-          graph={graph}
-        />
+        {inspectorCollapsed ? null : (
+          <NodeEditor
+            config={config}
+            node={selectedNode}
+            automationDocument={automationDocument}
+            setAutomationDocument={setAutomationDocument}
+            graph={graphWithViewport}
+          />
+        )}
       </div>
 
       <datalist id={`${config.editorId}-services`}>

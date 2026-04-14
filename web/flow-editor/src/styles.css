@@ -25,22 +25,77 @@
   gap: 16px;
 }
 
-.flow-editor__canvas {
-  position: relative;
+.flow-editor__layout.is-inspector-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.flow-editor__canvas-shell {
+  display: flex;
+  flex-direction: column;
   min-height: 720px;
-  overflow: auto;
   border: 1px solid var(--border);
   border-radius: 16px;
+  overflow: hidden;
   background:
     radial-gradient(circle at top left, rgba(0, 154, 199, 0.08), transparent 28%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(255, 255, 255, 0.9));
 }
 
+.flow-editor__canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.flow-editor__canvas-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.flow-editor__zoom-readout {
+  min-width: 52px;
+  padding: 0 4px;
+  color: var(--secondary-text-color);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.flow-editor__canvas {
+  position: relative;
+  min-height: 640px;
+  flex: 1;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+}
+
+.flow-editor__canvas-shell.is-panning .flow-editor__canvas,
+.flow-editor__canvas-shell.is-panning .flow-editor__node {
+  cursor: grabbing;
+}
+
+.flow-editor__stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  will-change: transform;
+}
+
 .flow-editor__edges {
   position: absolute;
   inset: 0;
-  width: 1200px;
-  height: 1200px;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
 }
 
@@ -175,7 +230,11 @@
     grid-template-columns: 1fr;
   }
 
-  .flow-editor__canvas {
+  .flow-editor__canvas-shell {
     min-height: 560px;
+  }
+
+  .flow-editor__canvas {
+    min-height: 500px;
   }
 }

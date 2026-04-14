@@ -46,7 +46,7 @@ describe("flow-model", () => {
     expect(graph.warnings.some((warning) => warning.includes("Unsupported action"))).toBe(true);
   });
 
-  it("round-trips saved positions from metadata", () => {
+  it("round-trips saved positions and viewport from metadata", () => {
     const document = normalizeAutomationDocument({
       alias: "Positioned",
       description: "",
@@ -61,6 +61,7 @@ describe("flow-model", () => {
       nodes: graph.nodes.map((node) =>
         node.id === "action__0" ? { ...node, position: { x: 999, y: 321 } } : node,
       ),
+      viewport: { x: -220, y: -80, zoom: 1.6 },
     });
     const saved = normalizeAutomationDocument({
       ...document,
@@ -73,6 +74,11 @@ describe("flow-model", () => {
     expect(reimported.nodes.find((node) => node.id === "action__0")?.position).toEqual({
       x: 999,
       y: 321,
+    });
+    expect(reimported.viewport).toEqual({
+      x: -220,
+      y: -80,
+      zoom: 1.6,
     });
   });
 });
