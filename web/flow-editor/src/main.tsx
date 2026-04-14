@@ -21,22 +21,25 @@ import {
   clampViewport,
   computeStageBounds,
   fitViewportToStage,
-  FLOW_EDITOR_NODE_HEIGHT,
-  FLOW_EDITOR_NODE_WIDTH,
   FLOW_EDITOR_ZOOM_STEP,
   hasSavedViewport,
   ViewportSize,
   zoomViewportAtPoint,
 } from "./lib/viewport";
+import {
+  getStageEdgeLayout,
+  getStageNodeLayout,
+  getStageRenderMetrics,
+} from "./lib/canvas-layout";
 
-type EditorCatalogs = {
+export type EditorCatalogs = {
   entities: Array<{ entity_id: string; friendly_name?: string; domain?: string }>;
   services: Array<{ service_id: string; name?: string; description?: string }>;
   automations: Array<{ entity_id: string; name?: string; config_key?: string }>;
   warnings: string[];
 };
 
-type FlowEditorConfig = {
+export type FlowEditorConfig = {
   editorId: string;
   pageKind: string;
   readOnly: boolean;
@@ -297,7 +300,7 @@ function NodeEditor({
   );
 }
 
-function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
+export function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
   const [automationDocument, setAutomationDocument] = useState<Record<string, unknown>>(() =>
     normalizeAutomationDocument(config.automationDocument),
   );
@@ -319,6 +322,7 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
   const graphWithViewport = { ...graph, viewport };
   const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
   const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const stageMetrics = getStageRenderMetrics(stageBounds, viewport.zoom);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -389,6 +393,53 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
   useEffect(() => {
     updateYamlTextarea(config, automationDocument, graphWithViewport);
   }, [automationDocument, config, graphWithViewport]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return undefined;
+    }
+
+    const handleCanvasWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) {
+        return;
+      }
+      if (canvasSize.width <= 0 || canvasSize.height <= 0 || event.deltaY === 0) {
+        return;
+      }
+
+      const canvasRect = canvas.getBoundingClientRect();
+      const anchor = {
+        x: event.clientX - canvasRect.left,
+        y: event.clientY - canvasRect.top,
+      };
+
+      event.preventDefault();
+      event.stopPropagation();
+      setViewport((current) => {
+        const next = zoomViewportAtPoint(
+          current,
+          current.zoom + (event.deltaY < 0 ? FLOW_EDITOR_ZOOM_STEP : -FLOW_EDITOR_ZOOM_STEP),
+          anchor,
+          stageBounds,
+          canvasSize,
+        );
+        return areViewportsEqual(current, next) ? current : next;
+      });
+    };
+
+    canvas.addEventListener("wheel", handleCanvasWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener("wheel", handleCanvasWheel);
+    };
+  }, [
+    canvasSize.height,
+    canvasSize.width,
+    stageBounds.height,
+    stageBounds.minX,
+    stageBounds.minY,
+    stageBounds.width,
+  ]);
 
   const queueSuppressReset = () => {
     if (suppressResetTimerRef.current !== null) {
@@ -489,34 +540,6 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
       return;
     }
     stopPanning();
-  };
-
-  const handleCanvasWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (canvasSize.width <= 0 || canvasSize.height <= 0) {
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    if (!canvas || event.deltaY === 0) {
-      return;
-    }
-
-    const canvasRect = canvas.getBoundingClientRect();
-    const anchor = {
-      x: event.clientX - canvasRect.left,
-      y: event.clientY - canvasRect.top,
-    };
-
-    updateViewport((current) =>
-      zoomViewportAtPoint(
-        current,
-        current.zoom + (event.deltaY < 0 ? FLOW_EDITOR_ZOOM_STEP : -FLOW_EDITOR_ZOOM_STEP),
-        anchor,
-        stageBounds,
-        canvasSize,
-      ),
-    );
-    event.preventDefault();
   };
 
   const fitCanvas = () => {
@@ -652,25 +675,26 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
           <div
             ref={canvasRef}
             className="flow-editor__canvas"
+            data-flow-editor-canvas="true"
             onContextMenu={(event) => event.preventDefault()}
             onPointerDownCapture={handleCanvasPointerDownCapture}
             onPointerMove={handleCanvasPointerMove}
             onPointerUp={handleCanvasPointerUp}
             onPointerCancel={handleCanvasPointerCancel}
             onLostPointerCapture={stopPanning}
-            onWheel={handleCanvasWheel}
           >
             <div
               className="flow-editor__stage"
               style={{
-                width: stageBounds.width,
-                height: stageBounds.height,
-                transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+                width: stageMetrics.stageWidth,
+                height: stageMetrics.stageHeight,
+                left: viewport.x,
+                top: viewport.y,
               }}
             >
               <svg
                 className="flow-editor__edges"
-                viewBox={`0 0 ${stageBounds.width} ${stageBounds.height}`}
+                viewBox={`0 0 ${stageMetrics.stageWidth} ${stageMetrics.stageHeight}`}
                 preserveAspectRatio="none"
               >
                 {graph.edges.map((edge) => {
@@ -679,18 +703,21 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
                   if (!source || !target) {
                     return null;
                   }
-                  const x1 = source.position.x - stageBounds.minX + FLOW_EDITOR_NODE_WIDTH;
-                  const y1 = source.position.y - stageBounds.minY + FLOW_EDITOR_NODE_HEIGHT / 2;
-                  const x2 = target.position.x - stageBounds.minX;
-                  const y2 = target.position.y - stageBounds.minY + FLOW_EDITOR_NODE_HEIGHT / 2;
+                  const layout = getStageEdgeLayout(source, target, stageBounds, stageMetrics);
                   return (
                     <g key={edge.id}>
                       <path
-                        d={`M ${x1} ${y1} C ${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}`}
+                        d={layout.path}
                         className="flow-editor__edge-path"
+                        style={{ strokeWidth: layout.strokeWidth }}
                       />
                       {edge.label ? (
-                        <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 - 6} className="flow-editor__edge-label">
+                        <text
+                          x={layout.labelX}
+                          y={layout.labelY}
+                          className="flow-editor__edge-label"
+                          style={{ fontSize: layout.labelFontSize }}
+                        >
                           {edge.label}
                         </text>
                       ) : null}
@@ -699,21 +726,33 @@ function FlowEditorApp({ config }: { config: FlowEditorConfig }) {
                 })}
               </svg>
 
-              {graph.nodes.map((node) => (
-                <button
-                  key={node.id}
-                  type="button"
-                  className={`flow-editor__node flow-editor__node--${node.kind}${selectedNodeId === node.id ? " is-selected" : ""}${node.locked ? " is-locked" : ""}`}
-                  style={{
-                    left: `${node.position.x - stageBounds.minX}px`,
-                    top: `${node.position.y - stageBounds.minY}px`,
-                  }}
-                  onClick={() => handleNodeSelect(node.id)}
-                >
-                  <span className="flow-editor__node-title">{node.title}</span>
-                  <span className="flow-editor__node-subtitle">{node.subtitle}</span>
-                </button>
-              ))}
+              {graph.nodes.map((node) => {
+                const layout = getStageNodeLayout(node, stageBounds, stageMetrics);
+                return (
+                  <button
+                    key={node.id}
+                    type="button"
+                    className={`flow-editor__node flow-editor__node--${node.kind}${selectedNodeId === node.id ? " is-selected" : ""}${node.locked ? " is-locked" : ""}`}
+                    style={{
+                      left: layout.left,
+                      top: layout.top,
+                      width: layout.width,
+                      minHeight: layout.minHeight,
+                      padding: layout.padding,
+                      gap: layout.gap,
+                      borderRadius: layout.borderRadius,
+                    }}
+                    onClick={() => handleNodeSelect(node.id)}
+                  >
+                    <span className="flow-editor__node-title" style={{ fontSize: layout.titleFontSize }}>
+                      {node.title}
+                    </span>
+                    <span className="flow-editor__node-subtitle" style={{ fontSize: layout.subtitleFontSize }}>
+                      {node.subtitle}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
