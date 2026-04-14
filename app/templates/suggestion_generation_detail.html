@@ -1,4 +1,9 @@
 {% extends "base.html" %}
+{% block head_extra %}
+  {% if flow_editor_config_json %}
+    <link rel="stylesheet" href="/static/flow-editor/flow-editor.css" />
+  {% endif %}
+{% endblock %}
 {% block content %}
 <section class="panel">
   <h2>Suggestion Generation #{{ generation.id }}</h2>
@@ -55,10 +60,29 @@
   <h3>Advanced Answers</h3>
   <pre>{{ answers }}</pre>
 
-  <h3>Current YAML</h3>
-  <pre>{{ generation.final_yaml_text or '' }}</pre>
-
   {% if generation.final_yaml_text %}
+    <div class="row between wrap gap-sm">
+      <h3>Automation Editor</h3>
+      {% if flow_editor_config_json %}
+        <div class="row gap-sm wrap flow-editor-toggle" data-flow-toggle-group="generation-{{ generation.id }}">
+          <button type="button" class="button-secondary is-active" data-flow-toggle-target="flow-panel-generation-{{ generation.id }}">Flow</button>
+          <button type="button" class="button-secondary" data-flow-toggle-target="yaml-panel-generation-{{ generation.id }}">YAML</button>
+        </div>
+      {% endif %}
+    </div>
+    {% if flow_editor_error %}
+      <div class="flash flash-warning">{{ flow_editor_error }}</div>
+    {% elif flow_editor_config_json %}
+      <div id="flow-panel-generation-{{ generation.id }}" data-flow-toggle-panel="flow-panel-generation-{{ generation.id }}">
+        <div
+          class="flow-editor-root"
+          data-flow-editor-root="true"
+          data-flow-editor-config-id="flow-editor-config-generation-{{ generation.id }}"
+        ></div>
+        <script id="flow-editor-config-generation-{{ generation.id }}" type="application/json">{{ flow_editor_config_json | safe }}</script>
+      </div>
+    {% endif %}
+
     <div class="row gap-sm wrap">
       <form method="post" action="/suggestions/generations/{{ generation.id }}/submit" class="grid-form compact">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -81,31 +105,44 @@
       </form>
     </div>
 
-    <h3>Tweak via LLM</h3>
-    <form method="post" action="/suggestions/generations/{{ generation.id }}/tweak" class="grid-form compact">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
-      <label>
-        Tweak Prompt
-        <input type="text" name="tweak_prompt" placeholder="Example: add a condition to suppress duplicate notifications" />
-      </label>
-      <div class="grid-form-actions">
-        <button type="submit">Apply LLM Tweak</button>
-      </div>
-    </form>
+    <div {% if flow_editor_config_json %}id="yaml-panel-generation-{{ generation.id }}" data-flow-toggle-panel="yaml-panel-generation-{{ generation.id }}" hidden{% endif %}>
+      <h3>Current YAML</h3>
+      <pre>{{ generation.final_yaml_text or '' }}</pre>
 
-    <h3>Manual YAML Edit</h3>
-    <form method="post" action="/suggestions/generations/{{ generation.id }}/manual-edit" class="grid-form compact">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
-      <label>
-        YAML
-        <textarea name="yaml_text" rows="14">{{ generation.final_yaml_text }}</textarea>
-      </label>
-      <div class="grid-form-actions">
-        <button type="submit">Save Manual Edit</button>
-      </div>
-    </form>
+      <h3>Tweak via LLM</h3>
+      <form method="post" action="/suggestions/generations/{{ generation.id }}/tweak" class="grid-form compact">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+        <label>
+          Tweak Prompt
+          <input type="text" name="tweak_prompt" placeholder="Example: add a condition to suppress duplicate notifications" />
+        </label>
+        <div class="grid-form-actions">
+          <button type="submit">Apply LLM Tweak</button>
+        </div>
+      </form>
+
+      <h3>Manual YAML Edit</h3>
+      <form
+        id="flow-editor-generation-form-{{ generation.id }}"
+        method="post"
+        action="/suggestions/generations/{{ generation.id }}/manual-edit"
+        class="grid-form compact"
+        data-flow-yaml-form="true"
+      >
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="next_url" value="/suggestions/generations/{{ generation.id }}?{{ build_query(profile_id=active_profile.id) }}" />
+        <input type="hidden" name="automation_json" value="" />
+        <input type="hidden" name="edit_origin" value="manual_edit" />
+        <label>
+          YAML
+          <textarea id="suggestion-generation-yaml-{{ generation.id }}" name="yaml_text" rows="14">{{ generation.final_yaml_text }}</textarea>
+        </label>
+        <div class="grid-form-actions">
+          <button type="submit">Save Manual Edit</button>
+        </div>
+      </form>
+    </div>
   {% endif %}
 
   <div class="row gap-sm wrap">
@@ -168,4 +205,9 @@
   <h3>Latest Revision Diff</h3>
   <pre>{{ diff_text or '' }}</pre>
 </section>
+{% endblock %}
+{% block scripts_extra %}
+  {% if flow_editor_config_json %}
+    <script type="module" src="/static/flow-editor/flow-editor.js"></script>
+  {% endif %}
 {% endblock %}

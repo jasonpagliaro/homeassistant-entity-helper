@@ -1,4 +1,9 @@
 {% extends "base.html" %}
+{% block head_extra %}
+  {% if flow_editor_config_json %}
+    <link rel="stylesheet" href="/static/flow-editor/flow-editor.css" />
+  {% endif %}
+{% endblock %}
 {% block content %}
 <section class="panel">
   <h2>Automation Adjustment Draft</h2>
@@ -75,14 +80,49 @@
 </section>
 
 <section class="panel">
+  <div class="row between wrap gap-sm">
+    <h3>Editor</h3>
+    {% if flow_editor_config_json %}
+      <div class="row gap-sm wrap flow-editor-toggle" data-flow-toggle-group="adjustment-{{ draft.id }}">
+        <button type="button" class="button-secondary is-active" data-flow-toggle-target="flow-panel-adjustment-{{ draft.id }}">Flow</button>
+        <button type="button" class="button-secondary" data-flow-toggle-target="yaml-panel-adjustment-{{ draft.id }}">YAML</button>
+      </div>
+    {% endif %}
+  </div>
+  {% if flow_editor_error %}
+    <div class="flash flash-warning">{{ flow_editor_error }}</div>
+  {% elif flow_editor_config_json %}
+    <div id="flow-panel-adjustment-{{ draft.id }}" data-flow-toggle-panel="flow-panel-adjustment-{{ draft.id }}">
+      <div
+        class="flow-editor-root"
+        data-flow-editor-root="true"
+        data-flow-editor-config-id="flow-editor-config-adjustment-{{ draft.id }}"
+      ></div>
+      <script id="flow-editor-config-adjustment-{{ draft.id }}" type="application/json">{{ flow_editor_config_json | safe }}</script>
+    </div>
+  {% endif %}
+</section>
+
+<section
+  class="panel"
+  {% if flow_editor_config_json %}id="yaml-panel-adjustment-{{ draft.id }}" data-flow-toggle-panel="yaml-panel-adjustment-{{ draft.id }}" hidden{% endif %}
+>
   <h3>Manual YAML Edit</h3>
-  <form method="post" action="/automation-adjustments/drafts/{{ draft.id }}/manual-edit" class="grid-form">
+  <form
+    id="flow-editor-adjustment-form-{{ draft.id }}"
+    method="post"
+    action="/automation-adjustments/drafts/{{ draft.id }}/manual-edit"
+    class="grid-form"
+    data-flow-yaml-form="true"
+  >
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <input type="hidden" name="profile_id" value="{{ draft.profile_id }}" />
     <input type="hidden" name="next_url" value="{{ default_next_url }}" />
+    <input type="hidden" name="automation_json" value="" />
+    <input type="hidden" name="edit_origin" value="manual_edit" />
     <label>
       YAML
-      <textarea name="yaml_text" rows="18">{{ draft.working_yaml_text }}</textarea>
+      <textarea id="automation-adjustment-yaml-{{ draft.id }}" name="yaml_text" rows="18">{{ draft.working_yaml_text }}</textarea>
     </label>
     <div class="grid-form-actions">
       <button type="submit" data-tooltip="Validate and save manual YAML edits to this draft.">Save Manual Edit</button>
@@ -195,4 +235,9 @@
     <p>No submit/test/revert actions recorded yet.</p>
   {% endif %}
 </section>
+{% endblock %}
+{% block scripts_extra %}
+  {% if flow_editor_config_json %}
+    <script type="module" src="/static/flow-editor/flow-editor.js"></script>
+  {% endif %}
 {% endblock %}

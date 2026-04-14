@@ -9,20 +9,36 @@
   },
   "scripts": {
     "bootstrap": "node scripts/npm/bootstrap.mjs",
-    "build": "npm run lint && npm run typecheck && npm run test",
+    "build": "npm run frontend:typecheck && npm run frontend:test && npm run frontend:build && npm run lint && npm run typecheck && npm run test",
     "docs:lint": "markdownlint-cli2 \"**/*.md\" \"#node_modules\" \"#.venv\" \"#data\"",
     "docs:links": "find . -name '*.md' -not -path './node_modules/*' -not -path './.venv/*' -not -path './.git/*' -not -path './.pytest_cache/*' -not -path './.mypy_cache/*' -not -path './.ruff_cache/*' -print0 | xargs -0 -n1 markdown-link-check -c .markdown-link-check.json",
     "docs:check": "npm run docs:lint && npm run docs:links",
+    "frontend:build": "vite build --config web/flow-editor/vite.config.ts",
+    "frontend:typecheck": "tsc --project web/flow-editor/tsconfig.json --noEmit",
+    "frontend:test": "vitest run --config web/flow-editor/vite.config.ts",
     "lint": "node scripts/npm/run-python.mjs -m ruff check app tests",
     "typecheck": "node scripts/npm/run-python.mjs -m mypy app tests",
     "test": "node scripts/npm/run-python.mjs -m pytest -q",
     "format": "node scripts/npm/run-python.mjs -m ruff check --fix app tests",
-    "run": "node scripts/npm/run-python.mjs -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
+    "run": "npm run frontend:build && node scripts/npm/run-python.mjs -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload",
     "db:migrate": "node scripts/npm/run-python.mjs -m alembic upgrade head",
     "clean": "node scripts/npm/clean.mjs"
   },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "yaml": "^2.8.1"
+  },
   "devDependencies": {
+    "@types/node": "^24.9.1",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "jsdom": "^27.1.0",
     "markdown-link-check": "^3.14.2",
-    "markdownlint-cli2": "^0.21.0"
+    "markdownlint-cli2": "^0.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vitest": "^3.2.4"
   }
 }

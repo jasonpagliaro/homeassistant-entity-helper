@@ -1,3 +1,12 @@
+FROM node:20-slim AS frontend-builder
+
+WORKDIR /src
+
+COPY package.json package-lock.json ./
+COPY web ./web
+RUN npm ci
+RUN npm run frontend:build
+
 FROM python:3.12-slim
 
 ARG HEV_BUILD_COMMIT_SHA
@@ -18,6 +27,7 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 COPY app ./app
+COPY --from=frontend-builder /src/app/static/flow-editor ./app/static/flow-editor
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 

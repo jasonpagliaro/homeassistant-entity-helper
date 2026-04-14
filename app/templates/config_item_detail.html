@@ -1,9 +1,28 @@
 {% extends "base.html" %}
+{% block head_extra %}
+  {% if flow_editor_config_json %}
+    <link rel="stylesheet" href="/static/flow-editor/flow-editor.css" />
+  {% endif %}
+{% endblock %}
 {% block content %}
 <section class="panel">
   <h2>Config Item Detail</h2>
   <div class="row gap-sm wrap">
     <a class="button" href="{{ back_url }}">Back to config items</a>
+    {% if snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
+      <form method="post" action="/automation-adjustments/start" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="profile_id" value="{{ profile.id }}" />
+        <input type="hidden" name="entity_id" value="{{ snapshot.entity_id }}" />
+        <input type="hidden" name="next_url" value="/config-items/{{ snapshot.id }}?{{ build_query(profile_id=profile.id, config_sync_run_id=sync_run.id) }}" />
+        <button
+          type="submit"
+          data-tooltip="Open this automation in the editable flow/YAML adjustment workflow."
+        >
+          Edit in Adjustment Flow
+        </button>
+      </form>
+    {% endif %}
     {% if active_llm_connection and snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
       <form
         method="post"
@@ -51,8 +70,33 @@
   <h3>References</h3>
   <pre>{{ references_pretty }}</pre>
 
-  <h3>Config</h3>
-  <pre>{{ config_pretty }}</pre>
+  {% if snapshot.kind == "automation" and snapshot.fetch_status == "success" %}
+    <h3>Automation Flow</h3>
+    {% if flow_editor_error %}
+      <div class="flash flash-warning">{{ flow_editor_error }}</div>
+    {% elif flow_editor_config_json %}
+      <div class="row gap-sm wrap flow-editor-toggle" data-flow-toggle-group="config-item-{{ snapshot.id }}">
+        <button type="button" class="button-secondary is-active" data-flow-toggle-target="flow-panel-config-{{ snapshot.id }}">Flow</button>
+        <button type="button" class="button-secondary" data-flow-toggle-target="yaml-panel-config-{{ snapshot.id }}">YAML</button>
+      </div>
+      <div id="flow-panel-config-{{ snapshot.id }}" data-flow-toggle-panel="flow-panel-config-{{ snapshot.id }}">
+        <div
+          class="flow-editor-root"
+          data-flow-editor-root="true"
+          data-flow-editor-config-id="flow-editor-config-config-{{ snapshot.id }}"
+        ></div>
+        <script id="flow-editor-config-config-{{ snapshot.id }}" type="application/json">{{ flow_editor_config_json | safe }}</script>
+      </div>
+      <div id="yaml-panel-config-{{ snapshot.id }}" data-flow-toggle-panel="yaml-panel-config-{{ snapshot.id }}" hidden>
+        <pre>{{ flow_editor_yaml or config_pretty }}</pre>
+      </div>
+    {% else %}
+      <pre>{{ config_pretty }}</pre>
+    {% endif %}
+  {% else %}
+    <h3>Config</h3>
+    <pre>{{ config_pretty }}</pre>
+  {% endif %}
 
   <h3>State Attributes</h3>
   <pre>{{ attributes_pretty }}</pre>
@@ -60,4 +104,9 @@
   <h3>Metadata</h3>
   <pre>{{ metadata_pretty }}</pre>
 </section>
+{% endblock %}
+{% block scripts_extra %}
+  {% if flow_editor_config_json %}
+    <script type="module" src="/static/flow-editor/flow-editor.js"></script>
+  {% endif %}
 {% endblock %}

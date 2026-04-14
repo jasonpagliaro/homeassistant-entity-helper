@@ -68,7 +68,7 @@ function selectedPythonCommand() {
   if (process.env.PYTHON && process.env.PYTHON.trim()) {
     return process.env.PYTHON.trim();
   }
-  return 'python3';
+  return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 function venvPythonPath() {
@@ -106,13 +106,17 @@ function writeRequirementsStamp(value) {
 }
 
 export function ensureBootstrap() {
-  const pythonCommand = selectedPythonCommand();
-  const version = ensurePythonVersion(pythonCommand);
   const venvPython = venvPythonPath();
+  let pythonCommand = selectedPythonCommand();
+  let version;
 
-  if (!existsSync(venvPython)) {
+  if (existsSync(venvPython)) {
+    version = ensurePythonVersion(venvPython);
+  } else {
+    version = ensurePythonVersion(pythonCommand);
     console.log(`[bootstrap] Creating virtual environment at ${venvDir}`);
     runCommand(pythonCommand, ['-m', 'venv', venvDir]);
+    version = ensurePythonVersion(venvPython);
   }
 
   const expectedHash = computeRequirementsHash();

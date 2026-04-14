@@ -21,7 +21,6 @@ from typing import Annotated, Any, TypedDict
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
-import yaml  # type: ignore[import-untyped]
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +30,13 @@ from sqlalchemy import and_, delete, func, or_
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.automation_documents import (
+    FLOW_VARIABLE_KEY,
+    normalize_automation_document,
+    parse_automation_json_text,
+    parse_automation_yaml_text,
+    yaml_from_automation_document,
+)
 from app.automation_drafts import (
     TEMPLATE_CATALOG,
     build_automation_structured_payload,
@@ -144,6 +150,7 @@ AUTOMATION_ADJUSTMENT_QUEUE_STATUSES = {
 AUTOMATION_ADJUSTMENT_REVISION_SOURCES = {
     "initial_import",
     "manual_edit",
+    "flow_edit",
     "ai_whole",
     "ai_section",
     "submit",
@@ -1318,6 +1325,118 @@ def get_latest_draft_run(session: Session, profile_id: int) -> AutomationDraftRu
     return session.exec(stmt).first()
 
 
+def build_flow_editor_catalogs(session: Session, profile_id: int) -> dict[str, Any]:
+    warnings: list[str] = []
+
+    entity_items: list[dict[str, str]] = []
+    latest_sync_run = get_latest_sync_run(session, profile_id)
+    if latest_sync_run is None:
+        warnings.append("No synced entities available for editor autocomplete.")
+    else:
+        entity_rows = list(
+            session.exec(
+                select(EntitySnapshot)
+                .where(
+                    EntitySnapshot.profile_id == profile_id,
+                    EntitySnapshot.sync_run_id == latest_sync_run.id,
+                )
+                .order_by(EntitySnapshot.entity_id.asc())
+                .limit(500)
+            ).all()
+        )
+        entity_items = [
+            {
+                "entity_id": row.entity_id,
+                "friendly_name": row.friendly_name or "",
+                "domain": row.domain,
+            }
+            for row in entity_rows
+        ]
+
+    service_items: list[dict[str, str]] = []
+    latest_service_run = get_latest_service_sync_run(session, profile_id)
+    if latest_service_run is None:
+        warnings.append("No synced services available for action autocomplete.")
+    else:
+        service_rows = list(
+            session.exec(
+                select(ServiceSnapshot)
+                .where(
+                    ServiceSnapshot.profile_id == profile_id,
+                    ServiceSnapshot.service_sync_run_id == latest_service_run.id,
+                )
+                .order_by(ServiceSnapshot.service_id.asc())
+                .limit(500)
+            ).all()
+        )
+        service_items = [
+            {
+                "service_id": row.service_id,
+                "name": row.name or "",
+                "description": row.description or "",
+            }
+            for row in service_rows
+        ]
+
+    automation_items: list[dict[str, str]] = []
+    latest_config_run = get_latest_config_sync_run(session, profile_id)
+    if latest_config_run is None:
+        warnings.append("No synced automations available for related-automation references.")
+    else:
+        automation_rows = list(
+            session.exec(
+                select(ConfigSnapshot)
+                .where(
+                    ConfigSnapshot.profile_id == profile_id,
+                    ConfigSnapshot.config_sync_run_id == latest_config_run.id,
+                    ConfigSnapshot.kind == "automation",
+                    ConfigSnapshot.fetch_status == "success",
+                )
+                .order_by(ConfigSnapshot.entity_id.asc())
+                .limit(300)
+            ).all()
+        )
+        automation_items = [
+            {
+                "entity_id": row.entity_id,
+                "name": row.name or "",
+                "config_key": row.config_key or "",
+            }
+            for row in automation_rows
+        ]
+
+    return {
+        "entities": entity_items,
+        "services": service_items,
+        "automations": automation_items,
+        "warnings": warnings,
+    }
+
+
+def build_flow_editor_config(
+    session: Session,
+    *,
+    profile_id: int,
+    automation_document: dict[str, Any],
+    read_only: bool,
+    editor_id: str,
+    page_kind: str,
+    save_form_id: str | None = None,
+    yaml_textarea_id: str | None = None,
+) -> str:
+    payload = {
+        "editorId": editor_id,
+        "pageKind": page_kind,
+        "readOnly": read_only,
+        "flowVariableKey": FLOW_VARIABLE_KEY,
+        "automationDocument": automation_document,
+        "catalogs": build_flow_editor_catalogs(session, profile_id),
+        "saveFormId": save_form_id,
+        "yamlTextareaId": yaml_textarea_id,
+    }
+    return safe_json_dump(payload)
+
+
 def get_profile_llm_connections(
     session: Session,
     profile_id: int,
@@ -2086,68 +2205,32 @@ def next_pending_question(step_index: int) -> dict[str, Any] | None:
 
 
 def normalize_automation_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
-    alias = str(raw_payload.get("alias", "")).strip()
-    if not alias:
-        raise ValueError("Automation payload must include alias.")
-
-    description = raw_payload.get("description")
-    if description is None:
-        description = ""
-    if not isinstance(description, str):
-        raise ValueError("Automation description must be a string.")
-
-    trigger = raw_payload.get("trigger")
-    if trigger is None:
-        trigger = raw_payload.get("triggers")
-    if not isinstance(trigger, list) or not trigger:
-        raise ValueError("Automation payload must include at least one trigger.")
-
-    condition = raw_payload.get("condition")
-    if condition is None:
-        condition = raw_payload.get("conditions")
-    if condition is None:
-        condition = []
-    if not isinstance(condition, list):
-        raise ValueError("Automation condition must be a list.")
-
-    action = raw_payload.get("action")
-    if action is None:
-        action = raw_payload.get("actions")
-    if not isinstance(action, list) or not action:
-        raise ValueError("Automation payload must include at least one action.")
-
-    mode = raw_payload.get("mode")
-    if not isinstance(mode, str) or not mode.strip():
-        mode = "single"
-
-    return {
-        "alias": alias,
-        "description": description.strip(),
-        "trigger": trigger,
-        "condition": condition,
-        "action": action,
-        "mode": mode.strip(),
-    }
+    return normalize_automation_document(raw_payload)
 
 
 def yaml_from_automation_payload(payload: dict[str, Any]) -> str:
-    yaml_text = yaml.safe_dump(
-        payload,
-        sort_keys=False,
-        allow_unicode=False,
-        default_flow_style=False,
-    )
-    return yaml_text.strip() + "\n"
+    return yaml_from_automation_document(payload)
 
 
 def parse_automation_yaml(yaml_text: str) -> dict[str, Any]:
-    try:
-        parsed = yaml.safe_load(yaml_text)
-    except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid YAML: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("Automation YAML must decode to an object.")
-    return normalize_automation_payload(parsed)
+    return parse_automation_yaml_text(yaml_text)
+
+
+def parse_automation_editor_input(
+    *,
+    yaml_text: str,
+    automation_json: str,
+    base_document: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_json = automation_json.strip()
+    if raw_json:
+        return parse_automation_json_text(raw_json, base_document=base_document)
+
+    raw_yaml = yaml_text.strip()
+    if raw_yaml:
+        return parse_automation_yaml_text(raw_yaml, base_document=base_document)
+
+    raise ValueError("Automation input cannot be empty.")
 
 
 def next_revision_index(session: Session, generation_id: int) -> int:
@@ -2857,7 +2940,10 @@ async def generate_yaml_from_concept(
     adjust_llm_timeout_for_payload(llm_settings, generation_payload)
     llm_client = OpenAICompatibleLLMClient(llm_settings)
     llm_response = await llm_client.chat_json(automation_generation_system_prompt(), generation_payload)
-    normalized = normalize_automation_payload(llm_response)
+    base_document: dict[str, Any] | None = None
+    if existing_yaml is not None and existing_yaml.strip():
+        base_document = parse_automation_yaml_text(existing_yaml)
+    normalized = normalize_automation_document(llm_response, base_document=base_document)
     return yaml_from_automation_payload(normalized), normalized
 
 
@@ -6180,6 +6266,21 @@ def create_app() -> FastAPI:
             and latest_test_action.new_entity_id
             and latest_test_action.old_entity_id
         )
+        flow_editor_config_json: str | None = None
+        flow_editor_error: str | None = None
+        try:
+            flow_editor_config_json = build_flow_editor_config(
+                session,
+                profile_id=active_profile.id,
+                automation_document=parse_adjustment_structured_payload(draft),
+                read_only=False,
+                editor_id=f"adjustment-{draft.id}",
+                page_kind="automation_adjustment_detail",
+                save_form_id=f"flow-editor-adjustment-form-{draft.id}",
+                yaml_textarea_id=f"automation-adjustment-yaml-{draft.id}",
+            )
+        except ValueError as exc:
+            flow_editor_error = str(exc)
 
         back_url = f"/automation-adjustments?{build_query(profile_id=draft.profile_id)}"
         return render_template(
@@ -6199,6 +6300,8 @@ def create_app() -> FastAPI:
                     "sections": ["alias", "description", "trigger", "condition", "action", "mode"],
                     "can_revert_test": can_revert_test,
                     "latest_test_action": latest_test_action,
+                    "flow_editor_config_json": flow_editor_config_json,
+                    "flow_editor_error": flow_editor_error,
                 },
                 active_profile,
             ),
@@ -6211,6 +6314,8 @@ def create_app() -> FastAPI:
         csrf_token: str = Form(...),
         profile_id: str = Form(default=""),
         yaml_text: str = Form(default=""),
+        automation_json: str = Form(default=""),
+        edit_origin: str = Form(default="manual_edit"),
         next_url: str = Form(default=""),
         session: Session = Depends(get_session),
     ) -> RedirectResponse:
@@ -6222,29 +6327,38 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Adjustment draft not found")
 
         redirect_target = next_url.strip() or f"/automation-adjustments/drafts/{draft_id}"
-        raw_yaml = yaml_text.strip()
-        if not raw_yaml:
-            set_flash(request, "error", "YAML cannot be empty.")
-            return RedirectResponse(
-                url=with_profile_id(redirect_target, draft.profile_id),
-                status_code=303,
-            )
+        normalized_origin = edit_origin.strip().lower()
+        current_document = parse_adjustment_structured_payload(draft)
 
         try:
-            normalized_payload = parse_automation_yaml(raw_yaml)
+            normalized_payload = parse_automation_editor_input(
+                yaml_text=yaml_text,
+                automation_json=automation_json,
+                base_document=current_document,
+            )
             apply_adjustment_payload_update(
                 session,
                 draft=draft,
                 structured_payload=normalized_payload,
-                source="manual_edit",
+                source="flow_edit" if normalized_origin == "flow_edit" else "manual_edit",
                 section=None,
                 prompt_text=None,
-                change_summary="Manual YAML edit.",
+                change_summary=(
+                    "Flow editor edit."
+                    if normalized_origin == "flow_edit"
+                    else "Manual YAML edit."
+                ),
             )
             draft.queue_status = normalize_adjustment_queue_status(draft.queue_status)
             session.add(draft)
             session.commit()
-            set_flash(request, "success", "Manual YAML edit saved.")
+            set_flash(
+                request,
+                "success",
+                "Flow editor changes saved."
+                if normalized_origin == "flow_edit"
+                else "Manual YAML edit saved.",
+            )
         except ValueError as exc:
             set_flash(request, "error", str(exc))
 
@@ -6326,6 +6440,10 @@ def create_app() -> FastAPI:
                 candidate_payload = nested_payload
             if not isinstance(candidate_payload, dict):
                 raise ValueError("LLM response must contain an automation object.")
+            candidate_payload = normalize_automation_document(
+                candidate_payload,
+                base_document=current_payload,
+            )
 
             apply_adjustment_payload_update(
                 session,
@@ -7970,6 +8088,24 @@ def create_app() -> FastAPI:
             pending_question = {}
         answers = parse_generation_answers(generation)
         concept_payload = concept_payload_from_proposal(proposal)
+        flow_editor_config_json: str | None = None
+        flow_editor_error: str | None = None
+        if generation.final_structured_json:
+            candidate_document = safe_json_load(generation.final_structured_json, {})
+            if isinstance(candidate_document, dict):
+                try:
+                    flow_editor_config_json = build_flow_editor_config(
+                        session,
+                        profile_id=active_profile.id,
+                        automation_document=normalize_automation_document(candidate_document),
+                        read_only=False,
+                        editor_id=f"suggestion-generation-{generation.id}",
+                        page_kind="suggestion_generation_detail",
+                        save_form_id=f"flow-editor-generation-form-{generation.id}",
+                        yaml_textarea_id=f"suggestion-generation-yaml-{generation.id}",
+                    )
+                except ValueError as exc:
+                    flow_editor_error = str(exc)
 
         return render_template(
             request,
@@ -7987,6 +8123,8 @@ def create_app() -> FastAPI:
                     "answers": answers,
                     "diff_text": generation_revision_diff_text(revisions),
                     "back_url": f"/suggestions/queue?{build_query(profile_id=active_profile.id)}",
+                    "flow_editor_config_json": flow_editor_config_json,
+                    "flow_editor_error": flow_editor_error,
                 },
                 active_profile,
             ),
@@ -8240,6 +8378,8 @@ def create_app() -> FastAPI:
         request: Request,
         csrf_token: str = Form(...),
         yaml_text: str = Form(default=""),
+        automation_json: str = Form(default=""),
+        edit_origin: str = Form(default="manual_edit"),
         next_url: str = Form(default=""),
         session: Session = Depends(get_session),
     ) -> RedirectResponse:
@@ -8253,13 +8393,22 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Generation proposal not found")
 
         redirect_target = next_url.strip() or f"/suggestions/generations/{generation_id}"
-        raw_yaml = yaml_text.strip()
-        if not raw_yaml:
-            set_flash(request, "error", "YAML cannot be empty.")
-            return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
+        normalized_origin = edit_origin.strip().lower()
 
         try:
-            normalized = parse_automation_yaml(raw_yaml)
+            base_document: dict[str, Any] | None = None
+            if generation.final_structured_json:
+                candidate = safe_json_load(generation.final_structured_json, {})
+                if isinstance(candidate, dict):
+                    try:
+                        base_document = normalize_automation_document(candidate)
+                    except ValueError:
+                        base_document = None
+            normalized = parse_automation_editor_input(
+                yaml_text=yaml_text,
+                automation_json=automation_json,
+                base_document=base_document,
+            )
         except ValueError as exc:
             set_flash(request, "error", str(exc))
             return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
@@ -8275,18 +8424,28 @@ def create_app() -> FastAPI:
         create_generation_revision(
             session,
             generation_id=generation.id if generation.id is not None else 0,
-            source="manual_edit",
+            source="flow_edit" if normalized_origin == "flow_edit" else "manual_edit",
             prompt_text=None,
             yaml_text=normalized_yaml,
             structured_payload=normalized,
-            change_summary="Manual YAML edit.",
+            change_summary=(
+                "Flow editor edit."
+                if normalized_origin == "flow_edit"
+                else "Manual YAML edit."
+            ),
         )
         proposal.queue_stage = "yaml_generated"
         proposal.queue_updated_at = utcnow()
         proposal.updated_at = utcnow()
         session.add(proposal)
         session.commit()
-        set_flash(request, "success", "Manual YAML edit saved.")
+        set_flash(
+            request,
+            "success",
+            "Flow editor changes saved."
+            if normalized_origin == "flow_edit"
+            else "Manual YAML edit saved.",
+        )
         return RedirectResponse(url=with_profile_id(redirect_target, proposal.profile_id), status_code=303)
 
     @app.post("/suggestions/generations/{generation_id}/cancel")
@@ -9117,6 +9276,25 @@ def create_app() -> FastAPI:
             profile_id=snapshot.profile_id,
             config_sync_run_id=snapshot.config_sync_run_id,
         )
+        flow_editor_config_json: str | None = None
+        flow_editor_yaml: str | None = None
+        flow_editor_error: str | None = None
+        if snapshot.kind == "automation" and snapshot.fetch_status == "success":
+            config_payload = safe_json_load(snapshot.config_json, {})
+            if isinstance(config_payload, dict):
+                try:
+                    normalized_document = normalize_automation_document(config_payload)
+                    flow_editor_config_json = build_flow_editor_config(
+                        session,
+                        profile_id=active_profile.id,
+                        automation_document=normalized_document,
+                        read_only=True,
+                        editor_id=f"config-item-{snapshot.id}",
+                        page_kind="config_item_detail",
+                    )
+                    flow_editor_yaml = yaml_from_automation_payload(normalized_document)
+                except ValueError as exc:
+                    flow_editor_error = str(exc)
 
         return render_template(
             request,
@@ -9135,6 +9313,9 @@ def create_app() -> FastAPI:
                     "metadata_pretty": safe_pretty_json(snapshot.metadata_json),
                     "back_url": f"/config-items?{back_query}",
                     "active_llm_connection": get_default_llm_connection(session, active_profile.id),
+                    "flow_editor_config_json": flow_editor_config_json,
+                    "flow_editor_yaml": flow_editor_yaml,
+                    "flow_editor_error": flow_editor_error,
                 },
                 active_profile,
             ),

@@ -294,6 +294,25 @@ def test_action_form_layout_contracts_on_draft_and_suggestion_pages() -> None:
     )
 
 
+def test_flow_editor_mount_points_and_hidden_fields_are_present() -> None:
+    config_item_template = _read_template("config_item_detail.html")
+    assert 'data-flow-editor-root="true"' in config_item_template
+    assert 'data-flow-toggle-target="flow-panel-config-' in config_item_template
+    assert "Edit in Adjustment Flow" in config_item_template
+
+    automation_adjustment_template = _read_template("automation_adjustment_detail.html")
+    assert 'data-flow-editor-root="true"' in automation_adjustment_template
+    assert 'name="automation_json"' in automation_adjustment_template
+    assert 'name="edit_origin"' in automation_adjustment_template
+    assert 'id="flow-editor-adjustment-form-' in automation_adjustment_template
+
+    suggestion_generation_template = _read_template("suggestion_generation_detail.html")
+    assert 'data-flow-editor-root="true"' in suggestion_generation_template
+    assert 'name="automation_json"' in suggestion_generation_template
+    assert 'name="edit_origin"' in suggestion_generation_template
+    assert 'id="flow-editor-generation-form-' in suggestion_generation_template
+
+
 def test_settings_llm_preset_form_contract() -> None:
     template = _read_template("settings.html")
     assert 'data-llm-form="true"' in template

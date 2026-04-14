@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml  # type: ignore[import-untyped]
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
@@ -28,6 +29,8 @@ from app.models import (
     Profile,
     ServiceSnapshot,
     ServiceSyncRun,
+    SuggestionGeneration,
+    SuggestionGenerationRevision,
     SuggestionProposal,
     SuggestionRun,
     SyncRun,
@@ -210,6 +213,7 @@ def seed_adjustment_draft(
     source_entity_id: str = "automation.evening_mode",
     source_config_key: str = "evening_mode",
     alias: str = "Evening Mode",
+    extra_payload: dict[str, Any] | None = None,
 ) -> int:
     now = utcnow()
     payload = {
@@ -220,19 +224,9 @@ def seed_adjustment_draft(
         "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
         "mode": "single",
     }
-    yaml_text = (
-        f"alias: {alias}\n"
-        "description: Initial draft\n"
-        "trigger:\n"
-        "  - platform: time\n"
-        "    at: '19:00:00'\n"
-        "condition: []\n"
-        "action:\n"
-        "  - service: light.turn_on\n"
-        "    target:\n"
-        "      entity_id: light.kitchen\n"
-        "mode: single\n"
-    )
+    if extra_payload:
+        payload.update(extra_payload)
+    yaml_text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=False).strip() + "\n"
     with Session(db.get_engine()) as session:
         draft = AutomationAdjustmentDraft(
             profile_id=profile_id,
@@ -411,6 +405,124 @@ def seed_suggestion_run_with_proposals(
             assert item.id is not None
 
         return run.id, [item.id for item in proposals if item.id is not None]
+
+
+def seed_generation(
+    profile_id: int,
+    connection_id: int,
+    *,
+    final_payload: dict[str, Any] | None = None,
+) -> tuple[int, int]:
+    now = utcnow()
+    payload = final_payload or {
+        "alias": "Generated Automation",
+        "description": "Generated from concept",
+        "trigger": [{"platform": "time", "at": "20:00:00"}],
+        "condition": [],
+        "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+        "mode": "single",
+    }
+    yaml_text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=False).strip() + "\n"
+
+    with Session(db.get_engine()) as session:
+        run = SuggestionRun(
+            profile_id=profile_id,
+            llm_connection_id=connection_id,
+            config_sync_run_id=None,
+            run_kind="concept_v2",
+            idea_type="general",
+            custom_intent=None,
+            mode="standard",
+            top_k=5,
+            include_existing=True,
+            include_new=True,
+            status="succeeded",
+            target_count=1,
+            processed_count=1,
+            success_count=1,
+            invalid_count=0,
+            error_count=0,
+            error=None,
+            context_hash=None,
+            filters_json=json.dumps({}),
+            result_summary_json=json.dumps({"target_count": 1}),
+            started_at=now,
+            finished_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        assert run.id is not None
+
+        proposal = SuggestionProposal(
+            profile_id=profile_id,
+            suggestion_run_id=run.id,
+            config_snapshot_id=None,
+            target_entity_id="automation.generated",
+            status="proposed",
+            summary="Generated proposal",
+            confidence=0.8,
+            risk_level="low",
+            concept_payload_json=json.dumps({"title": "Generated proposal"}),
+            concept_type="general",
+            impact_score=0.7,
+            feasibility_score=0.8,
+            novelty_score=0.4,
+            ranking_score=0.72,
+            ranking_breakdown_json=json.dumps({"weighted_total": 0.72}),
+            duplicate_fingerprint=None,
+            queue_stage="yaml_generated",
+            queue_note=None,
+            queue_updated_at=now,
+            proposed_patch_json=None,
+            verification_steps_json=json.dumps(["Check traces"]),
+            raw_response_json=json.dumps({}),
+            validation_error=None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(proposal)
+        session.commit()
+        session.refresh(proposal)
+        assert proposal.id is not None
+
+        generation = SuggestionGeneration(
+            proposal_id=proposal.id,
+            profile_id=profile_id,
+            llm_connection_id=connection_id,
+            mode="auto",
+            status="completed",
+            optional_instruction=None,
+            current_step=0,
+            pending_question_json=None,
+            planning_answers_json=json.dumps({}),
+            final_yaml_text=yaml_text,
+            final_structured_json=json.dumps(payload),
+            error=None,
+            created_at=now,
+            updated_at=now,
+            finished_at=now,
+        )
+        session.add(generation)
+        session.commit()
+        session.refresh(generation)
+        assert generation.id is not None
+
+        revision = SuggestionGenerationRevision(
+            generation_id=generation.id,
+            revision_index=1,
+            source="initial",
+            prompt_text=None,
+            yaml_text=yaml_text,
+            structured_json=json.dumps(payload),
+            change_summary="Initial generation.",
+            created_at=now,
+        )
+        session.add(revision)
+        session.commit()
+        return proposal.id, generation.id
 
 
 def wait_for_suggestion_run(
@@ -1426,7 +1538,22 @@ def test_sync_config_items_list_and_detail_flow(
     assert detail_response.status_code == 200
     assert "Goodnight" in detail_response.text
     assert "sequence_count" in detail_response.text
-    assert "scene.movie_time" in detail_response.text
+
+
+def test_config_item_detail_renders_flow_editor_for_automation(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="config-flow")
+    config_sync_run_id, snapshot_id = seed_config_snapshot(profile_id)
+
+    detail_response = client.get(
+        f"/config-items/{snapshot_id}?profile_id={profile_id}&config_sync_run_id={config_sync_run_id}"
+    )
+    assert detail_response.status_code == 200
+    assert 'data-flow-editor-root="true"' in detail_response.text
+    assert "Edit in Adjustment Flow" in detail_response.text
+    assert 'data-flow-toggle-target="flow-panel-config-' in detail_response.text
 
 
 def test_sync_config_items_partial_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2231,6 +2358,80 @@ def test_start_adjustment_draft_creates_initial_revision(
         assert revisions[0].source == "initial_import"
 
 
+def test_start_adjustment_draft_preserves_existing_flow_metadata(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-flow-import")
+
+    async def fake_fetch_live_automation_rows(_: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        return (
+            [
+                {
+                    "entity_id": "automation.evening_mode",
+                    "alias": "Evening Mode",
+                    "state": "on",
+                    "is_enabled": True,
+                    "area_id": None,
+                    "area_name": None,
+                    "labels": [],
+                    "label_ids": [],
+                    "platform": "automation",
+                    "hidden_by": None,
+                    "disabled_by": None,
+                    "config_key": "evening_mode",
+                    "last_updated": None,
+                }
+            ],
+            [],
+            "[]",
+        )
+
+    async def fake_fetch_automation_config_ws(_: Any, entity_id: str) -> dict[str, Any]:
+        assert entity_id == "automation.evening_mode"
+        return {
+            "alias": "Evening Mode",
+            "description": "From HA",
+            "trigger": [{"platform": "time", "at": "19:00:00"}],
+            "condition": [],
+            "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+            "mode": "single",
+            "variables": {
+                "threshold": 3,
+                "_haev_flow": {"version": 1, "nodes": [{"id": "action__0", "x": 20, "y": 30}]},
+            },
+        }
+
+    monkeypatch.setattr("app.main.fetch_live_automation_rows", fake_fetch_live_automation_rows)
+    monkeypatch.setattr("app.main.HAClient.fetch_automation_config_ws", fake_fetch_automation_config_ws)
+
+    start_response = client.post(
+        "/automation-adjustments/start",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "entity_id": "automation.evening_mode",
+            "next_url": f"/automation-adjustments?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert start_response.status_code == 303
+    location = start_response.headers.get("location", "")
+    match = re.search(r"/automation-adjustments/drafts/(\d+)\?", location)
+    assert match is not None
+    draft_id = int(match.group(1))
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        structured_payload = json.loads(draft.working_structured_json)
+        assert structured_payload["variables"]["threshold"] == 3
+        assert structured_payload["variables"]["_haev_flow"]["version"] == 1
+
+
 def test_adjustment_draft_manual_edit_and_queue_transitions(client: TestClient) -> None:
     settings_response = client.get("/settings")
     assert settings_response.status_code == 200
@@ -2306,6 +2507,60 @@ def test_adjustment_draft_manual_edit_and_queue_transitions(client: TestClient) 
         draft = session.get(AutomationAdjustmentDraft, draft_id)
         assert draft is not None
         assert draft.queue_status == "draft"
+
+
+def test_adjustment_flow_edit_saves_full_document_and_revision_source(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-flow-save")
+    draft_id = seed_adjustment_draft(
+        profile_id,
+        extra_payload={"variables": {"threshold": 3}},
+    )
+
+    flow_payload = {
+        "alias": "Evening Mode Flow",
+        "description": "Saved from flow editor",
+        "trigger": [{"platform": "time", "at": "20:15:00"}],
+        "condition": [],
+        "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+        "mode": "single",
+        "variables": {
+            "threshold": 3,
+            "_haev_flow": {"version": 1, "nodes": [{"id": "action__0", "x": 44, "y": 55}]},
+        },
+        "trace": {"stored_traces": 10},
+    }
+
+    edit_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/manual-edit",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+            "yaml_text": "",
+            "automation_json": json.dumps(flow_payload),
+            "edit_origin": "flow_edit",
+        },
+        follow_redirects=False,
+    )
+    assert edit_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        draft = session.get(AutomationAdjustmentDraft, draft_id)
+        assert draft is not None
+        structured_payload = json.loads(draft.working_structured_json)
+        assert structured_payload["trace"]["stored_traces"] == 10
+        assert structured_payload["variables"]["_haev_flow"]["version"] == 1
+        revision_sources = list(
+            session.exec(
+                select(AutomationAdjustmentRevision.source).where(
+                    AutomationAdjustmentRevision.draft_id == draft_id
+                )
+            ).all()
+        )
+        assert "flow_edit" in revision_sources
 
 
 def test_adjustment_ai_whole_and_section_updates_draft(
@@ -2432,6 +2687,126 @@ def test_adjustment_submit_records_success_action(
             ).all()
         )
         assert "submit" in revision_sources
+
+
+def test_adjustment_submit_preserves_flow_metadata_and_extra_fields(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="adjust-submit-flow")
+    draft_id = seed_adjustment_draft(
+        profile_id,
+        extra_payload={
+            "variables": {
+                "_haev_flow": {"version": 1, "nodes": [{"id": "action__0", "x": 10, "y": 20}]}
+            },
+            "trace": {"stored_traces": 7},
+        },
+    )
+
+    submitted_payload: dict[str, Any] = {}
+
+    async def fake_upsert(_: Any, config_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert config_key == "evening_mode"
+        submitted_payload.update(payload)
+        return {"result": "ok"}
+
+    monkeypatch.setattr("app.main.HAClient.upsert_automation_config", fake_upsert)
+
+    submit_response = client.post(
+        f"/automation-adjustments/drafts/{draft_id}/submit",
+        data={
+            "csrf_token": csrf_token,
+            "profile_id": str(profile_id),
+            "confirm_submit": "on",
+            "next_url": f"/automation-adjustments/drafts/{draft_id}?profile_id={profile_id}",
+        },
+        follow_redirects=False,
+    )
+    assert submit_response.status_code == 303
+    assert submitted_payload["trace"]["stored_traces"] == 7
+    assert submitted_payload["variables"]["_haev_flow"]["version"] == 1
+
+
+def test_suggestion_generation_flow_edit_saves_full_document(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="generation-flow-save")
+    connection_id = seed_default_llm_connection(profile_id, name="Generation LLM")
+    _, generation_id = seed_generation(profile_id, connection_id)
+
+    flow_payload = {
+        "alias": "Generated Flow Variant",
+        "description": "Flow saved",
+        "trigger": [{"platform": "time", "at": "21:30:00"}],
+        "condition": [],
+        "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+        "mode": "single",
+        "variables": {
+            "_haev_flow": {"version": 1, "nodes": [{"id": "action__0", "x": 14, "y": 18}]}
+        },
+        "trace": {"stored_traces": 11},
+    }
+
+    save_response = client.post(
+        f"/suggestions/generations/{generation_id}/manual-edit",
+        data={
+            "csrf_token": csrf_token,
+            "next_url": f"/suggestions/generations/{generation_id}?profile_id={profile_id}",
+            "yaml_text": "",
+            "automation_json": json.dumps(flow_payload),
+            "edit_origin": "flow_edit",
+        },
+        follow_redirects=False,
+    )
+    assert save_response.status_code == 303
+
+    with Session(db.get_engine()) as session:
+        generation = session.get(SuggestionGeneration, generation_id)
+        assert generation is not None
+        structured_payload = json.loads(generation.final_structured_json or "{}")
+        assert structured_payload["trace"]["stored_traces"] == 11
+        assert structured_payload["variables"]["_haev_flow"]["version"] == 1
+        revisions = list(
+            session.exec(
+                select(SuggestionGenerationRevision).where(
+                    SuggestionGenerationRevision.generation_id == generation_id
+                )
+            ).all()
+        )
+        assert any(item.source == "flow_edit" for item in revisions)
+
+
+def test_suggestion_generation_detail_renders_flow_editor(client: TestClient) -> None:
+    settings_response = client.get("/settings")
+    assert settings_response.status_code == 200
+    csrf_token = extract_csrf(settings_response.text)
+    profile_id = create_profile(client, csrf_token, name="generation-flow-detail")
+    connection_id = seed_default_llm_connection(profile_id, name="Generation Detail LLM")
+    _, generation_id = seed_generation(
+        profile_id,
+        connection_id,
+        final_payload={
+            "alias": "Generated Detail",
+            "description": "Flow detail",
+            "trigger": [{"platform": "time", "at": "21:00:00"}],
+            "condition": [],
+            "action": [{"service": "light.turn_on", "target": {"entity_id": "light.kitchen"}}],
+            "mode": "single",
+            "variables": {"_haev_flow": {"version": 1, "nodes": []}},
+        },
+    )
+
+    detail_response = client.get(
+        f"/suggestions/generations/{generation_id}?profile_id={profile_id}"
+    )
+    assert detail_response.status_code == 200
+    assert 'data-flow-editor-root="true"' in detail_response.text
+    assert 'data-flow-toggle-target="flow-panel-generation-' in detail_response.text
 
 
 def test_adjustment_test_and_revert_actions(
